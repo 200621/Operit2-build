@@ -43,3 +43,5 @@ pub mod HeadlessToolApprovalPolicy;
 pub mod ToolCatalog;
 #[path = "PurePortSupplementary.rs"]
 pub mod PurePortSupplementary;
+#[path = "AgentNamespace.rs"]
+pub mod AgentNamespace;
