@@ -46,11 +46,12 @@ pub fn truncate_tool_result(
         let head = text[..head_end].trim_end();
         let elided = text.len() - head.len();
         let rendered = format!("{}{}", head, elision_marker(elided));
+        let result_tokens = estimate_tokens(&rendered);
         return TruncationOutcome {
             text: rendered,
             truncated: true,
             original_tokens,
-            result_tokens: estimate_tokens(&rendered),
+            result_tokens,
             head_chars: head.len(),
             tail_chars: 0,
             elided_chars: elided,
@@ -61,14 +62,17 @@ pub fn truncate_tool_result(
     let tail = &text[tail_start..];
     let elided = tail_start - head_end;
     let rendered = format!("{}{}{}", head, elision_marker(elided), tail);
+    let result_tokens = estimate_tokens(&rendered);
+    let head_chars = head.len();
+    let tail_chars = tail.len();
 
     TruncationOutcome {
         text: rendered,
         truncated: true,
         original_tokens,
-        result_tokens: estimate_tokens(&rendered),
-        head_chars: head.len(),
-        tail_chars: tail.len(),
+        result_tokens,
+        head_chars,
+        tail_chars,
         elided_chars: elided,
     }
 }
@@ -147,11 +151,11 @@ mod tests {
 
     #[test]
     fn estimate_tokens_ascii() {
-        assert_eq!(estimate_tokens("hello"), 2); // 5 ascii = (5+2)/3 = 2
+        assert_eq!(estimate_tokens("hello"), 2);
     }
 
     #[test]
     fn estimate_tokens_non_ascii() {
-        assert_eq!(estimate_tokens("你好"), 2); // 2 non-ascii = 2 tokens
+        assert_eq!(estimate_tokens("你好"), 2);
     }
 }

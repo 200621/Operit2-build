@@ -739,8 +739,13 @@ impl SubAgentContextDigest {
         let cleaned: Vec<(String, String)> = turns.iter()
             .map(|(r, t)| (r.trim().to_lowercase(), t.trim().to_string()))
             .filter(|(_, t)| !t.is_empty())
-            .take_last(Self::MAX_TURNS)
-            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .take(Self::MAX_TURNS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .collect();
         if cleaned.is_empty() { return None; }
 
