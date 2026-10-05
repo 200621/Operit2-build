@@ -242,14 +242,14 @@ impl UsagePriceTable {
         for (index, entry) in spec.entries.iter().enumerate() {
             let provider = entry.provider_name.trim().to_string();
             let model = entry.model_id.trim().to_string();
-            let reason = if index >= Self::MAX_ENTRIES {
-                format!("table exceeds {} entries", Self::MAX_ENTRIES)
+            let reason: Option<String> = if index >= Self::MAX_ENTRIES {
+                Some(format!("table exceeds {} entries", Self::MAX_ENTRIES))
             } else if provider.is_empty() {
-                "blank provider name".to_string()
+                Some("blank provider name".to_string())
             } else if model.is_empty() {
-                "blank model id".to_string()
+                Some("blank model id".to_string())
             } else if !seen.insert(format!("{}\u{0000}{}", provider, model)) {
-                format!("duplicate entry for {} / {}", provider, model)
+                Some(format!("duplicate entry for {} / {}", provider, model))
             } else {
                 Self::price_problem(entry).or_else(|| Self::window_problem(&entry.peak_windows))
             };
