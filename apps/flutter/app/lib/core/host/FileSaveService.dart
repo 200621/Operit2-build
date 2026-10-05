@@ -4,10 +4,24 @@ import 'dart:typed_data';
 
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 
-/// Saves byte payloads through the registered file-selector platform implementation.
+/// Saves payloads and host-backed files through the registered file-selector implementation.
 class FileSaveService {
   /// Prevents instantiation of the file save service.
   FileSaveService._();
+
+  /// Saves a generated host file without materializing its bytes in Flutter.
+  static Future<String?> saveGeneratedFile({
+    required Future<XFile> Function() generate,
+    required String name,
+    required List<XTypeGroup> acceptedTypeGroups,
+  }) async {
+    final location = await FileSelectorPlatform.instance.saveGeneratedFile(
+      generate: generate,
+      acceptedTypeGroups: acceptedTypeGroups,
+      options: SaveDialogOptions(suggestedName: name),
+    );
+    return location?.path;
+  }
 
   /// Saves [bytes] to a native location selected by the user.
   static Future<String?> saveBytes({

@@ -93,7 +93,7 @@ pub struct NativeArchiveStagingHost {
 /// Tracks the declared length and lifecycle state of one current-process archive upload.
 #[derive(Clone, Debug)]
 struct NativeArchiveUpload {
-    expectedByteLength: u64,
+    expectedByteLength: Option<u64>,
     sealed: bool,
 }
 
@@ -115,6 +115,39 @@ impl NativeArchiveStagingHost {
             .file_name()
             .expect("runtime root must have a final segment for archive staging");
         parent.join("archive_staging").join(name)
+    }
+
+    /// Creates an archive with an explicit upload or growable-export length contract.
+    fn createPendingArchive(
+        &self,
+        archiveId: &str,
+        expectedByteLength: Option<u64>,
+    ) -> HostResult<()> {
+        let path = self.uploadingArchivePath(archiveId)?;
+        let sealedPath = self.sealedArchivePath(archiveId)?;
+        let mut uploads = self
+            .uploads
+            .lock()
+            .map_err(|_| HostError::new("Archive staging upload state is poisoned"))?;
+        if uploads.contains_key(archiveId) {
+            return Err(HostError::new("Archive staging ID already exists"));
+        }
+        fs::create_dir_all(self.stagingRoot())?;
+        if sealedPath.exists() {
+            return Err(HostError::new("Archive staging ID already exists"));
+        }
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)?;
+        uploads.insert(
+            archiveId.to_string(),
+            NativeArchiveUpload {
+                expectedByteLength,
+                sealed: false,
+            },
+        );
+        Ok(())
     }
 
     /// Returns the private directory containing staged archive files.
@@ -150,31 +183,58 @@ impl NativeArchiveStagingHost {
 impl ArchiveStagingHost for NativeArchiveStagingHost {
     /// Creates one empty private staging file without replacing an existing upload.
     fn createArchive(&self, archiveId: &str, expectedByteLength: u64) -> HostResult<()> {
-        let path = self.uploadingArchivePath(archiveId)?;
-        let sealedPath = self.sealedArchivePath(archiveId)?;
-        let mut uploads = self
+        self.createPendingArchive(archiveId, Some(expectedByteLength))
+    }
+
+    /// Creates a growable output file for a streamed snapshot export.
+    fn createExportArchive(&self, archiveId: &str) -> HostResult<()> {
+        self.createPendingArchive(archiveId, None)
+    }
+
+    /// Writes a bounded export range without loading the archive into memory.
+    fn writeExportArchive(&self, archiveId: &str, offset: u64, chunk: &[u8]) -> HostResult<()> {
+        if chunk.len() > 64 * 1024 {
+            return Err(HostError::new("Snapshot export chunk exceeds 64 KiB"));
+        }
+        let uploads = self
             .uploads
             .lock()
-            .map_err(|_| HostError::new("Archive staging upload state is poisoned"))?;
-        if uploads.contains_key(archiveId) {
-            return Err(HostError::new("Archive staging ID already exists"));
+            .map_err(|_| HostError::new("Archive staging state is poisoned"))?;
+        let upload = uploads
+            .get(archiveId)
+            .ok_or_else(|| HostError::new("Archive staging ID does not exist"))?;
+        if upload.sealed || upload.expectedByteLength.is_some() {
+            return Err(HostError::new("Archive is not an active snapshot export"));
         }
-        fs::create_dir_all(self.stagingRoot())?;
-        if sealedPath.exists() {
-            return Err(HostError::new("Archive staging ID already exists"));
-        }
-        fs::OpenOptions::new()
-            .create_new(true)
+        let mut file = fs::OpenOptions::new()
             .write(true)
-            .open(path)?;
-        uploads.insert(
-            archiveId.to_string(),
-            NativeArchiveUpload {
-                expectedByteLength,
-                sealed: false,
-            },
-        );
+            .open(self.uploadingArchivePath(archiveId)?)?;
+        if offset > file.metadata()?.len() {
+            return Err(HostError::new(
+                "Snapshot write starts beyond the current output",
+            ));
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(chunk)?;
         Ok(())
+    }
+
+    /// Exposes the sealed staging file as a platform-saveable file reference.
+    fn archiveFileReference(&self, archiveId: &str) -> HostResult<String> {
+        let uploads = self
+            .uploads
+            .lock()
+            .map_err(|_| HostError::new("Archive staging state is poisoned"))?;
+        let upload = uploads
+            .get(archiveId)
+            .ok_or_else(|| HostError::new("Archive staging ID does not exist"))?;
+        if !upload.sealed {
+            return Err(HostError::new("Archive must be sealed before saving"));
+        }
+        self.sealedArchivePath(archiveId)?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::new("Snapshot file path is not valid UTF-8"))
     }
 
     /// Appends one ordered upload chunk to the private staging file.
@@ -193,6 +253,7 @@ impl ArchiveStagingHost for NativeArchiveStagingHost {
         let currentByteLength = fs::metadata(&path)?.len();
         let remainingByteLength = upload
             .expectedByteLength
+            .ok_or_else(|| HostError::new("Export archives require ranged writes"))?
             .checked_sub(currentByteLength)
             .ok_or_else(|| {
                 HostError::new("Archive staging upload exceeds its declared byte length")
@@ -225,7 +286,10 @@ impl ArchiveStagingHost for NativeArchiveStagingHost {
             return Ok(fs::metadata(sealedPath)?.len());
         }
         let actualByteLength = fs::metadata(&uploadingPath)?.len();
-        if actualByteLength != upload.expectedByteLength {
+        if upload
+            .expectedByteLength
+            .is_some_and(|expected| actualByteLength != expected)
+        {
             return Err(HostError::new(
                 "Archive staging upload does not match its declared byte length",
             ));
@@ -803,6 +867,49 @@ mod tests {
     use operit_host_api::{ArchiveStagingHost, RuntimeStorageHost, RuntimeStorageWriteHost};
 
     use super::{NativeArchiveStagingHost, NativeRuntimeStorageHost};
+
+    /// Verifies that snapshot outputs grow, accept ZIP header updates, and expose sealed files.
+    #[test]
+    fn snapshot_export_is_file_backed_and_seekable() {
+        let root = std::env::temp_dir().join(format!("operit-snapshot-export-{}", uuid::Uuid::new_v4()));
+        let host = NativeArchiveStagingHost::new(root.join("runtime"));
+        host.createExportArchive("snapshot").unwrap();
+        assert!(host.archiveFileReference("snapshot").is_err());
+        assert!(host.appendArchive("snapshot", b"invalid").is_err());
+        let chunk = vec![42; 64 * 1024];
+        for index in 0..16 {
+            host.writeExportArchive("snapshot", index * chunk.len() as u64, &chunk).unwrap();
+        }
+        host.writeExportArchive("snapshot", 0, b"PK").unwrap();
+        assert_eq!(host.sealArchive("snapshot").unwrap(), 16 * chunk.len() as u64);
+        assert_eq!(host.readArchive("snapshot", 0, 4).unwrap(), [b'P', b'K', 42, 42]);
+        let reference = host.archiveFileReference("snapshot").unwrap();
+        assert_eq!(fs::metadata(&reference).unwrap().len(), 16 * chunk.len() as u64);
+        assert!(host.writeExportArchive("snapshot", 0, b"invalid").is_err());
+        host.removeArchive("snapshot").unwrap();
+        assert!(!std::path::Path::new(&reference).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Rejects oversized export writes and keeps exact-length upload validation unchanged.
+    #[test]
+    fn snapshot_export_rejects_invalid_writes_without_changing_upload_contracts() {
+        let root = std::env::temp_dir().join(format!("operit-snapshot-ranges-{}", uuid::Uuid::new_v4()));
+        let host = NativeArchiveStagingHost::new(root.join("runtime"));
+        host.createExportArchive("snapshot").unwrap();
+        assert!(host.writeExportArchive("snapshot", 1, b"gap").is_err());
+        assert!(host.writeExportArchive("snapshot", 0, &vec![0; 65537]).is_err());
+        assert_eq!(host.sealArchive("snapshot").unwrap(), 0);
+        host.createArchive("upload", 4).unwrap();
+        assert!(host.writeExportArchive("upload", 0, b"data").is_err());
+        host.appendArchive("upload", b"ab").unwrap();
+        assert!(host.sealArchive("upload").is_err());
+        host.appendArchive("upload", b"cd").unwrap();
+        assert_eq!(host.sealArchive("upload").unwrap(), 4);
+        host.removeArchive("snapshot").unwrap();
+        host.removeArchive("upload").unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

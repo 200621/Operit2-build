@@ -197,24 +197,41 @@ pub(super) async fn run_backup_command(core: &mut CliCore, args: &[String]) -> R
     }
 }
 
-/// Exports a raw runtime snapshot to a local archive file.
+/// Copies a host-backed snapshot to the requested file without loading its bytes into memory.
 async fn export_snapshot(core: &mut CliCore, path: Option<&String>) -> Result<(), String> {
     let path = path.ok_or_else(|| "usage: operit2 export snapshot <path>".to_string())?;
-    let bytes = core
+    let file = core
         .services_snapshot_import_manager()
         .exportRawSnapshot()
         .await
         .map_err(|error| error.to_string())?;
-    write_bytes(path, &bytes)?;
+    let result = (|| {
+        if let Some(parent) = Path::new(path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let written = fs::copy(&file.fileReference, path).map_err(|error| error.to_string())?;
+        if i64::try_from(written).map_err(|error| error.to_string())? != file.archive.byteLength {
+            return Err("Saved snapshot length does not match the exported archive".to_string());
+        }
+        Ok(())
+    })();
+    core.services_archive_transfer_manager()
+        .discardArchiveUpload(file.archive.archiveId)
+        .await
+        .map_err(|error| error.to_string())?;
+    result?;
     if cli_json_mode() {
         emit_cli_json(
-            serde_json::json!({ "path": Path::new(path), "bytes": bytes.len(), "format": "snapshot" }),
+            serde_json::json!({ "path": Path::new(path), "bytes": file.archive.byteLength, "format": "snapshot" }),
         );
     } else {
         println!(
             "Exported snapshot to {} ({} bytes)",
             Path::new(path).display(),
-            bytes.len()
+            file.archive.byteLength
         );
     }
     Ok(())
@@ -390,15 +407,6 @@ fn read_text(path: &str) -> Result<String, String> {
 }
 
 fn write_text(path: &str, content: &str) -> Result<(), String> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-    }
-    fs::write(path, content).map_err(|error| error.to_string())
-}
-
-fn write_bytes(path: &str, content: &[u8]) -> Result<(), String> {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;

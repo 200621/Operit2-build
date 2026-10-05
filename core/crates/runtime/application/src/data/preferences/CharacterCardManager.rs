@@ -273,7 +273,7 @@ impl CharacterCardManager {
             currentList.sort();
             currentList.dedup();
             Self::writeCardList(preferences, currentList);
-            self.writeCard(preferences, &card, &id, now);
+            Self::writeCard(preferences, &card, &id, now);
             if card.isDefault || preferences.get(&Self::ACTIVE_CHARACTER_CARD_ID()).is_none() {
                 preferences.set(&Self::ACTIVE_CHARACTER_CARD_ID(), id.clone());
             }
@@ -291,7 +291,7 @@ impl CharacterCardManager {
         let now = currentTimeMillis();
         self.dataStore.try_edit_result(|preferences| {
             Self::assertCardNameUnique(preferences, &card.name, Some(&card.id))?;
-            self.writeCard(preferences, &card, &card.id, now);
+            Self::writeCard(preferences, &card, &card.id, now);
             Ok::<(), PreferencesDataStoreError>(())
         })
     }
@@ -962,8 +962,9 @@ impl CharacterCardManager {
             .map_err(|error| error.to_string())
     }
 
+    /// Writes every card field under its stable ID without changing its display name.
     #[allow(non_snake_case)]
-    fn writeCard(&self, preferences: &mut Preferences, card: &CharacterCard, id: &str, now: i64) {
+    fn writeCard(preferences: &mut Preferences, card: &CharacterCard, id: &str, now: i64) {
         preferences.set(
             &stringPreferencesKey(&format!("character_card_{id}_name")),
             card.name.clone(),
@@ -1194,44 +1195,55 @@ impl CharacterCardManager {
         }
     }
 
+    /// Restores a backup card by ID, preserving names accepted by the Kotlin source.
     #[allow(non_snake_case)]
     fn upsertCharacterCardWithId(
         &self,
         card: CharacterCard,
     ) -> Result<(), PreferencesDataStoreError> {
-        let id = card.id.clone();
-        if id.trim().is_empty() {
+        if card.id.trim().is_empty() {
             return Ok(());
         }
         self.dataStore.try_edit_result(|preferences| {
-            Self::assertCardNameUnique(preferences, &card.name, Some(&id))?;
-            let mut currentList = Self::readCardList(preferences);
-            if !currentList.contains(&id) {
-                currentList.push(id.clone());
-            }
-            currentList.sort();
-            currentList.dedup();
-            Self::writeCardList(preferences, currentList);
-            self.writeCard(preferences, &card, &id, card.updatedAt);
-            if preferences.get(&Self::ACTIVE_CHARACTER_CARD_ID()).is_none() {
-                preferences.set(
-                    &Self::ACTIVE_CHARACTER_CARD_ID(),
-                    Self::DEFAULT_CHARACTER_CARD_ID.to_string(),
-                );
-            }
+            Self::restoreCharacterCardInPreferences(preferences, &card);
             Ok::<(), PreferencesDataStoreError>(())
         })
     }
 
+    /// Restores distinct backup IDs without imposing interactive name-creation rules.
     #[allow(non_snake_case)]
-    #[allow(non_snake_case)]
+    fn restoreCharacterCardInPreferences(preferences: &mut Preferences, card: &CharacterCard) {
+        // Kotlin backups identify cards by ID and can legitimately contain duplicate names.
+        let mut currentList = Self::readCardList(preferences);
+        if !currentList.contains(&card.id) {
+            currentList.push(card.id.clone());
+        }
+        currentList.sort();
+        currentList.dedup();
+        Self::writeCardList(preferences, currentList);
+        Self::writeCard(preferences, card, &card.id, card.updatedAt);
+        if preferences.get(&Self::ACTIVE_CHARACTER_CARD_ID()).is_none() {
+            preferences.set(
+                &Self::ACTIVE_CHARACTER_CARD_ID(),
+                Self::DEFAULT_CHARACTER_CARD_ID.to_string(),
+            );
+        }
+    }
 
+    /// Rejects new name collisions while allowing edits that retain an imported name.
+    #[allow(non_snake_case)]
     fn assertCardNameUnique(
         preferences: &Preferences,
         name: &str,
         currentCardId: Option<&str>,
     ) -> Result<(), PreferencesDataStoreError> {
         let normalizedName = name.trim();
+        if let Some(cardId) = currentCardId {
+            let nameKey = stringPreferencesKey(&format!("character_card_{cardId}_name"));
+            if preferences.get(&nameKey).map(|value| value.trim()) == Some(normalizedName) {
+                return Ok(());
+            }
+        }
         let cardIds = Self::readCardList(preferences);
         for cardId in cardIds {
             if currentCardId == Some(cardId.as_str()) {
@@ -1469,4 +1481,122 @@ fn joinNonEmpty(parts: Vec<String>, separator: &str) -> String {
 #[allow(non_snake_case)]
 fn currentTimeMillis() -> i64 {
     operit_host_api::TimeUtils::currentTimeMillis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Creates a complete backup card with an explicit stable identity.
+    fn backup_card(id: &str, name: &str) -> CharacterCard {
+        CharacterCard {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: id.to_string(),
+            characterSetting: format!("setting-{id}"),
+            openingStatement: String::new(),
+            otherContentChat: String::new(),
+            otherContentVoice: String::new(),
+            avatarUri: None,
+            attachedTagIds: vec![format!("tag-{id}")],
+            advancedCustomPrompt: String::new(),
+            marks: String::new(),
+            chatModelBindingMode: CharacterCardChatModelBindingMode::FOLLOW_GLOBAL.to_string(),
+            chatModelId: None,
+            ttsConfigId: None,
+            memoryBindingMode: CharacterCardMemoryBindingMode::CHARACTER.to_string(),
+            sharedMemoryId: None,
+            sharedMemoryMounts: Vec::new(),
+            toolAccessConfig: CharacterCardToolAccessConfig::default(),
+            isDefault: false,
+            createdAt: 100,
+            updatedAt: 200,
+        }
+    }
+
+    /// Verifies Kotlin-compatible restore keeps distinct IDs and their duplicate names.
+    #[test]
+    fn restore_preserves_cards_with_duplicate_names() {
+        let mut preferences = Preferences::default();
+        for id in ["card-a", "card-b"] {
+            CharacterCardManager::restoreCharacterCardInPreferences(
+                &mut preferences,
+                &backup_card(id, "空"),
+            );
+        }
+        assert_eq!(
+            CharacterCardManager::readCardList(&preferences),
+            vec!["card-a", "card-b"]
+        );
+        for id in ["card-a", "card-b"] {
+            assert_eq!(
+                preferences.get(&stringPreferencesKey(&format!("character_card_{id}_name"))),
+                Some(&"空".to_string())
+            );
+            assert_eq!(
+                preferences.get(&stringPreferencesKey(&format!(
+                    "character_card_{id}_description"
+                ))),
+                Some(&id.to_string())
+            );
+            assert_eq!(
+                preferences.get(&stringPreferencesKey(&format!(
+                    "character_card_{id}_attached_tag_ids"
+                ))),
+                Some(&serde_json::to_string(&vec![format!("tag-{id}")]).unwrap())
+            );
+        }
+    }
+
+    /// Verifies repeat restore updates only the matching ID rather than merging by name.
+    #[test]
+    fn restore_updates_only_the_matching_card_id() {
+        let mut preferences = Preferences::default();
+        for id in ["card-a", "card-b"] {
+            CharacterCardManager::restoreCharacterCardInPreferences(
+                &mut preferences,
+                &backup_card(id, "空"),
+            );
+        }
+        let mut updated = backup_card("card-a", "空");
+        updated.description = "updated".to_string();
+        updated.updatedAt = 300;
+        CharacterCardManager::restoreCharacterCardInPreferences(&mut preferences, &updated);
+        assert_eq!(CharacterCardManager::readCardList(&preferences).len(), 2);
+        assert_eq!(
+            preferences.get(&stringPreferencesKey("character_card_card-a_description")),
+            Some(&"updated".to_string())
+        );
+        assert_eq!(
+            preferences.get(&stringPreferencesKey("character_card_card-a_updated_at")),
+            Some(&"300".to_string())
+        );
+        assert_eq!(
+            preferences.get(&stringPreferencesKey("character_card_card-b_description")),
+            Some(&"card-b".to_string())
+        );
+    }
+
+    /// Verifies imported duplicates remain editable without permitting new name collisions.
+    #[test]
+    fn duplicate_imported_names_allow_unchanged_edits_but_reject_new_collisions() {
+        let mut preferences = Preferences::default();
+        for (id, name) in [("card-a", "空"), ("card-b", "空"), ("card-c", "other")] {
+            CharacterCardManager::restoreCharacterCardInPreferences(
+                &mut preferences,
+                &backup_card(id, name),
+            );
+        }
+        assert!(
+            CharacterCardManager::assertCardNameUnique(&preferences, "空", Some("card-a"),).is_ok()
+        );
+        assert!(
+            CharacterCardManager::assertCardNameUnique(&preferences, "空", Some("new-card"),)
+                .is_err()
+        );
+        assert!(
+            CharacterCardManager::assertCardNameUnique(&preferences, "空", Some("card-c"),)
+                .is_err()
+        );
+    }
 }

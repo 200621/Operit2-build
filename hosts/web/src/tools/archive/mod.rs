@@ -2,7 +2,7 @@ use js_sys::Uint8Array;
 use operit_host_api::{ArchiveStagingHost, HostResult};
 use wasm_bindgen::prelude::*;
 
-use crate::common::{bytes_to_js, call_archive_staging, js_i64};
+use crate::common::{bytes_to_js, call_archive_staging, js_i64, js_string};
 
 /// Stores staged archive bytes in the Web runtime worker's OPFS container.
 #[derive(Clone, Debug, Default)]
@@ -32,6 +32,35 @@ impl ArchiveStagingHost for WebArchiveStagingHost {
             ],
         )?;
         Ok(())
+    }
+
+    /// Creates a growable snapshot output in worker-owned OPFS storage.
+    fn createExportArchive(&self, archiveId: &str) -> HostResult<()> {
+        call_archive_staging("createExportArchive", &[JsValue::from_str(archiveId)])?;
+        Ok(())
+    }
+
+    /// Writes one bounded ZIP output range in worker-owned OPFS storage.
+    fn writeExportArchive(&self, archiveId: &str, offset: u64, chunk: &[u8]) -> HostResult<()> {
+        let offset = i64::try_from(offset)
+            .map_err(|_| operit_host_api::HostError::new("Snapshot offset does not fit i64"))?;
+        call_archive_staging(
+            "writeExportArchive",
+            &[
+                JsValue::from_str(archiveId),
+                JsValue::from_f64(offset as f64),
+                bytes_to_js(chunk),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a storage-backed browser file URL rather than archive byte data.
+    fn archiveFileReference(&self, archiveId: &str) -> HostResult<String> {
+        js_string(
+            call_archive_staging("archiveFileReference", &[JsValue::from_str(archiveId)])?,
+            "archiveStaging.archiveFileReference",
+        )
     }
 
     /// Appends one ordered chunk to an in-progress worker-owned archive.

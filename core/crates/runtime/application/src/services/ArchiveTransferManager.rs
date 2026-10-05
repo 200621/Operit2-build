@@ -1,3 +1,4 @@
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use operit_host_api::ArchiveStagingHost;
@@ -16,6 +17,13 @@ const ARCHIVE_TRANSFER_MAX_CHUNK_BYTES: usize = 64 * 1024;
 pub struct StagedArchive {
     pub archiveId: String,
     pub byteLength: i64,
+}
+
+/// Refers to one sealed, file-backed snapshot ready for platform saving.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct StagedArchiveFile {
+    pub archive: StagedArchive,
+    pub fileReference: String,
 }
 
 /// Owns host-backed archive upload and immutable range-source creation.
@@ -99,6 +107,57 @@ impl ArchiveTransferManager {
             .map_err(|error| error.message)
     }
 
+    /// Generates and seals a snapshot using a bounded host-backed ZIP output buffer.
+    pub(crate) fn exportArchive<F>(&self, generate: F) -> Result<StagedArchiveFile, String>
+    where
+        F: FnOnce(&mut BufWriter<ArchiveExportWriter>) -> Result<(), String>,
+    {
+        let archiveId = Uuid::new_v4().simple().to_string();
+        self.archiveStagingHost
+            .createExportArchive(&archiveId)
+            .map_err(|error| error.message)?;
+        let result = (|| {
+            let mut writer = BufWriter::with_capacity(
+                ARCHIVE_TRANSFER_MAX_CHUNK_BYTES,
+                ArchiveExportWriter {
+                    host: self.archiveStagingHost.clone(),
+                    archiveId: archiveId.clone(),
+                    position: 0,
+                    byteLength: 0,
+                },
+            );
+            generate(&mut writer)?;
+            writer.flush().map_err(|error| error.to_string())?;
+            let byteLength = self
+                .archiveStagingHost
+                .sealArchive(&archiveId)
+                .map_err(|error| error.message)?;
+            let fileReference = self
+                .archiveStagingHost
+                .archiveFileReference(&archiveId)
+                .map_err(|error| error.message)?;
+            Ok(StagedArchiveFile {
+                archive: StagedArchive {
+                    archiveId: archiveId.clone(),
+                    byteLength: i64::try_from(byteLength)
+                        .map_err(|_| "Snapshot byte length does not fit i64".to_string())?,
+                },
+                fileReference,
+            })
+        })();
+        if let Err(exportError) = &result {
+            self.archiveStagingHost
+                .removeArchive(&archiveId)
+                .map_err(|error| {
+                    format!(
+                        "{exportError}; snapshot staging cleanup failed: {}",
+                        error.message
+                    )
+                })?;
+        }
+        result
+    }
+
     /// Opens one sealed archive as a portable range-readable source for runtime consumers.
     pub(crate) fn openStagedArchive(
         &self,
@@ -160,5 +219,57 @@ impl ArchiveSource for StagedArchiveSource {
             return Err("Archive staging host returned an incomplete sealed read".to_string());
         }
         Ok(bytes)
+    }
+}
+
+/// Adapts bounded host export writes to the seekable output required by ZIP.
+pub(crate) struct ArchiveExportWriter {
+    host: Arc<dyn ArchiveStagingHost>,
+    archiveId: String,
+    position: u64,
+    byteLength: u64,
+}
+
+impl Write for ArchiveExportWriter {
+    /// Writes bounded chunks without buffering the complete snapshot.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        for chunk in bytes.chunks(ARCHIVE_TRANSFER_MAX_CHUNK_BYTES) {
+            let next = self
+                .position
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Snapshot size overflow")
+                })?;
+            self.host
+                .writeExportArchive(&self.archiveId, self.position, chunk)
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.message))?;
+            self.position = next;
+            self.byteLength = self.byteLength.max(next);
+        }
+        Ok(bytes.len())
+    }
+
+    /// Leaves durability to the host's explicit archive sealing operation.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for ArchiveExportWriter {
+    /// Repositions within the generated archive for ZIP header updates.
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+            SeekFrom::End(offset) => i128::from(self.byteLength) + i128::from(offset),
+        };
+        if position < 0 || position > i128::from(self.byteLength) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Snapshot seek is outside the output",
+            ));
+        }
+        self.position = position as u64;
+        Ok(self.position)
     }
 }

@@ -1709,6 +1709,15 @@ pub trait ArchiveStagingHost: Send + Sync {
     /// Creates an empty staged archive with its final byte length reserved by the owner host.
     fn createArchive(&self, archiveId: &str, expectedByteLength: u64) -> HostResult<()>;
 
+    /// Creates a growable archive for a host-backed snapshot export.
+    fn createExportArchive(&self, archiveId: &str) -> HostResult<()>;
+
+    /// Writes a bounded export range, including ZIP header updates.
+    fn writeExportArchive(&self, archiveId: &str, offset: u64, chunk: &[u8]) -> HostResult<()>;
+
+    /// Returns a file-backed reference without reading archive bytes into application memory.
+    fn archiveFileReference(&self, archiveId: &str) -> HostResult<String>;
+
     /// Appends one ordered byte chunk to an existing staged archive.
     fn appendArchive(&self, archiveId: &str, chunk: &[u8]) -> HostResult<()>;
 

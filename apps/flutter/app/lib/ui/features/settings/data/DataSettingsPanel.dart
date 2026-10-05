@@ -267,42 +267,55 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     return file.readAsString();
   }
 
-  /// Exports the raw snapshot to a user-selected file.
+  /// Saves a streamed raw snapshot and releases its host-owned staging file.
   Future<void> _exportRawSnapshot() async {
     final l10n = AppLocalizations.of(context)!;
     final suggestedName = _rawSnapshotSuggestedName();
     setState(() => _busy = true);
+    StagedArchiveFile? exported;
     try {
-      final bytes = await widget.clients.servicesSnapshotImportManager
-          .exportRawSnapshot();
-      final savedPath = await FileSaveService.saveBytes(
-        bytes: Uint8List.fromList(bytes),
+      final savedPath = await FileSaveService.saveGeneratedFile(
+        // Generate the snapshot only after the registered output implementation is ready.
+        generate: () async {
+          final file = await widget.clients.servicesSnapshotImportManager.exportRawSnapshot();
+          exported = file;
+          return XFile(
+            file.fileReference,
+            name: suggestedName,
+            mimeType: 'application/zip',
+            length: file.archive.byteLength,
+          );
+        },
         name: suggestedName,
-        mimeType: 'application/zip',
         acceptedTypeGroups: const <XTypeGroup>[_rawSnapshotFileTypeGroup],
       );
-      if (savedPath == null) {
-        return;
-      }
-      if (!mounted) {
+      if (savedPath == null || !mounted) {
         return;
       }
       setState(() {
-        _lastSnapshotBytes = bytes.length;
+        _lastSnapshotBytes = exported!.archive.byteLength;
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataSnapshotExportError('$error'))),
+        SnackBar(content: Text(l10n.savedTo(savedPath))),
       );
-    } finally {
+    } catch (error) {
       if (mounted) {
-        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.settingsDataSnapshotExportError('$error'))),
+        );
+      }
+    } finally {
+      try {
+        final file = exported;
+        if (file != null) {
+          await widget.clients.servicesArchiveTransferManager.discardArchiveUpload(
+            archiveId: file.archive.archiveId,
+          );
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _busy = false);
+        }
       }
     }
   }

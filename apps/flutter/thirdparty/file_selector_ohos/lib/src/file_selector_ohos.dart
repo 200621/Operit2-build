@@ -6,15 +6,38 @@
 
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 
 import 'file_selector_api.g.dart';
 
 /// An implementation of [FileSelectorPlatform] for OpenHarmony.
 class FileSelectorOhos extends FileSelectorPlatform {
   FileSelectorOhos({@visibleForTesting FileSelectorApi? api})
-    : _api = api ?? FileSelectorApi();
+      : _api = api ?? FileSelectorApi();
 
   final FileSelectorApi _api;
+  static const MethodChannel _saveChannel = MethodChannel(
+    'dev.flutter.packages.file_selector_ohos/save',
+  );
+
+  /// Copies a host-backed snapshot into the selected document without reading its bytes in Dart.
+  @override
+  Future<FileSaveLocation?> saveFileReference({
+    required XFile file,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    final location = await getSaveLocation(
+        acceptedTypeGroups: acceptedTypeGroups, options: options);
+    if (location == null) {
+      return null;
+    }
+    await _saveChannel.invokeMethod<void>('copyFileFromPath', <String, Object?>{
+      'sourcePath': file.path,
+      'destinationUri': location.path,
+    });
+    return location;
+  }
 
   /// Registers this class as the implementation of the file_selector platform interface.
   static void registerWith() {

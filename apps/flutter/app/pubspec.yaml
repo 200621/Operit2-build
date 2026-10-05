@@ -141,6 +141,8 @@ dependency_overrides:
     path: ../thirdparty/file_selector_ios
   file_selector_platform_interface:
     path: ../thirdparty/file_selector_platform_interface
+  file_selector_web:
+    path: ../thirdparty/file_selector_web
   webview_all_web:
     path: ../thirdparty/webview_all_web
   webview_all_windows:

@@ -160,12 +160,15 @@ where
     archiveFromOperit1Chats(chats)
 }
 
-/// Converts Operit1 workspace paths into named single-folder workspaces.
-fn archiveFromOperit1Chats(mut chats: Vec<OperitArchivedChat>) -> Result<OperitChatArchive, String> {
+/// Converts Operit1 message identities and workspace paths into a portable archive.
+fn archiveFromOperit1Chats(
+    mut chats: Vec<OperitArchivedChat>,
+) -> Result<OperitChatArchive, String> {
     let mut workspaces = Vec::new();
     let mut pathToId = std::collections::BTreeMap::<String, String>::new();
     let timestamp = currentTimeMillis();
     for chat in &mut chats {
+        migrateOperit1MessageTimestampIdentities(&mut chat.messages)?;
         let Some(path) = chat.workspaceId.take() else {
             continue;
         };
@@ -197,6 +200,37 @@ fn archiveFromOperit1Chats(mut chats: Vec<OperitArchivedChat>) -> Result<OperitC
         workspaces,
         chats,
     })
+}
+
+/// Converts Room message-ID identities into distinct per-chat timestamp identities.
+#[allow(non_snake_case)]
+fn migrateOperit1MessageTimestampIdentities(
+    messages: &mut [OperitArchivedMessage],
+) -> Result<(), String> {
+    // Room permits equal timestamps for distinct message IDs; Operit2 parts do not.
+    // Reserve every source timestamp so collision conversion never changes another message.
+    let sourceTimestamps = messages
+        .iter()
+        .map(|message| message.baseMessage.timestamp)
+        .collect::<HashSet<_>>();
+    let mut assignedTimestamps = HashSet::new();
+    for message in messages {
+        let sourceTimestamp = message.baseMessage.timestamp;
+        let mut timestamp = sourceTimestamp;
+        while assignedTimestamps.contains(&timestamp) {
+            timestamp = timestamp.checked_add(1).ok_or_else(|| {
+                format!("Operit1 message timestamp identity overflowed: {sourceTimestamp}")
+            })?;
+            while sourceTimestamps.contains(&timestamp) {
+                timestamp = timestamp.checked_add(1).ok_or_else(|| {
+                    format!("Operit1 message timestamp identity overflowed: {sourceTimestamp}")
+                })?;
+            }
+        }
+        assignedTimestamps.insert(timestamp);
+        message.baseMessage.timestamp = timestamp;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -235,7 +269,7 @@ where
             SELECT sender, content, timestamp, orderIndex, roleName, provider, modelName
             FROM messages
             WHERE chatId = ?1
-            ORDER BY orderIndex ASC, timestamp ASC
+            ORDER BY orderIndex ASC, timestamp ASC, messageId ASC
             "#,
             vec![SqliteValue::Text(chatId.to_string())],
         )
@@ -298,7 +332,7 @@ where
                 waitDurationMs, completedAt, displayMode, isFavorite
             FROM messages
             WHERE chatId = ?1
-            ORDER BY orderIndex ASC, timestamp ASC
+            ORDER BY orderIndex ASC, timestamp ASC, messageId ASC
             "#,
             vec![SqliteValue::Text(chatId.to_string())],
         )
@@ -529,3 +563,92 @@ fn sqliteRowOptionalString(
         .map_err(|error| format!("{label}: {error}"))
 }
 
+#[cfg(test)]
+mod chat_timestamp_tests {
+    use super::*;
+
+    /// Creates a source message with explicit content and timestamp for identity tests.
+    fn archived_message(sender: &str, content: &str, timestamp: i64) -> OperitArchivedMessage {
+        let mut baseMessage = ChatMessage::new_with_timestamp(
+            sender.to_string(),
+            vec![MessagePart::markdown(
+                "part-0".to_string(),
+                0,
+                content.to_string(),
+            )],
+            0,
+        );
+        baseMessage.timestamp = timestamp;
+        OperitArchivedMessage {
+            baseMessage,
+            variants: Vec::new(),
+        }
+    }
+
+    /// Verifies equal AI and summary timestamps preserve both message bodies and order.
+    #[test]
+    fn migrates_duplicate_timestamps_without_losing_messages() {
+        let mut messages = vec![
+            archived_message("ai", "answer", 1_763_299_203_798),
+            archived_message("summary", "summary", 1_763_299_203_798),
+        ];
+        migrateOperit1MessageTimestampIdentities(&mut messages).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].baseMessage.timestamp, 1_763_299_203_798);
+        assert_eq!(messages[1].baseMessage.timestamp, 1_763_299_203_799);
+        assert_eq!(messages[0].baseMessage.parts[0].content, "answer");
+        assert_eq!(messages[1].baseMessage.parts[0].content, "summary");
+    }
+
+    /// Verifies collision conversion reserves timestamps belonging to later source messages.
+    #[test]
+    fn reserves_existing_timestamps_and_repeated_collision_assignments() {
+        let mut messages = [10, 10, 11, 12, 10]
+            .into_iter()
+            .map(|timestamp| archived_message("user", "body", timestamp))
+            .collect::<Vec<_>>();
+        migrateOperit1MessageTimestampIdentities(&mut messages).unwrap();
+        let timestamps = messages
+            .iter()
+            .map(|message| message.baseMessage.timestamp)
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps, vec![10, 13, 11, 12, 14]);
+        migrateOperit1MessageTimestampIdentities(&mut messages).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.baseMessage.timestamp)
+                .collect::<Vec<_>>(),
+            timestamps
+        );
+    }
+
+    /// Verifies unique source timestamps remain unchanged, including their original order.
+    #[test]
+    fn preserves_unique_source_timestamps() {
+        let mut messages = [30, 10, 20]
+            .into_iter()
+            .map(|timestamp| archived_message("user", "body", timestamp))
+            .collect::<Vec<_>>();
+        migrateOperit1MessageTimestampIdentities(&mut messages).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.baseMessage.timestamp)
+                .collect::<Vec<_>>(),
+            vec![30, 10, 20]
+        );
+    }
+
+    /// Verifies exhausted timestamp identities fail explicitly instead of dropping a message.
+    #[test]
+    fn rejects_timestamp_identity_overflow() {
+        let mut messages = vec![
+            archived_message("ai", "answer", i64::MAX),
+            archived_message("summary", "summary", i64::MAX),
+        ];
+        assert!(migrateOperit1MessageTimestampIdentities(&mut messages)
+            .unwrap_err()
+            .starts_with("Operit1 message timestamp identity overflowed:"));
+    }
+}

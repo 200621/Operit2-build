@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 
 use operit_host_api::{RuntimeStorageHost, RuntimeStorageWriteHost, RuntimeStorageWriteSession};
@@ -41,36 +41,29 @@ impl RawSnapshotBackupManager {
         }
     }
 
-    /// Serializes the full runtime storage tree into a ZIP snapshot.
+    /// Writes a ZIP snapshot directly into a host-backed seekable output.
     #[allow(non_snake_case)]
-    pub fn exportSnapshot(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn exportSnapshot<W: Write + Seek>(&self, output: W) -> Result<(), String> {
         let files = self.collectFileEntries(RuntimeStorageLayout::RUNTIME_ROOT_DIR_PATH)?;
         let manifest = RawSnapshotManifest {
             formatVersion: FORMAT_VERSION,
             createdAt: currentTimeMillis(),
             includes: files.iter().map(|(path, _)| path.clone()).collect(),
         };
-        let mut out = Cursor::new(Vec::new());
-        {
-            let mut zip = ZipWriter::new(&mut out);
-            let options =
-                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-            zip.start_file(ENTRY_MANIFEST, options)
-                .map_err(|error| error.to_string())?;
-            zip.write_all(
-                serde_json::to_string_pretty(&manifest)
-                    .map_err(|error| error.to_string())?
-                    .as_bytes(),
-            )
+        let mut zip = ZipWriter::new(output);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .large_file(true);
+        zip.start_file(ENTRY_MANIFEST, options)
             .map_err(|error| error.to_string())?;
-            for (path, byteLength) in files {
-                zip.start_file(format!("{ENTRY_PAYLOAD_PREFIX}{path}"), options)
-                    .map_err(|error| error.to_string())?;
-                self.copyStorageFileToZip(&path, byteLength, &mut zip)?;
-            }
-            zip.finish().map_err(|error| error.to_string())?;
+        serde_json::to_writer_pretty(&mut zip, &manifest).map_err(|error| error.to_string())?;
+        for (path, byteLength) in files {
+            zip.start_file(format!("{ENTRY_PAYLOAD_PREFIX}{path}"), options)
+                .map_err(|error| error.to_string())?;
+            self.copyStorageFileToZip(&path, byteLength, &mut zip)?;
         }
-        Ok(out.into_inner())
+        zip.finish().map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Replaces runtime storage contents from a range-readable snapshot archive source.
@@ -167,11 +160,11 @@ impl RawSnapshotBackupManager {
 
     /// Copies one immutable runtime storage file into the current ZIP entry in bounded chunks.
     #[allow(non_snake_case)]
-    fn copyStorageFileToZip(
+    fn copyStorageFileToZip<W: Write + Seek>(
         &self,
         path: &str,
         byteLength: u64,
-        zip: &mut ZipWriter<&mut Cursor<Vec<u8>>>,
+        zip: &mut ZipWriter<W>,
     ) -> Result<(), String> {
         let mut offset = 0u64;
         while offset < byteLength {
@@ -187,6 +180,11 @@ impl RawSnapshotBackupManager {
             if chunk.is_empty() {
                 return Err(format!(
                     "runtime storage file ended before its declared length: {path}"
+                ));
+            }
+            if chunk.len() > requestLength {
+                return Err(format!(
+                    "runtime storage range exceeds the requested length: {path}"
                 ));
             }
             zip.write_all(&chunk).map_err(|error| error.to_string())?;

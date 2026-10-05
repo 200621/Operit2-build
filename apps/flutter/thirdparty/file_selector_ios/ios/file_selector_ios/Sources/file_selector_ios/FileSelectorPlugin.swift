@@ -121,6 +121,7 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
   let viewPresenterProvider: ViewPresenterProvider
   private var directoryChannel: FlutterMethodChannel?
   private var saveChannel: FlutterMethodChannel?
+  private var preparingFileSave = false
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = FileSelectorPlugin(
@@ -177,12 +178,17 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
     saveChannel = channel
   }
 
+  /// Routes a file-backed save separately from the existing byte-payload operation.
   private func handleSaveCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    if call.method == "saveFileFromPath" {
+      handleFileReferenceSave(call, result: result)
+      return
+    }
     guard call.method == "saveFile" else {
       result(FlutterMethodNotImplemented)
       return
     }
-    guard pendingSaveCompletions.isEmpty else {
+    guard pendingSaveCompletions.isEmpty && !preparingFileSave else {
       result(FlutterError(
         code: "SAVE_IN_PROGRESS",
         message: "A document save is already active.",
@@ -221,6 +227,55 @@ public class FileSelectorPlugin: NSObject, FlutterPlugin, FileSelectorApi {
       return
     }
 
+    presentSavePicker(temporaryURL: temporaryURL, arguments: arguments, result: result)
+  }
+
+  /// Copies a host-owned file without passing its bytes through Dart or MethodChannel.
+  private func handleFileReferenceSave(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard pendingSaveCompletions.isEmpty && !preparingFileSave else {
+      result(FlutterError(code: "SAVE_IN_PROGRESS", message: "A document save is already active.", details: nil))
+      return
+    }
+    guard let arguments = call.arguments as? [String: Any],
+          let sourcePath = arguments["sourcePath"] as? String,
+          !sourcePath.isEmpty,
+          let requestedName = arguments["name"] as? String,
+          !requestedName.isEmpty else {
+      result(FlutterError(code: "INVALID_SAVE_ARGS", message: "sourcePath and name are required.", details: nil))
+      return
+    }
+    let safeName = URL(fileURLWithPath: requestedName).lastPathComponent
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let temporaryURL = directory.appendingPathComponent(safeName)
+    preparingFileSave = true
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: sourcePath), to: temporaryURL)
+        DispatchQueue.main.async {
+          self.preparingFileSave = false
+          self.presentSavePicker(temporaryURL: temporaryURL, arguments: arguments, result: result)
+        }
+      } catch {
+        var message = error.localizedDescription
+        do {
+          if FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory)
+          }
+        } catch {
+          message += "; temporary export cleanup failed: \(error.localizedDescription)"
+        }
+        let failureMessage = message
+        DispatchQueue.main.async {
+          self.preparingFileSave = false
+          result(FlutterError(code: "SAVE_TEMP_WRITE_FAILED", message: failureMessage, details: nil))
+        }
+      }
+    }
+  }
+
+  /// Presents the export picker for a prepared file without materializing its contents.
+  private func presentSavePicker(temporaryURL: URL, arguments: [String: Any], result: @escaping FlutterResult) {
     let bridge = SavePickerCompletionBridge(
       completion: result,
       owner: self,

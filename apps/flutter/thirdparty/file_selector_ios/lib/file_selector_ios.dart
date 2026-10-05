@@ -133,6 +133,23 @@ class FileSelectorIOS extends FileSelectorPlatform {
     );
   }
 
+  /// Saves a host file through the native picker without reading its bytes in Dart.
+  @override
+  Future<FileSaveLocation?> saveFileReference({
+    required XFile file,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    final path = await _saveChannel
+        .invokeMethod<String>('saveFileFromPath', <String, Object?>{
+          'sourcePath': file.path,
+          'name': options.suggestedName ?? file.name,
+          'mimeType': file.mimeType ?? 'application/octet-stream',
+          'initialDirectory': options.initialDirectory,
+        });
+    return path == null ? null : FileSaveLocation(path);
+  }
+
   /// Saves [file] through the iOS document export picker.
   ///
   /// iOS's upstream file_selector implementation only exposes import and

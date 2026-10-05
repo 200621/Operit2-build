@@ -549,6 +549,9 @@ interface RuntimeWorkerStorageBridge {
 
 interface RuntimeWorkerArchiveStagingBridge {
   createArchive(archiveId: string, expectedByteLength: number): void;
+  createExportArchive(archiveId: string): void;
+  writeExportArchive(archiveId: string, offset: number, content: Uint8Array): void;
+  archiveFileReference(archiveId: string): string;
   appendArchive(archiveId: string, content: Uint8Array): void;
   sealArchive(archiveId: string): number;
   readArchive(archiveId: string, offset: number, length: number): Uint8Array;
@@ -749,6 +752,10 @@ interface ModelInstallWorkerError {
 
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
+  const snapshotExportReferences = new Map<string, {
+    directory: FileSystemDirectoryHandle;
+    name: string;
+  }>();
   const runtimeStorageConfigKey = "operit2.client.runtime.local_storage";
   const runtimeIdentityId = resolveRuntimeIdentityId();
   const runtimeIdentityNamespace = `operit2.identities.${runtimeIdentityId}`;
@@ -4020,6 +4027,71 @@ self.onmessage = (event) => {
           throw new Error("runtime worker archive staging is not installed");
         }
         staging.createArchive(archiveId, expectedByteLength);
+      },
+      /** Creates a growable worker-owned snapshot output. */
+      createExportArchive(archiveId: string): void {
+        const staging = runtimeGlobal.__operitRuntimeWorkerArchiveStaging;
+        if (staging === undefined) {
+          throw new Error("runtime worker archive staging is not installed");
+        }
+        staging.createExportArchive(archiveId);
+      },
+      /** Writes one bounded worker-owned ZIP output range. */
+      writeExportArchive(archiveId: string, offset: number, content: Uint8Array): void {
+        const staging = runtimeGlobal.__operitRuntimeWorkerArchiveStaging;
+        if (staging === undefined) {
+          throw new Error("runtime worker archive staging is not installed");
+        }
+        staging.writeExportArchive(archiveId, offset, content);
+      },
+      /** Obtains a storage-backed file reference from the sealed worker archive. */
+      archiveFileReference(archiveId: string): string {
+        const staging = runtimeGlobal.__operitRuntimeWorkerArchiveStaging;
+        if (staging === undefined) {
+          throw new Error("runtime worker archive staging is not installed");
+        }
+        return staging.archiveFileReference(archiveId);
+      },
+      /** Creates a file-backed Blob URL on the UI thread without reading the archive into arrays. */
+      async openExportFile(identityId: string, offset: number, byteLength: number): Promise<string> {
+        if (!/^identity-[a-z0-9-]+$/.test(identityId) ||
+            !Number.isSafeInteger(offset) || !Number.isSafeInteger(byteLength) || offset < 0 || byteLength < 0) {
+          throw new Error("snapshot export file reference is invalid");
+        }
+        const root = await navigator.storage.getDirectory();
+        const runtime = await root.getDirectoryHandle("runtime");
+        const identities = await runtime.getDirectoryHandle("identities");
+        const identity = await identities.getDirectoryHandle(identityId);
+        const handle = await identity.getFileHandle("operit_archive_staging.data");
+        const file = await handle.getFile();
+        if (offset + byteLength > file.size) {
+          throw new Error("snapshot export exceeds the staged file");
+        }
+        // An independent file keeps ongoing saves readable while other staging archives change.
+        const directory = await identity.getDirectoryHandle("snapshot_exports", { create: true });
+        const name = `${crypto.randomUUID()}.zip`;
+        const exportedHandle = await directory.getFileHandle(name, { create: true });
+        try {
+          const output = await exportedHandle.createWritable();
+          await file.slice(offset, offset + byteLength).stream().pipeTo(output);
+          const exportedFile = await exportedHandle.getFile();
+          const reference = URL.createObjectURL(exportedFile);
+          snapshotExportReferences.set(reference, { directory, name });
+          return reference;
+        } catch (error) {
+          await directory.removeEntry(name);
+          throw error;
+        }
+      },
+      /** Releases an independent browser export after its save stream has completed. */
+      async releaseExportFile(reference: string): Promise<void> {
+        const exported = snapshotExportReferences.get(reference);
+        if (exported === undefined) {
+          throw new Error("snapshot export file reference is not registered");
+        }
+        URL.revokeObjectURL(reference);
+        await exported.directory.removeEntry(exported.name);
+        snapshotExportReferences.delete(reference);
       },
       /** Appends one byte chunk to an archive staging record. */
       appendArchive(archiveId: string, content: Uint8Array): void {

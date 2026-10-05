@@ -87,6 +87,9 @@ interface WorkerRuntimeStorageBridge {
 
 interface WorkerArchiveStagingBridge {
   createArchive(archiveId: string, expectedByteLength: number): void;
+  createExportArchive(archiveId: string): void;
+  writeExportArchive(archiveId: string, offset: number, content: Uint8Array): void;
+  archiveFileReference(archiveId: string): string;
   appendArchive(archiveId: string, content: Uint8Array): void;
   sealArchive(archiveId: string): number;
   readArchive(archiveId: string, offset: number, length: number): Uint8Array;
@@ -107,9 +110,10 @@ interface WorkerWriteSession {
 
 interface WorkerArchiveRecord {
   offset: number;
-  expectedByteLength: number;
+  expectedByteLength: number | null;
   byteLength: number;
   sealed: boolean;
+  fileReference: string | null;
 }
 
 interface WorkerCoreRequest {
@@ -662,6 +666,18 @@ function archiveStagingBridge(): WorkerArchiveStagingBridge {
     createArchive(archiveId: string, expectedByteLength: number): void {
       requiredArchiveStaging().create(archiveId, expectedByteLength);
     },
+    /** Creates one growable snapshot export in the worker's private staging container. */
+    createExportArchive(archiveId: string): void {
+      requiredArchiveStaging().createExport(archiveId);
+    },
+    /** Writes one bounded snapshot output range, including ZIP header updates. */
+    writeExportArchive(archiveId: string, offset: number, content: Uint8Array): void {
+      requiredArchiveStaging().writeExport(archiveId, offset, content);
+    },
+    /** Creates a browser file reference without transporting the snapshot bytes. */
+    archiveFileReference(archiveId: string): string {
+      return requiredArchiveStaging().fileReference(archiveId);
+    },
     appendArchive(archiveId: string, content: Uint8Array): void {
       requiredArchiveStaging().append(archiveId, content);
     },
@@ -924,7 +940,58 @@ class RuntimeWorkerArchiveStaging {
       expectedByteLength,
       byteLength: 0,
       sealed: false,
+      fileReference: null,
     });
+  }
+
+  /** Creates an export whose final compressed size is not known in advance. */
+  createExport(archiveId: string): void {
+    validateArchiveId(archiveId);
+    if (this.archives.has(archiveId)) {
+      throw new Error("archive staging ID already exists");
+    }
+    this.archives.set(archiveId, {
+      offset: this.data.getSize(), expectedByteLength: null,
+      byteLength: 0, sealed: false, fileReference: null,
+    });
+  }
+
+  /** Writes a bounded range and grows only the active export's own extent. */
+  writeExport(archiveId: string, offset: number, content: Uint8Array): void {
+    const archive = this.requiredArchive(archiveId);
+    if (archive.sealed || archive.expectedByteLength !== null) {
+      throw new Error("archive is not an active snapshot export");
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > archive.byteLength || content.byteLength > 65536) {
+      throw new Error("snapshot export write range is invalid");
+    }
+    const end = offset + content.byteLength;
+    if (!Number.isSafeInteger(archive.offset + end)) {
+      throw new Error("snapshot export exceeds OPFS numeric range");
+    }
+    if (end > archive.byteLength && archive.offset + archive.byteLength !== this.data.getSize()) {
+      throw new Error("snapshot export cannot grow across another archive extent");
+    }
+    writeExact(this.data, content, archive.offset + offset);
+    archive.byteLength = Math.max(archive.byteLength, end);
+  }
+
+  /** Exposes a sealed OPFS slice through a host-owned browser URL. */
+  fileReference(archiveId: string): string {
+    const archive = this.requiredArchive(archiveId);
+    if (!archive.sealed) {
+      throw new Error("snapshot export must be sealed before saving");
+    }
+    if (archive.fileReference === null) {
+      const reference = callMainHost("archiveStaging", "openExportFile", [
+        runtimeIdentityId, archive.offset, archive.byteLength,
+      ]);
+      if (typeof reference !== "string") {
+        throw new Error("snapshot export host returned an invalid file reference");
+      }
+      archive.fileReference = reference;
+    }
+    return archive.fileReference;
   }
 
   /** Appends one ordered upload chunk before the archive becomes immutable. */
@@ -932,6 +999,9 @@ class RuntimeWorkerArchiveStaging {
     const archive = this.requiredArchive(archiveId);
     if (archive.sealed) {
       throw new Error("archive staging upload is already sealed");
+    }
+    if (archive.expectedByteLength === null) {
+      throw new Error("snapshot exports require ranged writes");
     }
     if (content.byteLength > archive.expectedByteLength - archive.byteLength) {
       throw new Error("archive staging upload exceeds its declared byte length");
@@ -944,7 +1014,7 @@ class RuntimeWorkerArchiveStaging {
   /** Seals an archive and returns its immutable persisted byte length. */
   seal(archiveId: string): number {
     const archive = this.requiredArchive(archiveId);
-    if (archive.byteLength !== archive.expectedByteLength) {
+    if (archive.expectedByteLength !== null && archive.byteLength !== archive.expectedByteLength) {
       throw new Error("archive staging upload does not match its declared byte length");
     }
     archive.sealed = true;
@@ -970,9 +1040,11 @@ class RuntimeWorkerArchiveStaging {
 
   /** Removes one staged archive and releases the temporary container when it becomes empty. */
   remove(archiveId: string): void {
-    if (!this.archives.delete(archiveId)) {
-      throw new Error("archive staging ID does not exist");
+    const archive = this.requiredArchive(archiveId);
+    if (archive.fileReference !== null) {
+      callMainHost("archiveStaging", "releaseExportFile", [archive.fileReference]);
     }
+    this.archives.delete(archiveId);
     if (this.archives.size === 0) {
       this.data.truncate(0);
       this.data.flush();

@@ -359,12 +359,11 @@ packages:
     source: path
     version: "2.7.0"
   file_selector_web:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: file_selector_web
-      sha256: "73181fbc5257776d8ecaa6a94ab3c8e920ad143b9132a6d984a9271dfc6928d3"
-      url: "https://pub.dev"
-    source: hosted
+      path: "../thirdparty/file_selector_web"
+      relative: true
+    source: path
     version: "0.9.5"
   file_selector_windows:
     dependency: transitive

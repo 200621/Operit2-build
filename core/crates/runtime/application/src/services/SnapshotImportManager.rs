@@ -16,7 +16,9 @@ use crate::data::backup::Operit1SnapshotImportManager::{
 use crate::data::backup::RawSnapshotBackupManager::{
     RawSnapshotBackupManager, RawSnapshotManifest,
 };
-use crate::services::ArchiveTransferManager::{ArchiveTransferManager, StagedArchive};
+use crate::services::ArchiveTransferManager::{
+    ArchiveTransferManager, StagedArchive, StagedArchiveFile,
+};
 
 /// Applies snapshot-specific parsing and restore operations to a staged archive.
 #[derive(Clone)]
@@ -45,11 +47,35 @@ impl SnapshotImportManager {
         })
     }
 
-    /// Exports all raw runtime storage into a portable snapshot archive.
+    /// Streams a raw snapshot into host storage and returns only its sealed file reference.
     #[allow(non_snake_case)]
-    pub fn exportRawSnapshot(&self) -> Result<Vec<u8>, String> {
-        RawSnapshotBackupManager::new(self.storageHost.clone(), self.storageWriteHost.clone())
-            .exportSnapshot()
+    pub async fn exportRawSnapshot(&self) -> Result<StagedArchiveFile, String> {
+        let transfer = self.archiveTransferManager.clone();
+        let backup =
+            RawSnapshotBackupManager::new(self.storageHost.clone(), self.storageWriteHost.clone());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        defaultHostRuntimeTaskSchedulerHost()
+            .scheduleHostRuntimeAsyncTask(
+                "raw-snapshot-export",
+                Box::new(move || {
+                    Box::pin(async move {
+                        let result = transfer.exportArchive(|writer| backup.exportSnapshot(writer));
+                        if let Err(undelivered) = sender.send(result) {
+                            if let Ok(file) = undelivered {
+                                if let Err(error) =
+                                    transfer.discardArchiveUpload(file.archive.archiveId)
+                                {
+                                    operit_host_api::logHostError("SnapshotExport", &error);
+                                }
+                            }
+                        }
+                    })
+                }),
+            )
+            .map_err(|error| format!("Unable to schedule snapshot export: {error}"))?;
+        receiver
+            .await
+            .map_err(|error| format!("Snapshot export returned no result: {error}"))?
     }
 
     /// Reads raw snapshot metadata from a sealed archive without changing runtime storage.

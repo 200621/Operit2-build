@@ -111,6 +111,36 @@ abstract class FileSelectorPlatform extends PlatformInterface {
     return location;
   }
 
+  /// Saves a file-backed reference without converting its contents to a byte payload.
+  Future<FileSaveLocation?> saveFileReference({
+    required XFile file,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    final location = await getSaveLocation(
+      acceptedTypeGroups: acceptedTypeGroups,
+      options: options,
+    );
+    if (location == null) {
+      return null;
+    }
+    await file.saveTo(location.path);
+    return location;
+  }
+
+  /// Saves a generated file while allowing the platform to acquire its output before generation.
+  Future<FileSaveLocation?> saveGeneratedFile({
+    required Future<XFile> Function() generate,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    return saveFileReference(
+      file: await generate(),
+      acceptedTypeGroups: acceptedTypeGroups,
+      options: options,
+    );
+  }
+
   /// Opens a file dialog for loading directories and returns a directory path.
   ///
   /// Returns `null` if the user cancels the operation.

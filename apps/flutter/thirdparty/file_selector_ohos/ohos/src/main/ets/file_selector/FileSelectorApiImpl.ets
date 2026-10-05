@@ -11,6 +11,8 @@ import { Result, FileTypes, FileResponse, FileSelectorApiCodec, wrapError } from
 import { BinaryMessenger } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BinaryMessenger';
 import MessageCodec from '@ohos/flutter_ohos/src/main/ets/plugin/common/MessageCodec';
 import BasicMessageChannel, { Reply } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BasicMessageChannel';
+import MethodChannel, { MethodResult } from '@ohos/flutter_ohos/src/main/ets/plugin/common/MethodChannel';
+import MethodCall from '@ohos/flutter_ohos/src/main/ets/plugin/common/MethodCall';
 import { AbilityPluginBinding } from '@ohos/flutter_ohos/src/main/ets/embedding/engine/plugins/ability/AbilityPluginBinding';
 import common from '@ohos.app.ability.common';
 import { photoPickerSelect, documentPickerSelect, filePicker } from './FIleSelectorUtil'
@@ -26,6 +28,7 @@ const TEXT = "Text";
 export class FileSelectorApiImpl {
 
   binding: AbilityPluginBinding;
+  private saveChannel: MethodChannel | null = null;
 
   constructor(binding: AbilityPluginBinding) {
     this.binding = binding;
@@ -250,11 +253,57 @@ export class FileSelectorApiImpl {
     return uris;
   }
 
+  /// Releases the file-save channel when its platform registration is detached.
+  closeSaveChannel(): void {
+    this.saveChannel?.setMethodCallHandler(null);
+    this.saveChannel = null;
+  }
+
+  /// Performs a native file copy with opened document handles and deterministic resource release.
+  private async copyFileReference(call: MethodCall, result: MethodResult): Promise<void> {
+    const argumentsMap = call.arguments as Map<string, string>;
+    const sourcePath = argumentsMap.get('sourcePath');
+    const destinationUri = argumentsMap.get('destinationUri');
+    if (typeof sourcePath != 'string' || sourcePath.length == 0 ||
+        typeof destinationUri != 'string' || destinationUri.length == 0) {
+      result.error('INVALID_SAVE_ARGS', 'sourcePath and destinationUri are required', null);
+      return;
+    }
+    try {
+      const source = await fs.open(sourcePath, fs.OpenMode.READ_ONLY);
+      try {
+        const destination = await fs.open(destinationUri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+        try {
+          await fs.copyFile(source.fd, destination.fd);
+        } finally {
+          await fs.close(destination);
+        }
+      } finally {
+        await fs.close(source);
+      }
+      result.success(null);
+    } catch (error) {
+      result.error('SAVE_WRITE_FAILED', String(error), null);
+    }
+  }
+
   static getCodec(): MessageCodec<ESObject> {
     return FileSelectorApiCodec.INSTANCE;
   }
 
+  /// Installs the native file-backed save operation beside the generated file selector channels.
   setup(binaryMessenger: BinaryMessenger, abilityPluginBinding: AbilityPluginBinding): void {
+    this.saveChannel = new MethodChannel(binaryMessenger, 'dev.flutter.packages.file_selector_ohos/save');
+    this.saveChannel.setMethodCallHandler({
+      /// Handles explicit source-file copies into selected document URIs.
+      onMethodCall: (call: MethodCall, result: MethodResult): void => {
+        if (call.method != 'copyFileFromPath') {
+          result.notImplemented();
+          return;
+        }
+        this.copyFileReference(call, result);
+      }
+    });
     let api = this;
     {
       this.binding = abilityPluginBinding;

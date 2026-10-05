@@ -119,23 +119,24 @@ fn decodePreferenceValue(bytes: &[u8]) -> Result<Option<Operit1PreferenceValue>,
                     decoder.readFixed32()?.to_le_bytes(),
                 )))
             }
-            (3, 1) => {
-                value = Some(Operit1PreferenceValue::Double(f64::from_le_bytes(
-                    decoder.readFixed64()?.to_le_bytes(),
-                )))
-            }
-            (4, 0) => {
+            // AndroidX PreferencesProto.Value uses integer=3, long=4, and double=7.
+            (3, 0) => {
                 value = Some(Operit1PreferenceValue::Int(
                     decoder.readVarint()? as u32 as i32
                 ))
             }
+            (4, 0) => value = Some(Operit1PreferenceValue::Long(decoder.readVarint()? as i64)),
             (5, 2) => value = Some(Operit1PreferenceValue::String(decoder.readString()?)),
             (6, 2) => {
                 value = Some(Operit1PreferenceValue::StringSet(
                     decodePreferenceStringSet(decoder.readLengthDelimited()?)?,
                 ))
             }
-            (7, 0) => value = Some(Operit1PreferenceValue::Long(decoder.readVarint()? as i64)),
+            (7, 1) => {
+                value = Some(Operit1PreferenceValue::Double(f64::from_le_bytes(
+                    decoder.readFixed64()?.to_le_bytes(),
+                )))
+            }
             _ => decoder.skipField(wireType)?,
         }
     }
@@ -272,5 +273,91 @@ impl<'a> ProtoDecoder<'a> {
             }
         }
         Err("Operit1 DataStore protobuf varint is invalid".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encodes a protobuf varint for independent AndroidX wire-format fixtures.
+    fn append_varint(bytes: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            bytes.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+
+    /// Encodes one PreferenceMap entry using the AndroidX key/value field numbers.
+    fn preference_entry(key: &str, value: &[u8]) -> Vec<u8> {
+        let mut entry = vec![0x0a];
+        append_varint(&mut entry, key.len() as u64);
+        entry.extend_from_slice(key.as_bytes());
+        entry.push(0x12);
+        append_varint(&mut entry, value.len() as u64);
+        entry.extend_from_slice(value);
+        let mut map_entry = vec![0x0a];
+        append_varint(&mut map_entry, entry.len() as u64);
+        map_entry.extend_from_slice(&entry);
+        map_entry
+    }
+
+    /// Verifies integer, long, and double use their actual AndroidX protobuf fields.
+    #[test]
+    fn decodes_androidx_numeric_value_fields() {
+        let mut timestamp = vec![0x20];
+        append_varint(&mut timestamp, 1_769_869_533_402);
+        let mut double = vec![0x39];
+        double.extend_from_slice(&1.25f64.to_le_bytes());
+        for (bytes, expected) in [
+            (vec![0x18, 0x96, 0x01], Operit1PreferenceValue::Int(150)),
+            (timestamp, Operit1PreferenceValue::Long(1_769_869_533_402)),
+            (double, Operit1PreferenceValue::Double(1.25)),
+        ] {
+            assert_eq!(decodePreferenceValue(&bytes).unwrap(), Some(expected));
+        }
+    }
+
+    /// Verifies signed numeric values preserve their full protobuf integer widths.
+    #[test]
+    fn decodes_negative_androidx_integer_and_long_values() {
+        let mut integer = vec![0x18];
+        append_varint(&mut integer, -42i64 as u64);
+        let mut long = vec![0x20];
+        append_varint(&mut long, i64::MIN as u64);
+        assert_eq!(
+            decodePreferenceValue(&integer).unwrap(),
+            Some(Operit1PreferenceValue::Int(-42))
+        );
+        assert_eq!(
+            decodePreferenceValue(&long).unwrap(),
+            Some(Operit1PreferenceValue::Long(i64::MIN))
+        );
+    }
+
+    /// Verifies numeric preference keys are retained and timestamps are not truncated.
+    #[test]
+    fn datastore_preserves_numeric_keys_and_card_timestamps() {
+        let mut timestamp = vec![0x20];
+        append_varint(&mut timestamp, 1_769_869_533_402);
+        let mut bytes = preference_entry(
+            "character_card_default_character_chat_model_index",
+            &[0x18, 2],
+        );
+        bytes.extend(preference_entry(
+            "character_card_default_character_created_at",
+            &timestamp,
+        ));
+        let preferences = decodeDataStorePreferences(&bytes).unwrap();
+        assert_eq!(preferences.len(), 2);
+        assert_eq!(
+            preferences.get("character_card_default_character_chat_model_index"),
+            Some(&Operit1PreferenceValue::Int(2))
+        );
+        assert_eq!(
+            preferences.get("character_card_default_character_created_at"),
+            Some(&Operit1PreferenceValue::Long(1_769_869_533_402))
+        );
     }
 }

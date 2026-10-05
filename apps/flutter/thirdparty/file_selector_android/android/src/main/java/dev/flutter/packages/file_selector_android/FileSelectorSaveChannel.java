@@ -17,6 +17,10 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.PluginRegistry;
 import java.io.OutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Saves byte payloads to Android Storage Access Framework documents. */
 final class FileSelectorSaveChannel
@@ -25,6 +29,7 @@ final class FileSelectorSaveChannel
   private static final int SAVE_FILE_REQUEST_CODE = 46092;
 
   private final MethodChannel channel;
+  private final ExecutorService saveExecutor = Executors.newSingleThreadExecutor();
   @Nullable private ActivityPluginBinding activityPluginBinding;
   @Nullable private PendingSave pendingSave;
   private boolean resultListenerAttached;
@@ -48,16 +53,22 @@ final class FileSelectorSaveChannel
     activityPluginBinding = null;
     pendingSave = null;
     channel.setMethodCallHandler(null);
+    saveExecutor.shutdown();
   }
 
   /** Routes one file-selector save invocation from Dart. */
   @Override
   public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
-    if (call.method.equals("saveFile")) {
-      saveFile(call, result);
-      return;
+    switch (call.method) {
+      case "saveFile":
+        saveFile(call, result);
+        return;
+      case "saveFileFromPath":
+        saveFileFromPath(call, result);
+        return;
+      default:
+        result.notImplemented();
     }
-    result.notImplemented();
   }
 
   /** Opens the Android document creator for the requested byte payload. */
@@ -79,7 +90,36 @@ final class FileSelectorSaveChannel
       result.error("NO_ACTIVITY", "No activity is available for document saving", null);
       return;
     }
-    pendingSave = new PendingSave(bytes, result);
+    startDocumentSave(new BytePendingSave(bytes, result), name, mimeType, initialDirectory, binding);
+  }
+
+  /** Opens the document creator for a host-owned file reference. */
+  private void saveFileFromPath(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
+    if (pendingSave != null) {
+      result.error("SAVE_IN_PROGRESS", "A document save is already active", null);
+      return;
+    }
+    final String sourcePath = call.argument("sourcePath");
+    final String name = call.argument("name");
+    final String mimeType = call.argument("mimeType");
+    final String initialDirectory = call.argument("initialDirectory");
+    final ActivityPluginBinding binding = activityPluginBinding;
+    if (sourcePath == null || sourcePath.isEmpty() || name == null || name.isEmpty()
+        || mimeType == null || mimeType.isEmpty()) {
+      result.error("INVALID_SAVE_ARGS", "sourcePath, name, and mimeType are required", null);
+      return;
+    }
+    if (binding == null) {
+      result.error("NO_ACTIVITY", "No activity is available for document saving", null);
+      return;
+    }
+    startDocumentSave(new FilePendingSave(sourcePath, result), name, mimeType, initialDirectory, binding);
+  }
+
+  /** Starts one explicitly typed save request through the Android document creator. */
+  private void startDocumentSave(PendingSave save, String name, String mimeType,
+      @Nullable String initialDirectory, ActivityPluginBinding binding) {
+    pendingSave = save;
     attachResultListener();
     try {
       final Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
@@ -92,7 +132,7 @@ final class FileSelectorSaveChannel
       binding.getActivity().startActivityForResult(intent, SAVE_FILE_REQUEST_CODE);
     } catch (Exception exception) {
       clearPendingSave();
-      result.error("SAVE_START_FAILED", exception.getMessage(), null);
+      save.result.error("SAVE_START_FAILED", exception.getMessage(), null);
     }
   }
 
@@ -120,16 +160,20 @@ final class FileSelectorSaveChannel
       save.result.error("NO_ACTIVITY", "No activity is available for document saving", null);
       return true;
     }
-    try (OutputStream output = binding.getActivity().getContentResolver().openOutputStream(uri, "w")) {
-      if (output == null) {
-        throw new IllegalStateException("Unable to open selected document for writing");
+    final android.content.ContentResolver resolver = binding.getActivity().getContentResolver();
+    saveExecutor.execute(() -> {
+      try (OutputStream output = resolver.openOutputStream(uri, "w")) {
+        if (output == null) {
+          throw new IllegalStateException("Unable to open selected document for writing");
+        }
+        save.writeTo(output);
+        output.flush();
+      } catch (Exception exception) {
+        save.result.error("SAVE_WRITE_FAILED", exception.getMessage(), null);
+        return;
       }
-      output.write(save.bytes);
-      output.flush();
       save.result.success(uri.toString());
-    } catch (Exception exception) {
-      save.result.error("SAVE_WRITE_FAILED", exception.getMessage(), null);
-    }
+    });
     return true;
   }
 
@@ -164,15 +208,56 @@ final class FileSelectorSaveChannel
     return save;
   }
 
-  /** Stores one MethodChannel result with the bytes selected for saving. */
-  private static final class PendingSave {
-    final byte[] bytes;
+  /** Owns one explicitly typed save source and its MethodChannel completion. */
+  private abstract static class PendingSave {
     final MethodChannel.Result result;
 
-    /** Creates the state held until Android returns from document creation. */
-    PendingSave(@NonNull byte[] bytes, @NonNull MethodChannel.Result result) {
-      this.bytes = bytes;
+    /** Retains the completion until the document has been written. */
+    PendingSave(MethodChannel.Result result) {
       this.result = result;
+    }
+
+    /** Writes this source into the selected document. */
+    abstract void writeTo(OutputStream output) throws IOException;
+  }
+
+  /** Preserves the existing byte-payload save operation for its callers. */
+  private static final class BytePendingSave extends PendingSave {
+    private final byte[] bytes;
+
+    /** Stores the byte payload for an explicitly requested byte save. */
+    BytePendingSave(byte[] bytes, MethodChannel.Result result) {
+      super(result);
+      this.bytes = bytes;
+    }
+
+    /** Writes the caller-owned byte payload. */
+    @Override
+    void writeTo(OutputStream output) throws IOException {
+      output.write(bytes);
+    }
+  }
+
+  /** Streams a host-owned snapshot file without allocating an archive-sized array. */
+  private static final class FilePendingSave extends PendingSave {
+    private final String sourcePath;
+
+    /** Stores only the source file path until the output document is selected. */
+    FilePendingSave(String sourcePath, MethodChannel.Result result) {
+      super(result);
+      this.sourcePath = sourcePath;
+    }
+
+    /** Copies the source file using a fixed-size buffer. */
+    @Override
+    void writeTo(OutputStream output) throws IOException {
+      try (FileInputStream input = new FileInputStream(sourcePath)) {
+        final byte[] buffer = new byte[64 * 1024];
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+          output.write(buffer, 0, count);
+        }
+      }
     }
   }
 }
