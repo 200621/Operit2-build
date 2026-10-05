@@ -251,7 +251,7 @@ impl UsagePriceTable {
             } else if !seen.insert(format!("{}\u{0000}{}", provider, model)) {
                 format!("duplicate entry for {} / {}", provider, model)
             } else {
-                Self::price_problem(entry).or_else(|| Self::window_problem(&entry.peak_windows))
+                Self::price_problem(entry).or_else(|| Self::window_problem(&entry.peak_windows)).unwrap_or_else(|| "no rate given".to_string())
             };
 
             if reason.is_none() {
@@ -634,7 +634,7 @@ pub fn build_stats_result(ledger: &UsageLedger) -> String {
         }));
     }
     json!({
-        "totalCalls": stats.values().map(|(_, c)| c).sum::<usize>(),
+        "totalCalls": stats.values().map(|(_, c)| *c as usize).sum::<usize>(),
         "totalTokens": stats.values().map(|(t, _)| t).sum::<i64>(),
         "byPurpose": entries,
     }).to_string()
