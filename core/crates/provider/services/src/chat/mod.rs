@@ -7,3 +7,5 @@ pub mod enhance;
 pub mod hooks;
 pub mod library;
 pub mod llmprovider;
+#[path = "UsageLedger.rs"]
+pub mod UsageLedger;
