@@ -251,7 +251,7 @@ impl UsagePriceTable {
             } else if !seen.insert(format!("{}\u{0000}{}", provider, model)) {
                 format!("duplicate entry for {} / {}", provider, model)
             } else {
-                Self::price_problem(entry).or_else(|| Self::window_problem(&entry.peak_windows)).unwrap_or_else(|| "no rate given".to_string())
+                Self::price_problem(entry).or_else(|| Self::window_problem(&entry.peak_windows))
             };
 
             if reason.is_none() {
