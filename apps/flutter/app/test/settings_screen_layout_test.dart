@@ -7,8 +7,20 @@ import 'package:operit2/ui/features/settings/models/SettingsModels.dart';
 import 'package:operit2/ui/features/settings/screens/SettingsScreen.dart';
 import 'package:operit2/ui/main/TopBarController.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
+/// Verifies responsive settings layouts with installed application metadata.
 void main() {
+  setUp(() {
+    PackageInfo.setMockInitialValues(
+      appName: 'Operit2',
+      packageName: 'app.operit',
+      version: '2.0.0',
+      buildNumber: '15',
+      buildSignature: '',
+    );
+  });
+
   for (final width in <double>[340, 520, 759, 760, 920]) {
     testWidgets('settings use their available width: $width', (tester) async {
       final availableWidth = ValueNotifier<double>(width);
@@ -67,6 +79,7 @@ void main() {
   });
 }
 
+/// Renders responsive settings inside a resizable desktop navigation area.
 Future<void> _pumpSettings(
   WidgetTester tester,
   ValueNotifier<double> availableWidth,

@@ -10,19 +10,39 @@ function source(path) {
   return readFileSync(new URL(path, root), 'utf8');
 }
 
+/** Extracts synchronized scopes while ignoring braces in Kotlin strings and comments. */
+function synchronizedScopes(content, lock) {
+  const code = content.replace(
+    /"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+    match => match.replace(/[^\n]/g, ' '),
+  );
+  const scopes = [];
+  const pattern = new RegExp(`synchronized\\s*\\(\\s*${lock}\\s*\\)\\s*\\{`, 'g');
+  for (const match of code.matchAll(pattern)) {
+    const opening = match.index + match[0].length - 1;
+    let end = opening + 1;
+    let depth = 1;
+    while (end < code.length && depth > 0) {
+      if (code[end] === '{') depth++;
+      if (code[end] === '}') depth--;
+      end++;
+    }
+    assert.equal(depth, 0, `Unclosed synchronized scope for ${lock}`);
+    scopes.push({ start: match.index, end, body: content.slice(opening + 1, end - 1) });
+  }
+  return scopes;
+}
+
 /** Keeps Android runtime tools on the existing owner channel rather than secret-store JNI. */
 test('Android device information is implemented by the Flutter owner', () => {
   const host = source('hosts/android/src/system_operation.rs');
   assert.doesNotMatch(host, /readAndroidDeviceInfo|deviceInfoJson|jni::|serde_json::from_str/);
   assert.match(host, /fn getDeviceInfo\(&self\)[\s\S]*?Android get_device_info requires/);
-  const factory = source('apps/flutter/native/operit-flutter-bridge/src/PlatformRuntimeFactory.rs');
-  const method = factory.slice(factory.indexOf('    fn getDeviceInfo('), factory.indexOf('    fn captureScreenshot('));
-  assert.match(method, /requestOwnerSystemOperation\(/);
-  assert.match(method, /operation: "get_device_info"\.to_string\(\)/);
-  assert.match(method, /serde_json::from_str\(&response.resultJson\)/);
-  assert.match(method, /#\[cfg\(any\(target_os = "ios", target_os = "macos"\)\)\]/);
-  assert.match(method, /self.native.getDeviceInfo\(\)/);
-  assert.doesNotMatch(factory, /requestFlutterOwnerSystemOperation/);
+  const adapters = source('apps/flutter/native/operit-flutter-bridge/src/FlutterOwnerCapabilities.rs');
+  assert.match(adapters, /fn ownerDeviceInfo\(\)[\s\S]*?ownerSystemOperation\("get_device_info"/);
+  assert.match(adapters, /requestOwnerSystemOperation\(/);
+  assert.match(adapters, /serde_json::from_str\(&response.resultJson\)/);
+  assert.doesNotMatch(adapters, /target_os|target_arch|target_env|jni::/);
   const dart = source('apps/flutter/app/lib/core/host/RuntimeHostInteractionSubscriber.dart');
   assert.match(dart, /'ownerSystemOperation',\s*payload.toJson\(\)/);
   const owner = source(`${android}src/main/kotlin/app/operit/OwnerSystemCapabilityChannel.kt`);
@@ -42,13 +62,15 @@ test('Android startup receives the device model without querying the owner', () 
   assert.match(jni, /device_model.trim\(\).is_empty\(\)/);
   assert.match(jni, /new_with_storage_roots\(runtime_root, workspace_root, device_model\)/);
   const factory = source('apps/flutter/native/operit-flutter-bridge/src/PlatformRuntimeFactory.rs');
-  const startup = factory.slice(factory.indexOf('pub(crate) fn local_device_info('), factory.indexOf('struct FlutterSystemOperationBridge'));
-  assert.match(startup, /#\[cfg\(target_os = "android"\)\]\s*let model = \{/);
-  assert.match(startup, /device_model.trim\(\).is_empty\(\)/);
-  assert.match(startup, /#\[cfg\(not\(target_os = "android"\)\)\]\s*let model =/);
-  assert.doesNotMatch(startup, /requestOwner|\.unwrap_or|\.or_else/);
-  const bridge = source('apps/flutter/native/operit-flutter-bridge/src/lib.rs');
-  assert.match(bridge, /local_device_info\(\s*localCore.as_ref\(\),\s*#\[cfg\(target_os = "android"\)\]\s*device_model,/);
+  const androidPlatform = source('apps/flutter/native/operit-flutter-bridge/src/platform_runtime/android.rs');
+  assert.match(androidPlatform, /StartupMetadata::AndroidDevice \{ model \}/);
+  assert.match(androidPlatform, /model.trim\(\).is_empty\(\)/);
+  assert.match(androidPlatform, /model: model.clone\(\)/);
+  assert.doesNotMatch(androidPlatform, /requestOwner|\.unwrap_or|\.or_else|getDeviceInfo/);
+  assert.match(factory, /platform::create_host_context/);
+  const bridge = source('apps/flutter/native/operit-flutter-bridge/src/BridgeRuntime.rs');
+  assert.match(bridge, /CoreApplication::startWithSharedLocalClient/);
+  assert.doesNotMatch(bridge, /target_os|target_arch|target_env/);
 });
 
 /** Keeps C-host startup separate from Android's model-bearing JNI constructor. */
@@ -79,6 +101,61 @@ test('Android device JSON matches the required shared host schema', () => {
   assert.match(kotlin, /Settings\.Secure\.ANDROID_ID/);
   assert.match(kotlin, /BatteryManager\.BATTERY_PROPERTY_CAPACITY/);
   assert.doesNotMatch(kotlin, /MethodChannel|Build.VERSION.SDK_INT\s*[<>=]|catch\s*\(/);
+});
+
+/** Prevents native creation and asset preparation from blocking main-thread host callbacks. */
+test('Android main-thread state lock excludes expensive runtime lifecycle work', () => {
+  const host = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);
+  const scopes = synchronizedScopes(host, 'runtimeLock');
+  assert.ok(scopes.length > 0);
+  for (const { body } of scopes) {
+    assert.doesNotMatch(
+      body,
+      /prepareAndroidRuntimePaths\s*\(|AndroidRuntimeAssets\.prepare\s*\(|OperitRuntimeNative\.(?:create|destroy)\s*\(|\.mkdirs\s*\(|synchronized\s*\(runtimeCreationLock\)/,
+      'The UI-shared lock must protect state only, not filesystem or native lifecycle work',
+    );
+  }
+  const service = source(`${android}src/main/kotlin/app/operit/OperitCoreService.kt`);
+  assert.match(service, /private fun ensureRuntimeStarted\(\)[\s\S]*?runtimeHost\.isStorageConfigured\(\)/);
+  const application = source(`${android}src/main/kotlin/app/operit/OperitApplication.kt`);
+  assert.match(application, /registerActivityLifecycleCallbacks/);
+  assert.match(application, /\.emitRuntimeEvent\(RuntimeEvents\.androidLifecycle\(topic, payload\)\)/);
+});
+
+/** Serializes concurrent service and FFI startup while publishing the native handle atomically. */
+test('Android runtime creation uses its own lock and short state publication scopes', () => {
+  const host = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);
+  const lifecycleScopes = synchronizedScopes(host, 'runtimeCreationLock');
+  assert.equal(lifecycleScopes.length, 2, 'Creation and destruction must share a separate lifecycle lock');
+  const creation = lifecycleScopes.find(({ body }) => /OperitRuntimeNative\.create\(/.test(body));
+  assert.ok(creation);
+  const states = synchronizedScopes(host, 'runtimeLock');
+  const roots = states.find(({ body }) => /runtimeStarting = true/.test(body));
+  const publish = states.find(({ body }) => /runtimeHandle = createdHandle/.test(body));
+  assert.ok(roots);
+  assert.ok(publish);
+  assert.ok(creation.start < roots.start && roots.end < publish.start && publish.end < creation.end);
+  assert.match(roots.body, /if \(runtimeHandle != 0L\)\s*\{\s*return runtimeHandle/);
+  assert.match(roots.body, /val roots = configuredStorageRootsLocked\(\)\s*runtimeStarting = true\s*roots/);
+  assert.match(creation.body, /prepareAndroidRuntimePaths\(storageRoots.first, storageRoots.second\)/);
+  assert.match(publish.body, /runtimeHandle = createdHandle\s*runtimeStarting = false\s*flushPendingRuntimeEventsLocked\(\)/);
+  const destroy = lifecycleScopes.find(({ body }) => /OperitRuntimeNative\.destroy\(/.test(body));
+  assert.ok(destroy);
+});
+
+/** Keeps startup roots immutable and queues lifecycle events until native creation succeeds. */
+test('Android in-flight startup preserves storage roots and pending lifecycle events', () => {
+  const host = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);
+  const states = synchronizedScopes(host, 'runtimeLock');
+  const storage = states.find(({ body }) => /configuredRuntimeRoot = runtimeRoot/.test(body));
+  assert.ok(storage);
+  assert.match(storage.body, /if \(runtimeStarting \|\| runtimeHandle != 0L\)/);
+  assert.match(storage.body, /configuredRuntimeRoot != runtimeRoot \|\|\s*configuredWorkspaceRoot != workspaceRoot/);
+  assert.match(storage.body, /throw IllegalStateException/);
+  const events = states.find(({ body }) => /pendingRuntimeEvents\.addLast\(eventJson\)/.test(body));
+  assert.ok(events);
+  assert.match(events.body, /if \(handle == 0L\)\s*\{\s*pendingRuntimeEvents\.addLast\(eventJson\)\s*return/);
+  assert.match(host, /catch \(error: Throwable\)\s*\{\s*synchronized\(runtimeLock\)\s*\{\s*runtimeStarting = false\s*\}\s*updateRuntimeStartupStatus\("failed", "本地运行时启动失败"\)\s*throw error/);
 });
 
 /** Preserves the method names Rust resolves in minified release builds. */

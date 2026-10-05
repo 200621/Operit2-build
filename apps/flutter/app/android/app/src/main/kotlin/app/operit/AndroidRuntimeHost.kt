@@ -20,13 +20,16 @@ class AndroidRuntimeHost(context: Context) {
 
     private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    // Main-thread callbacks share only the short-lived state lock.
     private val runtimeLock = Any()
+    private val runtimeCreationLock = Any()
     private val runtimeThreadIndex = AtomicInteger(0)
     private val runtimeExecutor: ExecutorService =
         Executors.newFixedThreadPool(8) { runnable ->
             Thread(runnable, "operit-runtime-${runtimeThreadIndex.incrementAndGet()}")
         }
     private var runtimeHandle: Long = 0
+    private var runtimeStarting = false
     private val pendingRuntimeEvents = ArrayDeque<String>()
     private var configuredRuntimeRoot: File? = null
     private var configuredWorkspaceRoot: File? = null
@@ -40,11 +43,11 @@ class AndroidRuntimeHost(context: Context) {
         val runtimeRoot = requiredAbsoluteRoot(runtimePath, "runtimeRoot")
         val workspaceRoot = requiredAbsoluteRoot(workspacePath, "workspaceRoot")
         synchronized(runtimeLock) {
-            if (runtimeHandle != 0L) {
+            if (runtimeStarting || runtimeHandle != 0L) {
                 if (configuredRuntimeRoot != runtimeRoot ||
                     configuredWorkspaceRoot != workspaceRoot
                 ) {
-                    throw IllegalStateException("Runtime and workspace roots cannot change after runtime creation")
+                    throw IllegalStateException("Runtime and workspace roots cannot change after runtime startup begins")
                 }
             }
             configuredRuntimeRoot = runtimeRoot
@@ -59,45 +62,61 @@ class AndroidRuntimeHost(context: Context) {
         }
     }
 
-    /** Returns the active native runtime handle, creating it when required. */
+    /** Serializes native creation without blocking main-thread storage and lifecycle callbacks. */
     fun ensureRuntimeHandle(): Long {
         synchronized(runtimeLock) {
             if (runtimeHandle != 0L) {
                 return runtimeHandle
             }
+        }
+        synchronized(runtimeCreationLock) {
+            val storageRoots = synchronized(runtimeLock) {
+                if (runtimeHandle != 0L) {
+                    return runtimeHandle
+                }
+                val roots = configuredStorageRootsLocked()
+                runtimeStarting = true
+                roots
+            }
             val startedAtMillis = System.currentTimeMillis()
             updateRuntimeStartupStatus("preparingAssets", "正在准备本地运行时资源")
             Log.i(TAG, "native runtime create start")
             try {
-                val paths = prepareAndroidRuntimePaths()
+                val paths = prepareAndroidRuntimePaths(storageRoots.first, storageRoots.second)
                 updateRuntimeStartupStatus("initializingCore", "正在初始化本地核心服务")
                 Log.i(
                     TAG,
                     "native runtime assets ready elapsedMs=" +
                         (System.currentTimeMillis() - startedAtMillis),
                 )
-                runtimeHandle = OperitRuntimeNative.create(
+                val createdHandle = OperitRuntimeNative.create(
                     paths.runtimeRoot.absolutePath,
                     paths.workspaceRoot.absolutePath,
                     Build.MODEL,
                     this,
                 )
-                if (runtimeHandle == 0L) {
-                    updateRuntimeStartupStatus("failed", "本地运行时启动失败")
+                if (createdHandle == 0L) {
                     throw IllegalStateException(OperitRuntimeNative.createError())
                 }
-                flushPendingRuntimeEventsLocked()
+                synchronized(runtimeLock) {
+                    runtimeHandle = createdHandle
+                    runtimeStarting = false
+                    flushPendingRuntimeEventsLocked()
+                }
+                updateRuntimeStartupStatus("ready", "本地运行时已就绪")
+                Log.i(
+                    TAG,
+                    "native runtime create done elapsedMs=" +
+                        (System.currentTimeMillis() - startedAtMillis),
+                )
+                return createdHandle
             } catch (error: Throwable) {
+                synchronized(runtimeLock) {
+                    runtimeStarting = false
+                }
                 updateRuntimeStartupStatus("failed", "本地运行时启动失败")
                 throw error
             }
-            updateRuntimeStartupStatus("ready", "本地运行时已就绪")
-            Log.i(
-                TAG,
-                "native runtime create done elapsedMs=" +
-                    (System.currentTimeMillis() - startedAtMillis),
-            )
-            return runtimeHandle
         }
     }
 
@@ -141,12 +160,14 @@ class AndroidRuntimeHost(context: Context) {
         }
     }
 
+    /** Schedules queued lifecycle events while the caller holds the state lock. */
     private fun flushPendingRuntimeEventsLocked() {
         while (pendingRuntimeEvents.isNotEmpty()) {
             scheduleRuntimeEventLocked(runtimeHandle, pendingRuntimeEvents.removeFirst())
         }
     }
 
+    /** Dispatches one lifecycle event to the worker pool without running JNI under the state lock. */
     private fun scheduleRuntimeEventLocked(handle: Long, eventJson: String) {
         runtimeExecutor.execute {
             try {
@@ -163,10 +184,24 @@ class AndroidRuntimeHost(context: Context) {
 
     /** Prepares Android runtime assets for the configured storage roots. */
     fun prepareAndroidRuntimePaths(): AndroidRuntimePaths {
+        val roots = synchronized(runtimeLock) { configuredStorageRootsLocked() }
+        return prepareAndroidRuntimePaths(roots.first, roots.second)
+    }
+
+    /** Captures both configured roots while the caller holds the state lock. */
+    private fun configuredStorageRootsLocked(): Pair<File, File> {
         val runtimeRoot = configuredRuntimeRoot
             ?: throw IllegalStateException("runtimeRoot is not configured")
         val workspaceRoot = configuredWorkspaceRoot
             ?: throw IllegalStateException("workspaceRoot is not configured")
+        return Pair(runtimeRoot, workspaceRoot)
+    }
+
+    /** Prepares filesystem assets outside the state lock using one immutable root snapshot. */
+    private fun prepareAndroidRuntimePaths(
+        runtimeRoot: File,
+        workspaceRoot: File,
+    ): AndroidRuntimePaths {
         runtimeRoot.mkdirs()
         workspaceRoot.mkdirs()
         return AndroidRuntimeAssets.prepare(
@@ -222,10 +257,14 @@ class AndroidRuntimeHost(context: Context) {
     /** Releases the native runtime and executor. */
     fun destroy() {
         runtimeExecutor.shutdownNow()
-        synchronized(runtimeLock) {
-            if (runtimeHandle != 0L) {
-                OperitRuntimeNative.destroy(runtimeHandle)
+        synchronized(runtimeCreationLock) {
+            val handle = synchronized(runtimeLock) {
+                val activeHandle = runtimeHandle
                 runtimeHandle = 0
+                activeHandle
+            }
+            if (handle != 0L) {
+                OperitRuntimeNative.destroy(handle)
             }
         }
     }

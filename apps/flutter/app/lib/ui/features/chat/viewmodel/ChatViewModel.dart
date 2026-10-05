@@ -29,6 +29,27 @@ enum ChatToolPermissionResult {
   final String wireName;
 }
 
+/// Transfers selected files without assuming their paths belong to the runtime.
+class TransferredFileAttachmentPayload {
+  /// Creates an exact byte payload for a selected file.
+  TransferredFileAttachmentPayload({
+    required this.fileName,
+    required List<int> bytes,
+  }) : fileSize = bytes.length,
+       base64Content = base64Encode(bytes);
+
+  final String fileName;
+  final int fileSize;
+  final String base64Content;
+
+  /// Encodes the selected file for the runtime's host-owned attachment storage.
+  String toAttachmentPath() => 'transferred_file:${jsonEncode(<String, Object>{
+    'fileName': fileName,
+    'fileSize': fileSize,
+    'base64Content': base64Content,
+  })}';
+}
+
 class PastedImageAttachmentPayload {
   /// Creates a base64 image payload for a virtual chat attachment.
   const PastedImageAttachmentPayload({
@@ -300,6 +321,11 @@ class ChatViewModel {
 
   Future<void> handleAttachment(String filePath) {
     return _chat.handleAttachment(filePath: filePath);
+  }
+
+  /// Imports a selected file into the runtime through its file-system host.
+  Future<void> attachTransferredFile(TransferredFileAttachmentPayload payload) {
+    return handleAttachment(payload.toAttachmentPath());
   }
 
   /// Adds pasted text through the runtime's virtual plain-text attachment path.

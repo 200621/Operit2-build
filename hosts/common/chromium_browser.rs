@@ -302,7 +302,7 @@ impl BrowserAutomationHost for ChromiumBrowserAutomationHost {
                 )
             }),
             "browser_file_upload" => self.with_existing_state(|state| {
-                state.file_upload(params.optional_string_list("paths")?.unwrap_or_default())?;
+                state.file_upload(params.optional_string_list("paths")?)?;
                 Ok("OK".to_string())
             }),
             "browser_handle_dialog" => self.with_existing_state(|state| {
@@ -751,24 +751,16 @@ impl BrowserState {
         Ok(format!("data:image/{format};base64,{data}"))
     }
 
-    fn file_upload(&mut self, paths: Vec<String>) -> HostResult<()> {
-        for path in &paths {
-            if !Path::new(path).is_absolute() {
-                return Err(HostError::new(format!(
-                    "browser_file_upload path must be absolute: {path}"
-                )));
-            }
-        }
+    /// Commits one chooser operation and retains its state on failure.
+    fn file_upload(&mut self, paths: Option<Vec<String>>) -> HostResult<()> {
         let tab = self.active_tab_mut()?;
         tab.collect_events()?;
-        let backend_node_id = tab
-            .file_chooser_backend_node_id
-            .take()
+        let chooser = tab
+            .file_chooser
+            .as_ref()
             .ok_or_else(|| HostError::new("No active browser file chooser"))?;
-        tab.session.command(
-            "DOM.setFileInputFiles",
-            json!({ "files": paths, "backendNodeId": backend_node_id }),
-        )?;
+        chooser.apply(&mut tab.session, paths)?;
+        tab.file_chooser = None;
         tab.collect_events()?;
         Ok(())
     }
@@ -794,20 +786,154 @@ impl BrowserState {
     }
 }
 
+/// Identifies the exact intercepted chooser and its owning frame.
+struct BrowserFileChooser {
+    backend_node_id: i64,
+    frame_id: String,
+    multiple: bool,
+}
+
+impl BrowserFileChooser {
+    /// Decodes the exact chooser identity and selection mode from its CDP event.
+    fn from_event(event: &Value) -> HostResult<Self> {
+        let backend_node_id = event
+            .pointer("/params/backendNodeId")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| HostError::new("Browser file chooser event is missing backendNodeId"))?;
+        let frame_id = event
+            .pointer("/params/frameId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| HostError::new("Browser file chooser event is missing frameId"))?;
+        let multiple = match event.pointer("/params/mode").and_then(Value::as_str) {
+            Some("selectSingle") => false,
+            Some("selectMultiple") => true,
+            _ => {
+                return Err(HostError::new(
+                    "Browser file chooser event has an invalid mode",
+                ))
+            }
+        };
+        Ok(Self {
+            backend_node_id,
+            frame_id: frame_id.to_string(),
+            multiple,
+        })
+    }
+
+    /// Reports navigation or detachment that invalidates this chooser's document.
+    fn invalidated_by(&self, event: &Value) -> bool {
+        match event.get("method").and_then(Value::as_str) {
+            Some("Page.frameNavigated") => {
+                let Some(frame) = event.pointer("/params/frame") else {
+                    return false;
+                };
+                frame.get("parentId").is_none()
+                    || frame.get("id").and_then(Value::as_str) == Some(self.frame_id.as_str())
+            }
+            Some("Page.frameDetached") => {
+                event.pointer("/params/frameId").and_then(Value::as_str)
+                    == Some(self.frame_id.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    /// Executes the explicit selection or cancellation requested by the caller.
+    fn apply(&self, session: &mut CdpSession, paths: Option<Vec<String>>) -> HostResult<()> {
+        match paths {
+            Some(paths) => self.select_files(session, paths),
+            None => self.cancel(session),
+        }
+    }
+
+    /// Validates files and chooser constraints before committing the selection.
+    fn select_files(&self, session: &mut CdpSession, paths: Vec<String>) -> HostResult<()> {
+        if !self.multiple && paths.len() > 1 {
+            return Err(HostError::new(
+                "Browser file chooser does not allow multiple files",
+            ));
+        }
+        for path in &paths {
+            if !Path::new(path).is_absolute() {
+                return Err(HostError::new(format!(
+                    "browser_file_upload path must be absolute: {path}"
+                )));
+            }
+            let metadata = fs::metadata(path).map_err(|error| {
+                HostError::new(format!(
+                    "Failed to read browser upload file {path}: {error}"
+                ))
+            })?;
+            if !metadata.is_file() {
+                return Err(HostError::new(format!(
+                    "Browser upload requires a file: {path}"
+                )));
+            }
+        }
+        let node = session.command(
+            "DOM.describeNode",
+            json!({ "backendNodeId": self.backend_node_id }),
+        )?;
+        let attributes = node
+            .pointer("/node/attributes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| HostError::new("Browser file chooser node has no attributes"))?;
+        if attributes
+            .chunks(2)
+            .any(|attribute| attribute[0].as_str() == Some("webkitdirectory"))
+        {
+            return Err(HostError::new(
+                "Browser upload does not support directory choosers",
+            ));
+        }
+        session.command(
+            "DOM.setFileInputFiles",
+            json!({
+                "files": paths, "backendNodeId": self.backend_node_id,
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Cancels the intercepted chooser without clearing its existing selection.
+    fn cancel(&self, session: &mut CdpSession) -> HostResult<()> {
+        let node = session.command(
+            "DOM.resolveNode",
+            json!({ "backendNodeId": self.backend_node_id }),
+        )?;
+        let object_id = node
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| HostError::new("Browser file chooser node could not be resolved"))?;
+        let result = session.command("Runtime.callFunctionOn", json!({
+            "objectId": object_id,
+            "functionDeclaration": "function() { this.dispatchEvent(new Event('cancel', { bubbles: true })); }",
+        }))?;
+        session.command("Runtime.releaseObject", json!({ "objectId": object_id }))?;
+        if result.get("exceptionDetails").is_some() {
+            return Err(HostError::new(format!(
+                "Failed to cancel browser file chooser: {result}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 struct TabState {
     target_id: String,
     session: CdpSession,
     console_messages: Vec<Value>,
     network_requests: Vec<Value>,
-    file_chooser_backend_node_id: Option<i64>,
+    file_chooser: Option<BrowserFileChooser>,
 }
 
 impl TabState {
+    /// Drains CDP events and applies their browser session state transitions.
     fn collect_events(&mut self) -> HostResult<()> {
         self.session.drain_events(Duration::from_millis(80))?;
         let events = self.session.take_events();
         for event in events {
-            self.record_event(event);
+            self.record_event(event)?;
         }
         Ok(())
     }
@@ -822,7 +948,8 @@ impl TabState {
             .map_err(|error| HostError::new(format!("Invalid browser page state JSON: {error}")))
     }
 
-    fn record_event(&mut self, event: Value) {
+    /// Records page events and updates the file chooser lifecycle in one place.
+    fn record_event(&mut self, event: Value) -> HostResult<()> {
         let method = event.get("method").and_then(Value::as_str);
         match method {
             Some("Runtime.consoleAPICalled") => {
@@ -841,16 +968,24 @@ impl TabState {
                 }
             }
             Some("Page.fileChooserOpened") => {
-                self.file_chooser_backend_node_id = event
-                    .get("params")
-                    .and_then(|params| params.get("backendNodeId"))
-                    .and_then(Value::as_i64);
+                self.file_chooser = Some(BrowserFileChooser::from_event(&event)?);
+            }
+            Some("Page.frameNavigated" | "Page.frameDetached") => {
+                if self
+                    .file_chooser
+                    .as_ref()
+                    .is_some_and(|chooser| chooser.invalidated_by(&event))
+                {
+                    self.file_chooser = None;
+                }
             }
             _ => {}
         }
+        Ok(())
     }
 }
 
+/// Creates a CDP tab with file chooser interception enabled.
 fn create_automation_tab(port: u16) -> HostResult<TabState> {
     let target = devtools_json(port, "PUT", "/json/new")
         .map_err(|error| HostError::new(format!("Failed to create browser target: {error}")))?;
@@ -878,7 +1013,7 @@ fn create_automation_tab(port: u16) -> HostResult<TabState> {
         session,
         console_messages: Vec::new(),
         network_requests: Vec::new(),
-        file_chooser_backend_node_id: None,
+        file_chooser: None,
     })
 }
 
@@ -2052,5 +2187,71 @@ fn named_key(key: &str, virtual_key_code: i64) -> KeyDescriptor {
         key: key.to_string(),
         text: None,
         virtual_key_code,
+    }
+}
+
+#[cfg(test)]
+mod browser_file_chooser_tests {
+    use super::*;
+
+    /// Builds the exact CDP event emitted for a file input chooser.
+    fn chooser_event(mode: &str) -> Value {
+        json!({
+            "method": "Page.fileChooserOpened",
+            "params": { "backendNodeId": 7, "frameId": "upload-frame", "mode": mode },
+        })
+    }
+
+    /// Decodes both supported chooser modes without guessing missing event fields.
+    #[test]
+    fn chooser_modes_are_explicit() {
+        let single = BrowserFileChooser::from_event(&chooser_event("selectSingle")).unwrap();
+        let multiple = BrowserFileChooser::from_event(&chooser_event("selectMultiple")).unwrap();
+        assert!(!single.multiple);
+        assert!(multiple.multiple);
+        assert_eq!(single.backend_node_id, 7);
+        assert_eq!(single.frame_id, "upload-frame");
+    }
+
+    /// Rejects incomplete chooser events and unrecognized selection modes.
+    #[test]
+    fn invalid_chooser_events_are_errors() {
+        assert!(BrowserFileChooser::from_event(&chooser_event("unknown")).is_err());
+        for field in ["backendNodeId", "frameId", "mode"] {
+            let mut event = chooser_event("selectSingle");
+            event["params"].as_object_mut().unwrap().remove(field);
+            assert!(BrowserFileChooser::from_event(&event).is_err(), "{field}");
+        }
+    }
+
+    /// Invalidates only the owning frame or a navigation of the top-level page.
+    #[test]
+    fn chooser_tracks_its_document_lifetime() {
+        let chooser = BrowserFileChooser::from_event(&chooser_event("selectSingle")).unwrap();
+        let cases = [
+            (
+                json!({"method":"Page.frameNavigated", "params":{"frame":{"id":"top"}}}),
+                true,
+            ),
+            (
+                json!({"method":"Page.frameNavigated", "params":{"frame":{"id":"upload-frame", "parentId":"top"}}}),
+                true,
+            ),
+            (
+                json!({"method":"Page.frameNavigated", "params":{"frame":{"id":"other", "parentId":"top"}}}),
+                false,
+            ),
+            (
+                json!({"method":"Page.frameDetached", "params":{"frameId":"upload-frame"}}),
+                true,
+            ),
+            (
+                json!({"method":"Page.frameDetached", "params":{"frameId":"other"}}),
+                false,
+            ),
+        ];
+        for (event, invalidated) in cases {
+            assert_eq!(chooser.invalidated_by(&event), invalidated, "{event}");
+        }
     }
 }

@@ -275,6 +275,8 @@ class _RuntimeBrowserOwnerHostState extends State<RuntimeBrowserOwnerHost> {
       case 'browser_wait_for':
         return _handleWaitFor(request);
       case 'browser_file_upload':
+        await _controller(request).fileUpload(_required(params, 'files'));
+        return 'OK';
       case 'browser_handle_dialog':
       case 'browser_resize':
       case 'browser_take_screenshot':

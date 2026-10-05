@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../bridge/PlatformCoreProxy.dart';
 import '../bridge/ProxyCoreRuntimeBridge.dart';
@@ -485,6 +486,9 @@ class RuntimeHostInteractionSubscriber {
     if (payload.operation == 'toast') {
       return _handleToastOperation(payload);
     }
+    if (payload.operation == 'get_device_location_foreground') {
+      return _handleForegroundLocationOperation(payload);
+    }
     final rawResponse = await _channel.invokeMethod<Object?>(
       'ownerSystemOperation',
       payload.toJson(),
@@ -493,6 +497,80 @@ class RuntimeHostInteractionSubscriber {
       _requireMethodResponseMap(rawResponse, 'ownerSystemOperation'),
     );
     return _response(systemOperation: response);
+  }
+
+  /// Reads one foreground location through the Flutter geolocation plugin.
+  static Future<RuntimeHostInteractionResponse> _handleForegroundLocationOperation(
+    RuntimeHostInteractionSystemOperationPayload payload,
+  ) async {
+    final decoded = jsonDecode(payload.paramsJson);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException(
+        'get_device_location_foreground paramsJson must be an object',
+      );
+    }
+    final timeout = decoded['timeout'];
+    final highAccuracy = decoded['highAccuracy'];
+    final includeAddress = decoded['includeAddress'];
+    if (timeout is! int || timeout <= 0) {
+      throw const FormatException(
+        'get_device_location_foreground timeout must be a positive integer',
+      );
+    }
+    if (highAccuracy is! bool || includeAddress is! bool) {
+      throw const FormatException(
+        'get_device_location_foreground parameters have invalid types',
+      );
+    }
+
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      throw StateError('Windows location service is disabled');
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied) {
+      throw StateError('Windows location permission was denied');
+    }
+    if (permission == LocationPermission.deniedForever) {
+      throw StateError('Windows location permission is permanently denied');
+    }
+
+    final position = await Geolocator.getCurrentPosition(
+      locationSettings: LocationSettings(
+        accuracy: highAccuracy
+            ? LocationAccuracy.best
+            : LocationAccuracy.medium,
+        timeLimit: Duration(seconds: timeout),
+      ),
+    );
+    final result = <String, Object?>{
+      'latitude': position.latitude,
+      'longitude': position.longitude,
+      'accuracy': position.accuracy,
+      'provider': 'flutter-geolocator',
+      'timestamp': position.timestamp.millisecondsSinceEpoch,
+      'rawData': jsonEncode(<String, Object?>{
+        'altitude': position.altitude,
+        'altitudeAccuracy': position.altitudeAccuracy,
+        'heading': position.heading,
+        'headingAccuracy': position.headingAccuracy,
+        'speed': position.speed,
+        'speedAccuracy': position.speedAccuracy,
+        'isMocked': position.isMocked,
+      }),
+      'address': '',
+      'city': '',
+      'province': '',
+      'country': '',
+    };
+    return _response(
+      systemOperation: RuntimeHostInteractionSystemOperationResponse(
+        resultJson: jsonEncode(result),
+      ),
+    );
   }
 
   /// Presents one system-operation toast inside the Flutter application.

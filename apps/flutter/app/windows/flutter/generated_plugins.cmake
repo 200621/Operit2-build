@@ -10,6 +10,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   desktop_widgets_windows
   dynamic_color
   file_selector_windows
+  geolocator_windows
   printing
   record_windows
   url_launcher_windows

@@ -9,6 +9,8 @@ import 'package:flutter/gestures.dart';
 import 'package:webview_all/webview_all.dart';
 import 'package:webview_all_windows/webview_all_windows.dart';
 
+import 'RuntimeBrowserFileUpload.dart';
+
 class RuntimeBrowserAutomationController {
   RuntimeBrowserAutomationController({
     required this.controller,
@@ -16,6 +18,9 @@ class RuntimeBrowserAutomationController {
   });
 
   final WebViewController controller;
+  late final RuntimeBrowserFileUpload _fileUpload = RuntimeBrowserFileUpload(
+    controller,
+  );
   final Future<void> Function() onSurfaceFrameRequested;
   final List<Map<String, Object?>> _consoleMessages = <Map<String, Object?>>[];
   final List<Map<String, Object?>> _networkRequests = <Map<String, Object?>>[];
@@ -183,22 +188,28 @@ class RuntimeBrowserAutomationController {
     return jsonEncode(<String, Object?>{'url': url, 'title': title});
   }
 
+  /// Evaluates page JavaScript while capturing automation-opened file choosers.
   Future<Object?> evaluate(String expression) {
-    return controller.runJavaScriptReturningResult(expression);
+    return _fileUpload.evaluate(expression);
   }
 
+  /// Evaluates a page function while capturing its file chooser requests.
   Future<Object?> evaluateFunction(String function, {String? selector}) {
     final target = selector?.trim();
     if (target == null || target.isEmpty) {
-      return controller.runJavaScriptReturningResult('($function)()');
+      return evaluate('($function)()');
     }
-    return controller.runJavaScriptReturningResult(
-      '($function)(${_resolverScript(target)})',
-    );
+    return evaluate('($function)(${_resolverScript(target)})');
   }
 
+  /// Executes automation code with the same chooser lifecycle as page actions.
   Future<Object?> runCode(String code) {
-    return controller.runJavaScriptReturningResult(code);
+    return evaluate(code);
+  }
+
+  /// Uploads host-provided files or cancels the active page file chooser.
+  Future<void> fileUpload(String filesJson) {
+    return _fileUpload.upload(filesJson);
   }
 
   Future<Object?> snapshot() {
@@ -237,8 +248,9 @@ JSON.stringify((function() {
 ''');
   }
 
+  /// Clicks the exact target and captures any file chooser it opens.
   Future<void> click(String selector) {
-    return controller.runJavaScript("${_resolverScript(selector)}?.click();");
+    return _fileUpload.run("${_resolverScript(selector)}?.click();");
   }
 
   Future<void> type(String selector, String text) {

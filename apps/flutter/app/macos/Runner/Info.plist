@@ -26,6 +26,10 @@
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Operit uses your current location only when you request a location attachment.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Operit uses your current location only when you request a location attachment.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Operit2 uses the camera to capture photos for chat attachments.</string>
 	<key>NSAppTransportSecurity</key>

@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import CoreBluetooth
 import CoreMedia
+import CoreLocation
 import Foundation
 import FlutterMacOS
 import Network
@@ -17,6 +18,13 @@ final class AppleRuntimeChannel: NSObject {
   private var attachedChannels: [FlutterMethodChannel] = []
   private let workQueue = DispatchQueue(label: "operit.runtime.apple", qos: .userInitiated)
   private var handle: UnsafeMutableRawPointer?
+  private var locationManager: CLLocationManager?
+  private var locationCompletion: FlutterResult?
+  private var locationTimeout: DispatchWorkItem?
+  private var locationGeocoder: CLGeocoder?
+  private var locationRequestStarted = false
+  private var locationIncludeAddress = false
+  private var locationTimeoutSeconds: Double = 0
   private var audioPlayers: [String: AVAudioPlayer] = [:]
   private var musicPlayer: AVPlayer?
   private var musicSource: String?
@@ -501,11 +509,123 @@ final class AppleRuntimeChannel: NSObject {
   }
 
   /// Executes one Core-owned system operation through the macOS application host.
+  /// Requests an authorized current location on the application's main thread.
+  private func ownerDeviceLocation(paramsJson: String, result: @escaping FlutterResult) {
+    guard locationCompletion == nil else {
+      result(FlutterError(code: "LOCATION_BUSY", message: "A location request is already active", details: nil))
+      return
+    }
+    do {
+      guard let data = paramsJson.data(using: .utf8),
+            let params = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let timeout = params["timeout"] as? NSNumber, timeout.doubleValue > 0,
+            let highAccuracy = params["highAccuracy"] as? Bool,
+            let includeAddress = params["includeAddress"] as? Bool else {
+        throw RuntimeChannelError.invalidArgs("Location requires a positive timeout, highAccuracy, and includeAddress")
+      }
+      guard CLLocationManager.locationServicesEnabled() else {
+        throw RuntimeChannelError.invalidArgs("System location services are disabled")
+      }
+      let manager = CLLocationManager()
+      manager.delegate = self
+      manager.desiredAccuracy = highAccuracy ? kCLLocationAccuracyBest : kCLLocationAccuracyHundredMeters
+      locationManager = manager
+      locationCompletion = result
+      locationRequestStarted = false
+      locationIncludeAddress = includeAddress
+      locationTimeoutSeconds = timeout.doubleValue
+      scheduleLocationTimeout(seconds: 60)
+      authorizeLocation(manager)
+    } catch {
+      result(FlutterError(code: "LOCATION_REQUEST_ERROR", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  /// Requests permission or begins acquisition according to the actual authorization state.
+  private func authorizeLocation(_ manager: CLLocationManager) {
+    switch manager.authorizationStatus {
+    case .notDetermined:
+      manager.requestWhenInUseAuthorization()
+    case .authorizedAlways, .authorizedWhenInUse:
+      guard !locationRequestStarted else { return }
+      locationRequestStarted = true
+      scheduleLocationTimeout(seconds: locationTimeoutSeconds)
+      manager.requestLocation()
+    case .denied, .restricted:
+      finishLocation(FlutterError(code: "LOCATION_PERMISSION_DENIED", message: "Location access is not authorized", details: nil))
+    @unknown default:
+      finishLocation(FlutterError(code: "LOCATION_AUTHORIZATION_ERROR", message: "Unknown location authorization state", details: nil))
+    }
+  }
+
+  /// Bounds both authorization and acquisition without returning a cached position.
+  private func scheduleLocationTimeout(seconds: Double) {
+    locationTimeout?.cancel()
+    let timeout = DispatchWorkItem { [weak self] in
+      self?.finishLocation(FlutterError(code: "LOCATION_TIMEOUT", message: "Current location request timed out", details: nil))
+    }
+    locationTimeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: timeout)
+  }
+
+  /// Serializes the location result using the common SystemOperationHost schema.
+  private func deliverLocation(_ location: CLLocation, placemark: CLPlacemark?) {
+    do {
+      var payload: [String: Any] = [
+        "latitude": location.coordinate.latitude,
+        "longitude": location.coordinate.longitude,
+        "accuracy": location.horizontalAccuracy,
+        "provider": "apple.core_location",
+        "timestamp": Int64(location.timestamp.timeIntervalSince1970 * 1000),
+        "rawData": "",
+        "address": "", "city": "", "province": "", "country": "",
+      ]
+      if locationIncludeAddress {
+        guard let placemark, let name = placemark.name,
+              let city = placemark.locality, let province = placemark.administrativeArea,
+              let country = placemark.country else {
+          throw RuntimeChannelError.invalidArgs("Reverse geocoding did not return the requested address fields")
+        }
+        payload["address"] = name
+        payload["city"] = city
+        payload["province"] = province
+        payload["country"] = country
+      }
+      let data = try JSONSerialization.data(withJSONObject: payload)
+      guard let json = String(data: data, encoding: .utf8) else {
+        throw RuntimeChannelError.invalidArgs("Location response could not be encoded as UTF-8")
+      }
+      finishLocation(["resultJson": json])
+    } catch {
+      finishLocation(FlutterError(code: "LOCATION_RESPONSE_ERROR", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  /// Completes a location request exactly once and releases its native resources.
+  private func finishLocation(_ response: Any) {
+    guard let completion = locationCompletion else { return }
+    locationCompletion = nil
+    locationTimeout?.cancel()
+    locationTimeout = nil
+    locationGeocoder?.cancelGeocode()
+    locationGeocoder = nil
+    locationManager?.stopUpdatingLocation()
+    locationManager?.delegate = nil
+    locationManager = nil
+    locationRequestStarted = false
+    completion(response)
+  }
+
+  /// Dispatches owner operations using their typed operation identifiers.
   private func ownerSystemOperation(call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let payload = call.arguments as? [String: Any],
           let operation = payload["operation"] as? String,
           let paramsJson = payload["paramsJson"] as? String else {
       result(FlutterError(code: "INVALID_ARGS", message: "ownerSystemOperation expects operation and paramsJson", details: nil))
+      return
+    }
+    if operation == "get_device_location" {
+      ownerDeviceLocation(paramsJson: paramsJson, result: result)
       return
     }
     guard operation == "send_notification" else {
@@ -1669,5 +1789,44 @@ private final class AppleTtsFileJob: NSObject, AVSpeechSynthesizerDelegate, @unc
       guard let self else { return }
       self.finish(self.failure("Speech synthesis was cancelled"))
     }
+  }
+}
+
+/// Connects the owner location request to Core Location's asynchronous callbacks.
+extension AppleRuntimeChannel: CLLocationManagerDelegate {
+  /// Resumes the pending request after the user decides the location authorization.
+  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    guard manager === locationManager else { return }
+    authorizeLocation(manager)
+  }
+
+  /// Returns a fresh valid fix and optionally reverse-geocodes the requested address.
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard manager === locationManager else { return }
+    guard let location = locations.last, location.horizontalAccuracy >= 0,
+          abs(location.timestamp.timeIntervalSinceNow) <= locationTimeoutSeconds else {
+      finishLocation(FlutterError(code: "LOCATION_INVALID_FIX", message: "Core Location did not return a fresh valid position", details: nil))
+      return
+    }
+    guard locationIncludeAddress else {
+      deliverLocation(location, placemark: nil)
+      return
+    }
+    let geocoder = CLGeocoder()
+    locationGeocoder = geocoder
+    geocoder.reverseGeocodeLocation(location) { [weak self, weak manager] placemarks, error in
+      guard let self, let manager, manager === self.locationManager else { return }
+      if let error {
+        self.finishLocation(FlutterError(code: "LOCATION_GEOCODING_ERROR", message: error.localizedDescription, details: nil))
+        return
+      }
+      self.deliverLocation(location, placemark: placemarks?.first)
+    }
+  }
+
+  /// Reports native acquisition failures without substituting a previous position.
+  func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    guard manager === locationManager else { return }
+    finishLocation(FlutterError(code: "LOCATION_ACQUISITION_ERROR", message: error.localizedDescription, details: nil))
   }
 }

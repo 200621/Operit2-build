@@ -11,8 +11,10 @@ import desktop_multi_window
 import desktop_widgets_macos
 import dynamic_color
 import file_selector_macos
+import geolocator_apple
 import image_picker_macos
 import operit_folder_access
+import package_info_plus
 import printing
 import record_macos
 import url_launcher_macos
@@ -26,8 +28,10 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   DesktopWidgetsMacosPlugin.register(with: registry.registrar(forPlugin: "DesktopWidgetsMacosPlugin"))
   DynamicColorPlugin.register(with: registry.registrar(forPlugin: "DynamicColorPlugin"))
   FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
+  GeolocatorPlugin.register(with: registry.registrar(forPlugin: "GeolocatorPlugin"))
   ImagePickerMacOSPlugin.register(with: registry.registrar(forPlugin: "ImagePickerMacOSPlugin"))
   OperitFolderAccessPlugin.register(with: registry.registrar(forPlugin: "OperitFolderAccessPlugin"))
+  FPPPackageInfoPlusPlugin.register(with: registry.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
   PrintingPlugin.register(with: registry.registrar(forPlugin: "PrintingPlugin"))
   RecordMacOsPlugin.register(with: registry.registrar(forPlugin: "RecordMacOsPlugin"))
   UrlLauncherPlugin.register(with: registry.registrar(forPlugin: "UrlLauncherPlugin"))

@@ -1,6 +1,6 @@
 [package]
 name = "operit-plugin-sdk-ipc-bridge"
-version = "2.0.0-preview.11"
+version = "2.0.0-preview.12"
 edition.workspace = true
 publish = false
 description = "Operit-host bridge between Plugin SDK IPC and the existing tool runtime."

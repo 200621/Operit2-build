@@ -1,451 +1,277 @@
+//! Shared push ordering, watch cancellation, and subscription ownership.
+//! Host dispatchers decide how to execute tasks and deliver encoded frames.
+
 use std::collections::{hash_map::Entry, HashMap};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "wasm32")]
-use js_sys::Function;
-#[cfg(not(target_arch = "wasm32"))]
-use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
-#[cfg(not(target_arch = "wasm32"))]
-use operit_host_api::HostRuntimeTaskSchedulerHost;
 use operit_link::{
-    CoreEventKind, CoreLinkClient, CoreLinkError, CoreLinkPushSession, CoreLinkSharedClient,
-    CorePushItem, CorePushRequest, CoreWatchRequest,
+    CoreEvent, CoreEventKind, CoreEventStream, CoreLinkError, CoreLinkPushSession,
+    CoreLinkSharedClient, CorePushItem, CorePushRequest, CoreWatchRequest,
 };
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsValue;
+use operit_proxy_local::LocalCoreProxy;
+use tokio::sync::oneshot;
 
-use crate::{native_watch_event_vec, OperitFlutterBridge};
+use crate::OperitFlutterBridge;
 
-/// Stores the route and sequence state selected when a client opens one push stream.
+type PushSession = Arc<tokio::sync::Mutex<Option<Box<dyn CoreLinkPushSession>>>>;
+
+/// Tracks one actual local push session and its next accepted sequence.
 #[derive(Clone)]
-pub(crate) enum NativePushState {
-    Local {
-        session: Arc<tokio::sync::Mutex<Option<Box<dyn CoreLinkPushSession>>>>,
-        nextSequence: u64,
-    },
+pub(crate) struct PushStreamState {
+    session: PushSession,
+    nextSequence: u64,
 }
 
-/// Carries native watch events from the async runtime to the platform channel reader.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-pub(crate) struct NativeWatchChannel {
-    sender: mpsc::Sender<NativeWatchChannelMessage>,
-    receiver: Arc<Mutex<mpsc::Receiver<NativeWatchChannelMessage>>>,
-    closed: Arc<AtomicBool>,
+/// Carries one validated push item to the host's execution boundary.
+pub(crate) struct PushItemTask {
+    session: PushSession,
+    item: CorePushItem,
 }
 
-/// Represents one queued native watch-channel message.
-#[cfg(not(target_arch = "wasm32"))]
-enum NativeWatchChannelMessage {
-    Event(Vec<u8>),
-    Closed,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeWatchChannel {
-    /// Creates the native watch-channel queue.
-    pub(crate) fn new() -> Self {
-        let (sender, receiver) = mpsc::channel();
-        Self {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
-            closed: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Queues one encoded watch event while the channel remains open.
-    fn send(&self, frame: Vec<u8>) {
-        if !self.closed.load(Ordering::SeqCst) {
-            let _ = self.sender.send(NativeWatchChannelMessage::Event(frame));
-        }
-    }
-
-    /// Closes the native watch-channel queue exactly once.
-    pub(crate) fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            let _ = self.sender.send(NativeWatchChannelMessage::Closed);
-        }
-    }
-
-    /// Waits for the next encoded watch event from the queue.
-    pub(crate) fn nextEvent(&self) -> Result<Vec<u8>, CoreLinkError> {
-        let receiver = self.receiver.lock().map_err(|error| {
-            CoreLinkError::internal(format!("watch channel lock poisoned: {error}"))
-        })?;
-        match receiver.recv() {
-            Ok(NativeWatchChannelMessage::Event(frame)) => Ok(frame),
-            Ok(NativeWatchChannelMessage::Closed) | Err(_) => Err(CoreLinkError::new(
-                "WATCH_CHANNEL_CLOSED",
-                "watch channel closed",
-            )),
-        }
-    }
-}
-
-impl Drop for OperitFlutterBridge {
-    /// Closes all bridge-owned watch resources before the bridge is released.
-    fn drop(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Ok(guard) = self.coreApplication.lock() {
-                if let Some(core) = guard.as_ref() {
-                    if let Ok(services) = core.nodeServices() {
-                        let _ = self.runHostRuntimeAsyncTask("node-stop", move || async move { services.peers().stop().await });
-                    }
-                }
-            }
-            self.watchChannel.close();
-        }
-        if let Ok(coreApplication) = self.coreApplication.get_mut() {
-            if let Some(coreApplication) = coreApplication.take() {
-                coreApplication.shutdownNow();
-            }
-        }
-        if let Ok(mut subscriptions) = self.watchSubscriptions.lock() {
-            for (_, cancelSender) in subscriptions.drain() {
-                let _ = cancelSender.send(());
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::PlatformRuntimeFactory::release_runtime_host();
-    }
-}
-
-impl OperitFlutterBridge {
-    /// Opens one native client-owned input stream directly on the local Core proxy.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn pushOpen(&self, request: CorePushRequest) -> Result<String, CoreLinkError> {
-        let pushId = request.requestId.0.clone();
-        let session = self.localCore.openPushLocal(request)?;
-        let state = NativePushState::Local {
-            session: Arc::new(tokio::sync::Mutex::new(Some(session))),
-            nextSequence: 0,
-        };
-        let mut pushes = self.pushStreams.lock().map_err(|error| {
-            CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
-        })?;
-        if pushes.insert(pushId.clone(), state).is_some() {
-            return Err(CoreLinkError::new(
-                "PUSH_ALREADY_EXISTS",
-                "Link push stream already exists",
-            ));
-        }
-        Ok(pushId)
-    }
-
-    /// Opens one wasm client-owned input stream directly on the local Core proxy.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn pushOpen(&self, request: CorePushRequest) -> Result<String, CoreLinkError> {
-        let pushId = request.requestId.0.clone();
-        let session = self.localCore.openPushLocal(request)?;
-        let state = NativePushState::Local {
-            session: Arc::new(tokio::sync::Mutex::new(Some(session))),
-            nextSequence: 0,
-        };
-        let mut pushes = self.pushStreams.lock().map_err(|error| {
-            CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
-        })?;
-        if pushes.insert(pushId.clone(), state).is_some() {
-            return Err(CoreLinkError::new(
-                "PUSH_ALREADY_EXISTS",
-                "Link push stream already exists",
-            ));
-        }
-        Ok(pushId)
-    }
-
-    /// Dispatches one native push item in stream order.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn pushItem(&self, item: CorePushItem) -> Result<(), CoreLinkError> {
-        let state = self.takePushItemState(&item)?;
-        let NativePushState::Local { session, .. } = state;
-        self.runHostRuntimeAsyncTask("operit-flutter-push-item", move || async move {
-            let mut session = session.lock().await;
-            session
-                .as_mut()
-                .ok_or_else(|| CoreLinkError::new("PUSH_CLOSED", "Link push stream is closed"))?
-                .send(item.args)
-                .await
-        })
-        .map_err(CoreLinkError::internal)?
-    }
-
-    /// Dispatches one wasm push item in stream order.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn pushItem(&self, item: CorePushItem) -> Result<(), CoreLinkError> {
-        let state = self.takePushItemState(&item)?;
-        let NativePushState::Local { session, .. } = state;
-        let mut session = session.lock().await;
-        session
+impl PushItemTask {
+    /// Delivers the validated item to its original session without choosing another route.
+    pub(crate) async fn execute(self) -> Result<(), CoreLinkError> {
+        self.session
+            .lock()
+            .await
             .as_mut()
             .ok_or_else(|| CoreLinkError::new("PUSH_CLOSED", "Link push stream is closed"))?
-            .send(item.args)
+            .send(self.item.args)
             .await
     }
+}
 
-    /// Closes one native client-owned input stream.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn pushClose(&self, pushId: &str) -> Result<(), CoreLinkError> {
-        let removed = self
-            .pushStreams
-            .lock()
-            .map_err(|error| {
-                CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
-            })?
-            .remove(pushId);
-        let state = removed
-            .ok_or_else(|| CoreLinkError::new("PUSH_NOT_FOUND", "Link push stream not found"))?;
-        let NativePushState::Local { session, .. } = state;
-        self.runHostRuntimeAsyncTask("operit-flutter-push-close", move || async move {
-            let session =
-                session.lock().await.take().ok_or_else(|| {
-                    CoreLinkError::new("PUSH_CLOSED", "Link push stream is closed")
-                })?;
-            session.close().await
-        })
-        .map_err(CoreLinkError::internal)?
-    }
+/// Owns removal and closure of one client-owned push session.
+pub(crate) struct PushCloseTask {
+    session: PushSession,
+}
 
-    /// Closes one wasm client-owned input stream.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn pushClose(&self, pushId: &str) -> Result<(), CoreLinkError> {
-        let removed = self
-            .pushStreams
-            .lock()
-            .map_err(|error| {
-                CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
-            })?
-            .remove(pushId);
-        let state = removed
-            .ok_or_else(|| CoreLinkError::new("PUSH_NOT_FOUND", "Link push stream not found"))?;
-        let NativePushState::Local { session, .. } = state;
-        let session = session
+impl PushCloseTask {
+    /// Closes the removed session exactly once.
+    pub(crate) async fn execute(self) -> Result<(), CoreLinkError> {
+        let session = self
+            .session
             .lock()
             .await
             .take()
             .ok_or_else(|| CoreLinkError::new("PUSH_CLOSED", "Link push stream is closed"))?;
         session.close().await
     }
+}
 
-    /// Validates one item sequence and returns its registered transport state.
-    fn takePushItemState(&self, item: &CorePushItem) -> Result<NativePushState, CoreLinkError> {
+/// Carries one snapshot request without retaining a borrowed bridge handle.
+pub(crate) struct WatchSnapshotTask {
+    core: Arc<LocalCoreProxy>,
+    request: CoreWatchRequest,
+}
+
+impl WatchSnapshotTask {
+    /// Reads the same snapshot implementation on every host.
+    pub(crate) async fn execute(self) -> Result<CoreEvent, CoreLinkError> {
+        CoreLinkSharedClient::watchSnapshot(self.core.as_ref(), self.request).await
+    }
+}
+
+/// Identifies one registration generation and its cancellation sender.
+pub(crate) struct WatchSubscription {
+    generation: Arc<()>,
+    cancel: oneshot::Sender<()>,
+}
+
+/// Removes only the registration generation owned by this running watch.
+struct WatchLease {
+    id: String,
+    generation: Arc<()>,
+    subscriptions: Arc<Mutex<HashMap<String, WatchSubscription>>>,
+}
+
+impl Drop for WatchLease {
+    /// Prevents an old finishing watch from deleting a newly reused subscription id.
+    fn drop(&mut self) {
+        if let Ok(mut subscriptions) = self.subscriptions.lock() {
+            let ownsRegistration = subscriptions
+                .get(&self.id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.generation, &self.generation));
+            if ownsRegistration {
+                subscriptions.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// Reserves cancellation before opening the watch's actual Core source.
+pub(crate) struct WatchOpenTask {
+    core: Arc<LocalCoreProxy>,
+    request: CoreWatchRequest,
+    lease: WatchLease,
+    cancelled: oneshot::Receiver<()>,
+}
+
+impl WatchOpenTask {
+    /// Reports source-open errors and cancellation instead of acknowledging a dead stream.
+    pub(crate) async fn open(mut self) -> Result<OpenedWatch, CoreLinkError> {
+        let events = tokio::select! {
+            _ = &mut self.cancelled => {
+                return Err(CoreLinkError::new("WATCH_CLOSED", "Watch was cancelled while opening"));
+            }
+            opened = CoreLinkSharedClient::watch(self.core.as_ref(), self.request) => opened?,
+        };
+        Ok(OpenedWatch {
+            events,
+            lease: self.lease,
+            cancelled: self.cancelled,
+        })
+    }
+}
+
+/// Owns an opened source and forwards events through an explicitly supplied transport sink.
+pub(crate) struct OpenedWatch {
+    events: CoreEventStream,
+    lease: WatchLease,
+    cancelled: oneshot::Receiver<()>,
+}
+
+impl OpenedWatch {
+    /// Preserves source event ordering and releases the registration on every exit path.
+    pub(crate) async fn forward(
+        mut self,
+        mut deliver: impl FnMut(&str, CoreEvent) -> Result<(), CoreLinkError>,
+    ) -> Result<(), CoreLinkError> {
+        loop {
+            let event = tokio::select! {
+                _ = &mut self.cancelled => None,
+                event = self.events.recv() => event,
+            };
+            let Some(event) = event else {
+                return Ok(());
+            };
+            let completed = event.kind == CoreEventKind::Completed;
+            deliver(&self.lease.id, event)?;
+            if completed {
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl OperitFlutterBridge {
+    /// Registers one local push without replacing an existing session on duplicate ids.
+    pub(crate) fn pushOpen(&self, request: CorePushRequest) -> Result<String, CoreLinkError> {
+        let id = request.requestId.0.clone();
+        let mut pushes = self.pushStreams.lock().map_err(|error| {
+            CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
+        })?;
+        match pushes.entry(id.clone()) {
+            Entry::Occupied(_) => Err(CoreLinkError::new(
+                "PUSH_ALREADY_EXISTS",
+                "Link push stream already exists",
+            )),
+            Entry::Vacant(entry) => {
+                let session = self.localCore.openPushLocal(request)?;
+                entry.insert(PushStreamState {
+                    session: Arc::new(tokio::sync::Mutex::new(Some(session))),
+                    nextSequence: 0,
+                });
+                Ok(id)
+            }
+        }
+    }
+
+    /// Validates sequence ownership once before scheduling a push item.
+    pub(crate) fn preparePushItem(
+        &self,
+        item: CorePushItem,
+    ) -> Result<PushItemTask, CoreLinkError> {
         let mut pushes = self.pushStreams.lock().map_err(|error| {
             CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
         })?;
         let state = pushes
             .get_mut(&item.pushId)
             .ok_or_else(|| CoreLinkError::new("PUSH_NOT_FOUND", "Link push stream not found"))?;
-        let NativePushState::Local { nextSequence, .. } = state;
-        if item.sequence != *nextSequence {
+        if item.sequence != state.nextSequence {
             return Err(CoreLinkError::new(
                 "PUSH_SEQUENCE_MISMATCH",
                 format!(
                     "Link push sequence is {}, expected {}",
-                    item.sequence, nextSequence
+                    item.sequence, state.nextSequence
                 ),
             ));
         }
-        *nextSequence += 1;
-        Ok(state.clone())
-    }
-
-    /// Reads one native watch snapshot through the runtime-selected route.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(non_snake_case)]
-    pub(crate) fn watchSnapshot(
-        &self,
-        request: CoreWatchRequest,
-    ) -> Result<operit_link::CoreEvent, CoreLinkError> {
-        let localCore = self.localCore.clone();
-        self.runHostRuntimeAsyncTask("operit-flutter-watch-snapshot", move || async move {
-            CoreLinkSharedClient::watchSnapshot(localCore.as_ref(), request).await
+        state.nextSequence = state.nextSequence.checked_add(1).ok_or_else(|| {
+            CoreLinkError::new("PUSH_SEQUENCE_OVERFLOW", "Link push sequence overflowed")
+        })?;
+        Ok(PushItemTask {
+            session: state.session.clone(),
+            item,
         })
-        .map_err(CoreLinkError::internal)?
     }
 
-    /// Reads one wasm watch snapshot through the runtime-selected route.
-    #[cfg(target_arch = "wasm32")]
-    #[allow(non_snake_case)]
-    pub(crate) async fn watchSnapshot(
-        &self,
-        request: CoreWatchRequest,
-    ) -> Result<operit_link::CoreEvent, CoreLinkError> {
-        CoreLinkSharedClient::watchSnapshot(self.localCore.as_ref(), request).await
+    /// Removes a push before scheduling its sole close operation.
+    pub(crate) fn preparePushClose(&self, id: &str) -> Result<PushCloseTask, CoreLinkError> {
+        let state = self
+            .pushStreams
+            .lock()
+            .map_err(|error| {
+                CoreLinkError::internal(format!("push stream lock poisoned: {error}"))
+            })?
+            .remove(id)
+            .ok_or_else(|| CoreLinkError::new("PUSH_NOT_FOUND", "Link push stream not found"))?;
+        Ok(PushCloseTask {
+            session: state.session,
+        })
     }
 
-    /// Registers one native watch stream and opens its routed source on the host scheduler.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn watchStream(
-        &self,
-        subscriptionId: String,
-        request: CoreWatchRequest,
-    ) -> Result<String, CoreLinkError> {
-        {
-            let subscriptions = self.watchSubscriptions.lock().map_err(|error| {
-                CoreLinkError::internal(format!("watch subscription lock poisoned: {error}"))
-            })?;
-            if subscriptions.contains_key(&subscriptionId) {
-                return Err(CoreLinkError::new(
-                    "WATCH_ALREADY_EXISTS",
-                    "watch subscription already exists",
-                ));
-            }
+    /// Prepares the same snapshot task for asynchronous and blocking ABI callers.
+    pub(crate) fn prepareWatchSnapshot(&self, request: CoreWatchRequest) -> WatchSnapshotTask {
+        WatchSnapshotTask {
+            core: self.localCore.clone(),
+            request,
         }
-        let (cancelSender, mut cancelReceiver) = tokio::sync::oneshot::channel();
+    }
+
+    /// Reserves one watch generation atomically before its source is opened.
+    pub(crate) fn prepareWatchStream(
+        &self,
+        id: String,
+        request: CoreWatchRequest,
+    ) -> Result<WatchOpenTask, CoreLinkError> {
+        let generation = Arc::new(());
+        let (cancel, cancelled) = oneshot::channel();
         let mut subscriptions = self.watchSubscriptions.lock().map_err(|error| {
             CoreLinkError::internal(format!("watch subscription lock poisoned: {error}"))
         })?;
-        match subscriptions.entry(subscriptionId.clone()) {
-            Entry::Vacant(entry) => {
-                entry.insert(cancelSender);
-            }
+        match subscriptions.entry(id.clone()) {
             Entry::Occupied(_) => {
                 return Err(CoreLinkError::new(
                     "WATCH_ALREADY_EXISTS",
-                    "watch subscription already exists",
-                ));
+                    "Watch subscription already exists",
+                ))
             }
-        }
-        drop(subscriptions);
-
-        let channel = self.watchChannel.clone();
-        let taskSubscriptionId = subscriptionId.clone();
-        let taskSubscriptions = self.watchSubscriptions.clone();
-        let localCore = self.localCore.clone();
-        let scheduleResult = HostRuntimeTaskSchedulerHost::scheduleHostRuntimeAsyncTask(
-            defaultHostRuntimeTaskSchedulerHost().as_ref(),
-            "operit-flutter-watch",
-            Box::new(move || {
-                Box::pin(async move {
-                    let openedReceiver = tokio::select! {
-                        _ = &mut cancelReceiver => None,
-                        opened = CoreLinkSharedClient::watch(localCore.as_ref(), request) => Some(opened),
-                    };
-                    let Some(openedReceiver) = openedReceiver else {
-                        return;
-                    };
-                    let mut receiver = match openedReceiver {
-                        Ok(receiver) => receiver,
-                        Err(error) => {
-                            eprintln!(
-                                "[FlutterBridgeWatch] source open failed subscription={} error={}",
-                                taskSubscriptionId, error
-                            );
-                            if let Ok(mut subscriptions) = taskSubscriptions.lock() {
-                                subscriptions.remove(&taskSubscriptionId);
-                            }
-                            return;
-                        }
-                    };
-                    loop {
-                        let event = tokio::select! {
-                            _ = &mut cancelReceiver => None,
-                            event = receiver.recv() => event,
-                        };
-                        let Some(event) = event else {
-                            break;
-                        };
-                        let completed = event.kind == CoreEventKind::Completed;
-                        channel.send(native_watch_event_vec(&taskSubscriptionId, event));
-                        if completed {
-                            break;
-                        }
-                    }
-                    if let Ok(mut subscriptions) = taskSubscriptions.lock() {
-                        subscriptions.remove(&taskSubscriptionId);
-                    }
-                })
-            }),
-        );
-        if let Err(error) = scheduleResult {
-            if let Ok(mut subscriptions) = self.watchSubscriptions.lock() {
-                subscriptions.remove(&subscriptionId);
-            }
-            return Err(CoreLinkError::internal(error.to_string()));
-        }
-        Ok(subscriptionId)
-    }
-
-    /// Opens one wasm watch stream and forwards events to the JavaScript callback.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn watchStream(
-        &self,
-        subscriptionId: String,
-        request: CoreWatchRequest,
-        onEvent: Function,
-    ) -> Result<String, CoreLinkError> {
-        let mut subscriptions = self.watchSubscriptions.lock().map_err(|error| {
-            CoreLinkError::internal(format!("watch subscription lock poisoned: {error}"))
-        })?;
-        match subscriptions.entry(subscriptionId.clone()) {
             Entry::Vacant(entry) => {
-                let (cancelSender, mut cancelReceiver) = tokio::sync::oneshot::channel();
-                entry.insert(cancelSender);
-                drop(subscriptions);
-                let receiver =
-                    match CoreLinkSharedClient::watch(self.localCore.as_ref(), request).await {
-                        Ok(receiver) => receiver,
-                        Err(error) => {
-                            if let Ok(mut subscriptions) = self.watchSubscriptions.lock() {
-                                subscriptions.remove(&subscriptionId);
-                            }
-                            return Err(error);
-                        }
-                    };
-                let taskSubscriptionId = subscriptionId.clone();
-                let taskSubscriptions = self.watchSubscriptions.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    let mut receiver = receiver;
-                    loop {
-                        let event = tokio::select! {
-                            _ = &mut cancelReceiver => None,
-                            event = receiver.recv() => event,
-                        };
-                        let Some(event) = event else {
-                            break;
-                        };
-                        let completed = event.kind == CoreEventKind::Completed;
-                        let frame = native_watch_event_vec(&taskSubscriptionId, event);
-                        let frame = js_sys::Uint8Array::from(frame.as_slice());
-                        let _ = onEvent.call1(&JsValue::NULL, &frame.into());
-                        if completed {
-                            break;
-                        }
-                    }
-                    if let Ok(mut subscriptions) = taskSubscriptions.lock() {
-                        subscriptions.remove(&taskSubscriptionId);
-                    }
+                entry.insert(WatchSubscription {
+                    generation: generation.clone(),
+                    cancel,
                 });
-                Ok(subscriptionId)
             }
-            Entry::Occupied(_) => Err(CoreLinkError::new(
-                "WATCH_ALREADY_EXISTS",
-                "watch subscription already exists",
-            )),
         }
+        Ok(WatchOpenTask {
+            core: self.localCore.clone(),
+            request,
+            cancelled,
+            lease: WatchLease {
+                id,
+                generation,
+                subscriptions: self.watchSubscriptions.clone(),
+            },
+        })
     }
 
-    /// Closes one active watch stream on the current platform transport.
-    pub(crate) fn closeWatchStream(&self, subscriptionId: &str) {
-        #[cfg(not(target_arch = "wasm32"))]
+    /// Cancels the exact registered watch on every transport.
+    pub(crate) fn closeWatchStream(&self, id: &str) {
         if let Ok(mut subscriptions) = self.watchSubscriptions.lock() {
-            if let Some(cancelSender) = subscriptions.remove(subscriptionId) {
-                let _ = cancelSender.send(());
+            if let Some(subscription) = subscriptions.remove(id) {
+                let _ = subscription.cancel.send(());
             }
         }
-        #[cfg(target_arch = "wasm32")]
-        if let Ok(mut subscriptions) = self.watchSubscriptions.lock() {
-            if let Some(cancelSender) = subscriptions.remove(subscriptionId) {
-                let _ = cancelSender.send(());
-            }
-        }
-    }
-
-    /// Reads the next native watch-channel frame for an FFI caller.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn nextWatchChannelEvent(&self) -> Result<Vec<u8>, CoreLinkError> {
-        self.watchChannel.nextEvent()
     }
 }

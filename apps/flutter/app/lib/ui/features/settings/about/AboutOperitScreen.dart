@@ -1,12 +1,12 @@
 // ignore_for_file: file_names
 
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../common/OperitLogoMark.dart';
 import '../../../theme/OperitGlassSurface.dart';
 
-const String _appVersion = '2.0.0+6';
 final Uri _projectUri = Uri.parse('https://github.com/AAswordman/Operit2');
 final Uri _documentationUri = Uri.parse(
   'https://github.com/AAswordman/Operit2#readme',
@@ -56,8 +56,34 @@ class AboutOperitScreen extends StatelessWidget {
   }
 }
 
-class _AboutHeader extends StatelessWidget {
+class _AboutHeader extends StatefulWidget {
+  /// Creates the application identity header.
   const _AboutHeader();
+
+  /// Creates the state that reads installed application metadata.
+  @override
+  State<_AboutHeader> createState() => _AboutHeaderState();
+}
+
+class _AboutHeaderState extends State<_AboutHeader> {
+  late final Future<String> _appVersion;
+
+  /// Starts one metadata read for this header instance.
+  @override
+  void initState() {
+    super.initState();
+    _appVersion = _readAppVersion();
+  }
+
+  /// Reads the version and build number from the installed application package.
+  Future<String> _readAppVersion() async {
+    final packageInfo = await PackageInfo.fromPlatform();
+    if (packageInfo.version.trim().isEmpty ||
+        packageInfo.buildNumber.trim().isEmpty) {
+      throw StateError('Application package version or build number is empty.');
+    }
+    return '${packageInfo.version}+${packageInfo.buildNumber}';
+  }
 
   /// Builds the application identity header.
   @override
@@ -83,11 +109,28 @@ class _AboutHeader extends StatelessWidget {
           ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 4),
-        Text(
-          '版本 $_appVersion',
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+        FutureBuilder<String>(
+          future: _appVersion,
+          builder: (context, snapshot) {
+            final style = Theme.of(context).textTheme.bodyMedium;
+            if (snapshot.hasError) {
+              return Text(
+                '版本信息读取失败：${snapshot.error}',
+                style: style?.copyWith(color: colorScheme.error),
+                textAlign: TextAlign.center,
+              );
+            }
+            if (snapshot.connectionState != ConnectionState.done) {
+              return Text(
+                '正在读取版本信息…',
+                style: style?.copyWith(color: colorScheme.onSurfaceVariant),
+              );
+            }
+            return Text(
+              '版本 ${snapshot.requireData}',
+              style: style?.copyWith(color: colorScheme.onSurfaceVariant),
+            );
+          },
         ),
       ],
     );

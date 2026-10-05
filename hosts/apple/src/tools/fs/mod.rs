@@ -474,8 +474,9 @@ impl AppleFileSystemHost {
     }
 }
 
+/// Describes Apple host abilities and explicitly excludes unavailable system surfaces.
 fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
-    HostEnvironmentDescriptor {
+    let mut descriptor = HostEnvironmentDescriptor {
         id: applePlatformName().to_string(),
         displayName: appleDisplayName().to_string(),
         platform: appleHostPlatform(),
@@ -507,11 +508,25 @@ fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
             "tts.synthesis".to_string(),
             "tts.playback".to_string(),
             "system.notifications.send".to_string(),
+            "system.location".to_string(),
+            "ocr.recognition".to_string(),
             "runtime.process".to_string(),
             "runtime.storage".to_string(),
             "runtime.sqlite".to_string(),
         ],
         structuredCapabilities: vec![
+            HostCapability {
+                id: "system.location".to_string(),
+                displayName: "设备定位".to_string(),
+                scope: CapabilityScope::System,
+                operations: vec![CapabilityOperation::Read],
+            },
+            HostCapability {
+                id: "ocr.recognition".to_string(),
+                displayName: "图片文字识别".to_string(),
+                scope: CapabilityScope::Media,
+                operations: vec![CapabilityOperation::Read],
+            },
             HostCapability {
                 id: "fs.read".to_string(),
                 displayName: "文件读取".to_string(),
@@ -539,7 +554,18 @@ fn appleEnvironmentDescriptor() -> HostEnvironmentDescriptor {
         ],
         onboardingRequirements: appleOnboardingRequirements(),
         workspaceRoots: Vec::new(),
+    };
+    #[cfg(target_os = "macos")]
+    {
+        descriptor.capabilities.push("screen.capture".to_string());
+        descriptor.structuredCapabilities.push(HostCapability {
+            id: "screen.capture".to_string(),
+            displayName: "屏幕采集".to_string(),
+            scope: CapabilityScope::System,
+            operations: vec![CapabilityOperation::Read],
+        });
     }
+    descriptor
 }
 
 #[cfg(target_os = "ios")]

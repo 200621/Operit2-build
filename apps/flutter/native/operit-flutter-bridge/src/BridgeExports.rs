@@ -1,7 +1,20 @@
-use super::*;
+//! ABI dispatch only: preserves the existing C, JNI, and JavaScript wire contracts.
+
+use crate::BridgeCodec::*;
+use crate::OperitFlutterBridge;
+use operit_link::{CoreEvent, CoreEventKind, CoreLinkError};
+use std::any::Any;
+use std::ffi::{c_char, CStr, CString};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::Function;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::RuntimeBootstrapStore::{
+use crate::PlatformRuntimeAbi::RuntimeBootstrapStore::{
     readNativeRuntimeBootstrapConfig, writeNativeRuntimeBootstrapConfig,
 };
 
@@ -317,7 +330,7 @@ mod native_call_codec_tests {
     fn decodes_compact_request_tuple() {
         let bytes = operit_link::encodeLink((
             "request-1",
-            6u32,
+            "6",
             "getCards",
             operit_link::CoreValue::Bool(true),
         ))
@@ -326,7 +339,7 @@ mod native_call_codec_tests {
         let request = decode_native_call_request(&bytes).expect("compact request must decode");
 
         assert_eq!(request.requestId.0, "request-1");
-        assert_eq!(request.target, 6);
+        assert_eq!(request.target, "6");
         assert_eq!(request.methodName, "getCards");
         assert_eq!(request.args, operit_link::CoreValue::Bool(true));
     }
@@ -334,12 +347,17 @@ mod native_call_codec_tests {
     /// Verifies every local stream request decodes from a compact tuple.
     #[test]
     fn decodes_compact_push_and_watch_tuples() {
-        let push_open = operit_link::encodeLink(("push-1", 7u32, "interact"))
-            .expect("compact push open must encode");
+        let push_open = operit_link::encodeLink((
+            "push-1",
+            "7",
+            "interact",
+            operit_link::CoreValue::Null,
+        ))
+        .expect("compact push open must encode");
         let push_request =
             decode_native_push_open_request(&push_open).expect("compact push open must decode");
         assert_eq!(push_request.requestId.0, "push-1");
-        assert_eq!(push_request.target, 7);
+        assert_eq!(push_request.target, "7");
         assert_eq!(push_request.methodName, "interact");
 
         let push_item = operit_link::encodeLink((
@@ -357,7 +375,7 @@ mod native_call_codec_tests {
         );
 
         let snapshot =
-            operit_link::encodeLink(("watch-1", 8u32, "cards", operit_link::CoreValue::Null))
+            operit_link::encodeLink(("watch-1", "8", "cards", operit_link::CoreValue::Null))
                 .expect("compact watch snapshot must encode");
         let snapshot_request = decode_native_watch_snapshot_request(&snapshot)
             .expect("compact watch snapshot must decode");
@@ -367,7 +385,7 @@ mod native_call_codec_tests {
         let stream = operit_link::encodeLink((
             "subscription-1",
             "watch-1",
-            8u32,
+            "8",
             "cards",
             operit_link::CoreValue::Null,
         ))
@@ -442,18 +460,18 @@ mod native_call_codec_tests {
         let snapshot = native_result_vec(Ok(native_watch_event_payload(event.clone())));
         let (status, payload): (
             u8,
-            (Option<String>, u32, String, String, operit_link::CoreValue),
+            (Option<String>, String, String, String, operit_link::CoreValue),
         ) = operit_link::decodeLink(&snapshot).expect("compact watch snapshot must decode");
         assert_eq!(status, 0);
         assert_eq!(payload.0.as_deref(), Some("watch-1"));
-        assert_eq!(payload.1, 8);
+        assert_eq!(payload.1, "core/test8");
         assert_eq!(payload.2, "cards");
         assert_eq!(payload.3, "Snapshot");
 
         let frame = native_watch_event_vec("subscription-1", event);
         let (subscription_id, frame_payload): (
             String,
-            (Option<String>, u32, String, String, operit_link::CoreValue),
+            (Option<String>, String, String, String, operit_link::CoreValue),
         ) = operit_link::decodeLink(&frame).expect("compact watch frame must decode");
         assert_eq!(subscription_id, "subscription-1");
         assert_eq!(frame_payload.0.as_deref(), Some("watch-1"));
@@ -488,7 +506,7 @@ async fn bridge_push_open_async(handle: &OperitFlutterBridge, request_bytes: &[u
         Ok(request) => request,
         Err(error) => return native_result_vec(Err::<String, _>(error)),
     };
-    native_result_vec(handle.pushOpen(request).await)
+    native_result_vec(handle.pushOpen(request))
 }
 
 /// Decodes and dispatches one compact native CoreProxy push item.
@@ -664,7 +682,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_close_watch_channel(
     handle: *mut OperitFlutterBridge,
 ) {
     if !handle.is_null() {
-        (*handle).watchChannel.close();
+        (*handle).platform.watchChannel.close();
     }
 }
 
@@ -859,4 +877,17 @@ fn string_to_ptr(value: impl Into<String>) -> *mut c_char {
     CString::new(sanitized)
         .expect("sanitized bridge string must not contain nul")
         .into_raw()
+}
+
+/// Returns the most recent explicit creation failure reported by the ABI boundary.
+pub(crate) fn last_create_error() -> &'static Mutex<String> {
+    static LAST_CREATE_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+    LAST_CREATE_ERROR.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Records a creation failure without attempting another startup configuration.
+pub(crate) fn set_last_create_error(value: String) {
+    *last_create_error()
+        .lock()
+        .expect("Create error lock must not be poisoned") = value;
 }

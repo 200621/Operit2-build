@@ -116,6 +116,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: "optional, execution environment. Values: \"android\" (Android file system) | \"linux\" (local terminal environment) | \"repo:<repositoryName>\" (attached local storage repository)".to_string(),
             environmentParameterDescriptionCn: "可选，执行环境。取值：\"android\"（Android 文件系统）| \"linux\"（本地终端环境）| \"repo:<仓库名>\"（附加本地储存仓库）".to_string(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -140,6 +142,8 @@ impl HostEnvironmentDescriptor {
                 "runtime.sqlite".to_string(),
             ],
             structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -184,6 +188,7 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -211,6 +216,7 @@ impl HostEnvironmentDescriptor {
                 "runtime.sqlite".to_string(),
             ],
             structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -264,6 +270,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -285,6 +293,8 @@ impl HostEnvironmentDescriptor {
                 "system.settings".to_string(),
             ],
             structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -362,6 +372,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -378,7 +390,6 @@ impl HostEnvironmentDescriptor {
                 "os.open".to_string(),
                 "os.share".to_string(),
                 "system.location".to_string(),
-                "system.notifications.read".to_string(),
                 "system.notifications.send".to_string(),
                 "system.app_usage".to_string(),
                 "system.app.install".to_string(),
@@ -386,6 +397,8 @@ impl HostEnvironmentDescriptor {
                 "system.settings".to_string(),
             ],
             structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -402,7 +415,6 @@ impl HostEnvironmentDescriptor {
                 "os.open",
                 "os.share",
                 "system.location",
-                "system.notifications.read",
                 "system.notifications.send",
                 "system.app_usage",
                 "system.app.install",
@@ -638,6 +650,18 @@ fn defaultHostCapabilities() -> Vec<HostCapability> {
             operations: vec![CapabilityOperation::Read, CapabilityOperation::Execute],
         },
         HostCapability {
+            id: "screen.capture".to_string(),
+            displayName: "屏幕采集".to_string(),
+            scope: CapabilityScope::System,
+            operations: vec![CapabilityOperation::Read],
+        },
+        HostCapability {
+            id: "ocr.recognition".to_string(),
+            displayName: "图片文字识别".to_string(),
+            scope: CapabilityScope::Media,
+            operations: vec![CapabilityOperation::Read],
+        },
+        HostCapability {
             id: "system.location".to_string(),
             displayName: "定位".to_string(),
             scope: CapabilityScope::System,
@@ -704,6 +728,8 @@ fn defaultHostCapabilities() -> Vec<HostCapability> {
 #[allow(non_snake_case)]
 fn linuxHostCapabilityIds() -> Vec<&'static str> {
     vec![
+        "screen.capture",
+        "ocr.recognition",
         "fs.read",
         "fs.write",
         "fs.search",
@@ -1059,6 +1085,10 @@ pub trait BrowserAutomationHost: Send + Sync {
         request: BrowserAutomationRequest,
     ) -> HostResult<BrowserAutomationResponse>;
 }
+
+/// Constructs a browser host with the file-system capability selected by its runtime.
+pub type BrowserAutomationHostFactory =
+    Arc<dyn Fn(Arc<dyn FileSystemHost>) -> Arc<dyn BrowserAutomationHost> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserSessionInfo {
@@ -2069,14 +2099,14 @@ pub struct AppListData {
     pub packages: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationEntry {
     pub packageName: String,
     pub text: String,
     pub timestamp: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationData {
     pub notifications: Vec<NotificationEntry>,
     pub timestamp: i64,
@@ -2102,7 +2132,7 @@ pub struct AppUsageTimeResultData {
     pub entries: Vec<AppUsageTimeEntry>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LocationData {
     pub latitude: f64,
     pub longitude: f64,

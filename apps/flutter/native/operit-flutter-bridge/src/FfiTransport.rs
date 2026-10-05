@@ -1,12 +1,18 @@
 //! Direct Dart transport, selected only by the platform host dispatcher.
 //! Each connection retains the host runtime and owns its subscriptions.
 
+use crate::BridgeCodec::*;
+use crate::BridgeExports;
 use crate::BridgeExports::{bridge_native_call, bridge_push_item, bridge_watch_snapshot};
-use crate::*;
+use crate::OperitFlutterBridge;
 use futures_util::FutureExt;
 use operit_host_native_common::DartPort::{DartPort, PostCObject};
+use operit_link::{CoreEventKind, CoreLinkError, CoreLinkSharedClient};
 use std::collections::HashSet;
-use std::ffi::c_void;
+use std::collections::{hash_map::Entry, HashMap};
+use std::ffi::{c_char, c_void, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct FfiSession {
     bridge: Arc<OperitFlutterBridge>,
@@ -71,11 +77,14 @@ impl FfiSession {
             let weak = Arc::downgrade(self);
             let core = self.bridge.localCore.clone();
             let task_id = id.clone();
-            let scheduled = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
-                "operit-ffi-watch",
-                Box::new(move || {
-                    Box::pin(async move {
-                        let outcome = std::panic::AssertUnwindSafe(async {
+            let scheduled = self
+                .bridge
+                .runtimeTaskScheduler()
+                .scheduleHostRuntimeAsyncTask(
+                    "operit-ffi-watch",
+                    Box::new(move || {
+                        Box::pin(async move {
+                            let outcome = std::panic::AssertUnwindSafe(async {
                         let source = tokio::select! {
                             _ = &mut cancelled => return,
                             result = CoreLinkSharedClient::watch(core.as_ref(), request) => result,
@@ -113,29 +122,29 @@ impl FfiSession {
                             }
                         }
                         }).catch_unwind().await;
-                        if let Err(payload) = outcome {
-                            if let Some(session) = weak.upgrade() {
-                                session.post(
-                                    2,
-                                    request_id,
-                                    &native_result_error_vec(
-                                        "FATAL_CORE_PANIC",
-                                        BridgeExports::panic_payload_message(payload.as_ref()),
-                                    ),
-                                );
+                            if let Err(payload) = outcome {
+                                if let Some(session) = weak.upgrade() {
+                                    session.post(
+                                        2,
+                                        request_id,
+                                        &native_result_error_vec(
+                                            "FATAL_CORE_PANIC",
+                                            BridgeExports::panic_payload_message(payload.as_ref()),
+                                        ),
+                                    );
+                                }
                             }
-                        }
-                        if let Some(session) = weak.upgrade() {
-                            session
-                                .watches
-                                .lock()
-                                .expect("FFI watches lock")
-                                .remove(&task_id);
-                            session.post(3, request_id, &[]);
-                        }
-                    })
-                }),
-            );
+                            if let Some(session) = weak.upgrade() {
+                                session
+                                    .watches
+                                    .lock()
+                                    .expect("FFI watches lock")
+                                    .remove(&task_id);
+                                session.post(3, request_id, &[]);
+                            }
+                        })
+                    }),
+                );
             if let Err(error) = scheduled {
                 self.watches.lock().expect("FFI watches lock").remove(&id);
                 return Err(CoreLinkError::internal(error.to_string()));
@@ -282,22 +291,25 @@ unsafe extern "C" fn ffi_submit(
     let session = Arc::from_raw(pointer);
     let bytes = Box::from_raw(std::ptr::slice_from_raw_parts_mut(bytes, length));
     let worker_session = session.clone();
-    let result = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeTask(
-        "operit-ffi-request",
-        Box::new(move || {
-            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                worker_session.dispatch(operation, request, &bytes)
-            }));
-            let response = match response {
-                Ok(response) => response,
-                Err(payload) => native_result_error_vec(
-                    "FATAL_CORE_PANIC",
-                    BridgeExports::panic_payload_message(payload.as_ref()),
-                ),
-            };
-            worker_session.post(0, request, &response);
-        }),
-    );
+    let result = session
+        .bridge
+        .runtimeTaskScheduler()
+        .scheduleHostRuntimeTask(
+            "operit-ffi-request",
+            Box::new(move || {
+                let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_session.dispatch(operation, request, &bytes)
+                }));
+                let response = match response {
+                    Ok(response) => response,
+                    Err(payload) => native_result_error_vec(
+                        "FATAL_CORE_PANIC",
+                        BridgeExports::panic_payload_message(payload.as_ref()),
+                    ),
+                };
+                worker_session.post(0, request, &response);
+            }),
+        );
     if let Err(error) = result {
         session.post(
             0,

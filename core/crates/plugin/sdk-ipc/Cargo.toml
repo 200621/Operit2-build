@@ -1,6 +1,6 @@
 [package]
 name = "operit-plugin-sdk-ipc"
-version = "2.0.0-preview.11"
+version = "2.0.0-preview.12"
 edition.workspace = true
 license.workspace = true
 publish = false

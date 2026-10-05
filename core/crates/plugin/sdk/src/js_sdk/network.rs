@@ -173,6 +173,7 @@ pub struct NetHostBrowserEvaluateOptions {
 /// Supplies local files to an active browser file chooser.
 pub struct NetHostBrowserFileUploadOptions {
     /// Lists the local file paths selected for upload; omission cancels the chooser.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

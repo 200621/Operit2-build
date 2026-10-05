@@ -229,9 +229,9 @@ impl Drop for WindowsOcrImage {
     }
 }
 
-fn capture_windows_screenshot() -> HostResult<String> {
-    let outputPath = temp_capture_path("windows_screen")?;
-    let script = format!(
+/// Builds the PowerShell script that captures the full virtual Windows desktop.
+fn build_windows_screenshot_script(output_path: &Path) -> String {
+    format!(
         r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -247,25 +247,16 @@ try {{
     $bitmap.Dispose()
 }}
 "#,
-        path = ps_string_literal(&outputPath.to_string_lossy()),
-    );
-    run_powershell_command(&script, "capture Windows screenshot")?;
-    validate_file_path(&outputPath, "Windows screenshot")?;
-    windows_vfs_path_for_physical_path(&outputPath)
+        path = ps_string_literal(&output_path.to_string_lossy()),
+    )
 }
 
-/// Converts a Windows drive path into the shared mounted-drive VFS path.
-fn windows_vfs_path_for_physical_path(path: &Path) -> HostResult<String> {
-    let path = path.to_string_lossy().replace('\\', "/");
-    let bytes = path.as_bytes();
-    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
-        return Err(HostError::new(format!(
-            "Windows screenshot path is not an absolute drive path: {path}"
-        )));
-    }
-    let drive = (bytes[0] as char).to_ascii_lowercase();
-    let rest = path[2..].trim_start_matches('/');
-    Ok(format!("/mnt/windows/{drive}/{rest}"))
+/// Captures a Windows screenshot and returns its native physical path.
+fn capture_windows_screenshot() -> HostResult<String> {
+    let outputPath = temp_capture_path("windows_screen")?;
+    let script = build_windows_screenshot_script(&outputPath);
+    run_powershell_command(&script, "capture Windows screenshot")?;
+    validate_file_path(&outputPath, "Windows screenshot")
 }
 
 fn recognize_windows_text(
@@ -670,15 +661,11 @@ if ($packageName -match "^[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-
     parse_app_operation_data(run_powershell_json(&script, "uninstall Windows app")?)
 }
 
-fn get_windows_notifications(limit: i32) -> HostResult<NotificationData> {
-    if limit <= 0 {
-        return Err(HostError::new("limit must be greater than 0"));
-    }
-
-    let script = format!(
+/// Builds the PowerShell script that reads the Windows notification history.
+fn build_windows_notifications_script(limit: i32) -> String {
+    format!(
         r#"
 $ErrorActionPreference = 'Stop'
-try {{
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 [Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null
 [Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null
@@ -778,7 +765,16 @@ foreach ($notification in ($notifications | Sort-Object -Property CreationTime -
 }} | ConvertTo-Json -Depth 8 -Compress
 "#,
         limit = limit,
-    );
+    )
+}
+
+/// Reads Windows notification history through the Windows Runtime listener.
+fn get_windows_notifications(limit: i32) -> HostResult<NotificationData> {
+    if limit <= 0 {
+        return Err(HostError::new("limit must be greater than 0"));
+    }
+
+    let script = build_windows_notifications_script(limit);
 
     let output = Command::new("powershell.exe")
         .arg("-NoProfile")
@@ -1205,4 +1201,60 @@ fn json_optional_string(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|text| !text.is_empty())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use operit_host_api::FileSystemHost;
+
+    /// Parses a generated PowerShell script with the Windows PowerShell parser.
+    fn assert_powershell_script_is_parseable(script: String) {
+        let path =
+            std::env::temp_dir().join(format!("operit-system-script-{}.ps1", Uuid::new_v4()));
+        fs::write(&path, script).expect("write PowerShell test script");
+        let command = format!(
+            r#"$tokens = $null; $errors = $null; [System.Management.Automation.Language.Parser]::ParseFile({}, [ref]$tokens, [ref]$errors) > $null; if ($errors.Count -gt 0) {{ $errors | ForEach-Object {{ $_.Message }}; exit 1 }}"#,
+            ps_string_literal(&path.to_string_lossy())
+        );
+        let output = Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(command)
+            .output()
+            .expect("run PowerShell parser");
+        let _ = fs::remove_file(&path);
+        assert!(
+            output.status.success(),
+            "PowerShell parser rejected script: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Ensures the notification history script has balanced PowerShell blocks.
+    #[test]
+    fn notification_script_is_parseable() {
+        assert_powershell_script_is_parseable(build_windows_notifications_script(20));
+    }
+
+    /// Ensures the desktop screenshot script has balanced PowerShell blocks.
+    #[test]
+    fn screenshot_script_is_parseable() {
+        assert_powershell_script_is_parseable(build_windows_screenshot_script(Path::new(
+            r"C:\Users\Public\operit-test.png",
+        )));
+    }
+
+    /// Ensures a captured screenshot is readable by the Windows file-system host.
+    #[test]
+    fn screenshot_capture_returns_a_native_png_path() {
+        let path = capture_windows_screenshot().expect("capture Windows screenshot");
+        let bytes = crate::tools::fs::WindowsFileSystemHost::new()
+            .readFileBytes(&path)
+            .expect("read captured screenshot through Windows file host");
+        let image = image::load_from_memory(&bytes).expect("decode captured Windows screenshot");
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
+        fs::remove_file(path).expect("remove captured Windows screenshot");
+    }
 }

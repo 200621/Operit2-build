@@ -1100,6 +1100,8 @@ class _ClassicAttachmentPanelItemButton extends StatelessWidget {
   /// Builds one attachment popup action row.
   @override
   Widget build(BuildContext context) {
+    final enabled = item.onTap != null;
+    final disabledColor = Theme.of(context).disabledColor;
     return InkWell(
       onTap: item.onTap,
       child: SizedBox(
@@ -1108,14 +1110,14 @@ class _ClassicAttachmentPanelItemButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: <Widget>[
-              Icon(item.icon, size: 16, color: iconColor),
+              Icon(item.icon, size: 16, color: enabled ? iconColor : disabledColor),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   item.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: textStyle?.copyWith(color: textColor),
+                  style: textStyle?.copyWith(color: enabled ? textColor : disabledColor),
                 ),
               ),
             ],

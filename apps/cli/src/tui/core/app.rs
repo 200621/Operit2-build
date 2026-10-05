@@ -2456,7 +2456,7 @@ impl OperitTui {
         for event in drainedEvents {
             match event.propertyName.as_str() {
                 "currentChatIdFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<Option<String>>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<Option<String>>(&event)? {
                         if self.current_chat_id_cache != value {
                             self.current_chat_id_cache = value;
                             should_refresh_messages = true;
@@ -2465,8 +2465,8 @@ impl OperitTui {
                 }
                 "chatMessagesFlow" => {
                     if self.core.isActiveMainChatMessagesEvent(&event) {
-                        if let Ok(value) =
-                            operit_link::fromCoreValue::<Vec<ChatMessage>>(event.value)
+                        if let Some(value) =
+                            self.core.decodeStateFlowEvent::<Vec<ChatMessage>>(&event)?
                         {
                             let streamIds = value
                                 .iter()
@@ -2509,13 +2509,13 @@ impl OperitTui {
                 }
                 "chatStateFlow" => {
                     if self.core.isActiveMainChatStateEvent(&event) {
-                        if let Ok(value) = operit_link::fromCoreValue::<ChatState>(event.value) {
+                        if let Some(value) = self.core.decodeStateFlowEvent::<ChatState>(&event)? {
                             self.apply_chat_state(value);
                         }
                     }
                 }
                 "chatHistoriesFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<Vec<ChatHistory>>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<Vec<ChatHistory>>(&event)? {
                         self.chats = chat_histories_to_list(value);
                         if let Some(chat_id) = self.current_chat_id_cache.clone() {
                             self.select_chat_by_id(&chat_id);
@@ -2523,7 +2523,7 @@ impl OperitTui {
                     }
                 }
                 "currentWindowSizeFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<i64>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<i64>(&event)? {
                         self.current_window_size_cache = value;
                     }
                 }

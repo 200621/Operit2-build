@@ -1,5 +1,5 @@
-import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
@@ -21,6 +21,7 @@ const List<_V86GuestAsset> _v86GuestAssets = <_V86GuestAsset>[
   ),
 ];
 
+/// Builds platform assets and stages the pinned browser runtime dependencies.
 void main(List<String> args) async {
   await build(args, (input, output) async {
     final packageRoot = Directory.fromUri(input.packageRoot);
@@ -151,6 +152,12 @@ void main(List<String> args) async {
         'sql.js@1.14.1',
         'typescript@5.9.3',
         'v86@$_v86PackageVersion',
+        'tesseract.js@6.0.1',
+        'tesseract.js-core@6.0.0',
+        '@tesseract.js-data/eng@1.0.0',
+        '@tesseract.js-data/chi_sim@1.0.0',
+        '@tesseract.js-data/jpn@1.0.0',
+        '@tesseract.js-data/kor@1.0.0',
       ], workingDirectory: packageRoot.path);
 
       await _compileWebRuntimeBridge(
@@ -167,6 +174,7 @@ void main(List<String> args) async {
         sqlDist.uri.resolve('sql-wasm.wasm'),
       ).copy(File.fromUri(webBuildDir.uri.resolve('sql-wasm.wasm')).path);
       await _stageV86RuntimeAssets(depsDir, webBuildDir);
+      await _stageBrowserOcrAssets(depsDir, webBuildDir);
       await _syncWebRuntimeArtifacts(
         webBuildDir,
         Directory.fromUri(webSourceDir.uri.resolve('runtime/generated/')),
@@ -296,6 +304,10 @@ Future<void> _syncWebRuntimeArtifacts(
     await _copyWebRuntimeFileIfChanged(sourceFile, destinationFile);
   }
   await _syncGeneratedWebRuntimeDirectory(
+    Directory.fromUri(source.uri.resolve('ocr/')),
+    Directory.fromUri(destination.uri.resolve('ocr/')),
+  );
+  await _syncGeneratedWebRuntimeDirectory(
     Directory.fromUri(source.uri.resolve('v86/')),
     Directory.fromUri(destination.uri.resolve('v86/')),
   );
@@ -415,6 +427,64 @@ Future<void> _writeTextFileIfChanged(File destination, String contents) async {
   await destination.writeAsString(contents, flush: true);
 }
 
+/// Stages a pinned offline OCR engine and its four supported language models.
+Future<void> _stageBrowserOcrAssets(
+  Directory dependencies,
+  Directory output,
+) async {
+  for (final name in <String>['tesseract.min.js', 'worker.min.js']) {
+    await _copyRequiredWebRuntimeAsset(
+      File.fromUri(
+        dependencies.uri.resolve('node_modules/tesseract.js/dist/$name'),
+      ),
+      File.fromUri(output.uri.resolve('ocr/$name')),
+    );
+  }
+  for (final variant in <String>['', '-simd', '-lstm', '-simd-lstm']) {
+    for (final extension in <String>['wasm', 'wasm.js']) {
+      final name = 'tesseract-core$variant.$extension';
+      await _copyRequiredWebRuntimeAsset(
+        File.fromUri(
+          dependencies.uri.resolve('node_modules/tesseract.js-core/$name'),
+        ),
+        File.fromUri(output.uri.resolve('ocr/core/$name')),
+      );
+    }
+  }
+  for (final language in <String>['eng', 'chi_sim', 'jpn', 'kor']) {
+    await _copyRequiredWebRuntimeAsset(
+      File.fromUri(
+        dependencies.uri.resolve(
+          'node_modules/@tesseract.js-data/$language/4.0.0_best_int/$language.traineddata.gz',
+        ),
+      ),
+      File.fromUri(
+        output.uri.resolve('ocr/languages/$language.traineddata.gz'),
+      ),
+    );
+  }
+  for (final artifact in <({String source, String destination})>[
+    (source: 'tesseract.js/LICENSE.md', destination: 'tesseract.js.LICENSE.md'),
+    (
+      source: 'tesseract.js-core/LICENSE',
+      destination: 'tesseract.js-core.LICENSE',
+    ),
+    (
+      source: 'tesseract.js/dist/tesseract.min.js.LICENSE.txt',
+      destination: 'tesseract.min.js.LICENSE.txt',
+    ),
+    (
+      source: 'tesseract.js/dist/worker.min.js.LICENSE.txt',
+      destination: 'worker.min.js.LICENSE.txt',
+    ),
+  ]) {
+    await _copyRequiredWebRuntimeAsset(
+      File.fromUri(dependencies.uri.resolve('node_modules/${artifact.source}')),
+      File.fromUri(output.uri.resolve('ocr/${artifact.destination}')),
+    );
+  }
+}
+
 /// Stages the v86 emulator runtime and verified BIOS resources.
 Future<void> _stageV86RuntimeAssets(
   Directory dependencies,
@@ -503,6 +573,7 @@ Future<void> _invalidateWebRuntimeArtifacts(
 
 const Set<String> _webRuntimeArtifactNames = <String>{
   'operit_runtime_bridge.js',
+  'browser_system_capabilities.js',
   'operit_runtime_worker.js',
   'operit_model_install_worker.js',
   'v86_runtime_worker.js',

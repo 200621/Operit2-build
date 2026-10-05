@@ -3,6 +3,7 @@ use crate::ServiceDiscovery::ServiceDiscoveryHost;
 
 use crate::{
     ArchiveStagingHost, AudioPlaybackHost, BluetoothHost, BrowserAutomationHost,
+    BrowserAutomationHostFactory,
     BrowserSessionHost, ComposeDslWebViewHost, DeviceIoHost, FileSystemHost,
     HostEnvironmentDescriptor, HostJavaScriptRuntimeHost, HostRuntimeEventHost,
     HostRuntimeEventSchedulerHost, HostRuntimeTaskSchedulerHost, HostSecretStore, HttpHost,
@@ -532,6 +533,16 @@ impl HostManager {
     ) -> Self {
         self.browserAutomationHost = Some(browserAutomationHost);
         self
+    }
+
+    /// Constructs a browser automation host with this runtime's file-system capability.
+    #[allow(non_snake_case)]
+    pub fn withBrowserAutomationHostFactory(self, factory: BrowserAutomationHostFactory) -> Self {
+        let fileSystemHost = self
+            .fileSystemHost
+            .clone()
+            .expect("FileSystemHost must be configured before constructing a browser host");
+        self.withBrowserAutomationHost(factory(fileSystemHost))
     }
 
     /// Adds a browser session host for interactive browser sessions.

@@ -192,6 +192,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
   late final Map<String?, TextEditingValue> _inputDraftsByChatId;
   final List<ChatUiMessage> _messages = <ChatUiMessage>[];
   List<AttachmentInfo> _attachments = const <AttachmentInfo>[];
+  Set<String>? _attachmentHostCapabilities;
   late final ValueNotifier<_ChatContentData> _chatContentDataNotifier;
   late final ValueNotifier<bool> _autoScrollToBottomNotifier;
   late final ValueNotifier<String?> _toastMessageNotifier;
@@ -267,6 +268,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _onChatSelectionTransition();
     _messageController.addListener(_onMessageControllerChanged);
     unawaited(_loadLongPastedTextInputSettings());
+    unawaited(_loadAttachmentHostCapabilities());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _consumePendingChatDraft();
@@ -318,6 +320,35 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _topBarController?.clearTitleContent(owner: _topBarTitleOwner);
     _mainLayoutController?.clearAttachment(owner: _mainLayoutOwner);
     super.dispose();
+  }
+
+  /// Reads attachment capabilities from the active runtime's host descriptor.
+  Future<void> _loadAttachmentHostCapabilities() async {
+    try {
+      final descriptor = await _viewModel.clients.servicesRuntimeHostInfoService
+          .runtimeHostDescriptor();
+      if (!mounted) return;
+      setState(() => _attachmentHostCapabilities = descriptor.capabilities.toSet());
+    } catch (error, stackTrace) {
+      ClientLogger.e('Unable to read attachment host capabilities',
+        tag: 'AIChatScreen', error: error, stackTrace: stackTrace);
+      if (mounted) _showLocalToast('无法读取附件 Host 能力：$error');
+    }
+  }
+
+  /// Checks an exact host capability identifier without platform-specific UI logic.
+  bool _hasAttachmentHostCapability(String id) =>
+      _attachmentHostCapabilities?.lookup(id) != null;
+
+  /// Runs one attachment action and presents its actual failure to the user.
+  Future<void> _runAttachmentAction(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (error, stackTrace) {
+      ClientLogger.e('Attachment action failed', tag: 'AIChatScreen',
+        error: error, stackTrace: stackTrace);
+      if (mounted) _showLocalToast('添加附件失败：$error');
+    }
   }
 
   /// Loads the global long-paste conversion settings used by this chat surface.
@@ -1057,6 +1088,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _publishChatContentData();
   }
 
+  /// Selects image files through the registered Flutter file selector.
   Future<void> _handleAttachImage() async {
     const imageGroup = XTypeGroup(
       label: 'image',
@@ -1068,13 +1100,21 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     await _handleSelectedAttachmentFiles(files);
   }
 
+  /// Selects files through the registered Flutter file selector.
   Future<void> _handleAttachFile() async {
     final files = await openFiles();
     await _handleSelectedAttachmentFiles(files);
   }
 
-  Future<void> _handleSelectedAttachmentFiles(List<XFile> files) {
-    return _handleAttachmentPaths(files.map((file) => file.path).toList());
+  /// Transfers selected bytes instead of exposing picker paths to the runtime.
+  Future<void> _handleSelectedAttachmentFiles(List<XFile> files) async {
+    for (final file in files) {
+      final bytes = await file.readAsBytes();
+      await _viewModel.attachTransferredFile(
+        TransferredFileAttachmentPayload(fileName: file.name, bytes: bytes),
+      );
+    }
+    await _refreshAttachments();
   }
 
   Future<void> _handleAttachmentPaths(List<String> paths) async {
@@ -1094,6 +1134,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     await _refreshAttachments();
   }
 
+  /// Adds a runtime-owned special attachment through the shared chat boundary.
   Future<void> _handleSpecialAttachment(String filePath) async {
     await _viewModel.handleAttachment(filePath);
     await _refreshAttachments();
@@ -2279,26 +2320,11 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
           onEditPendingQueueMessage: _editPendingQueueMessage,
           onSendPendingQueueMessage: _sendPendingQueueMessage,
           attachments: data.attachments,
-          onAttachImage: () {
-            _handleAttachImage().catchError((
-              Object error,
-              StackTrace stackTrace,
-            ) {
-              debugPrint('Failed to attach image: $error\n$stackTrace');
-              return null;
-            });
-          },
-          onTakePhoto: _handleTakePhoto,
+          onAttachImage: () => _runAttachmentAction(_handleAttachImage),
+          onTakePhoto: ImagePickerPlatform.instance.supportsImageSource(ImageSource.camera)
+              ? _handleTakePhoto : null,
           onAttachMemory: _handleAttachMemory,
-          onAttachFile: () {
-            _handleAttachFile().catchError((
-              Object error,
-              StackTrace stackTrace,
-            ) {
-              debugPrint('Failed to attach file: $error\n$stackTrace');
-              return null;
-            });
-          },
+          onAttachFile: () => _runAttachmentAction(_handleAttachFile),
           onAttachFiles: (paths) {
             _handleAttachmentPaths(paths).catchError((
               Object error,
@@ -2317,35 +2343,16 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
               return null;
             });
           },
-          onAttachScreenContent: () {
-            _handleSpecialAttachment('screen_capture').catchError((
-              Object error,
-              StackTrace stackTrace,
-            ) {
-              debugPrint(
-                'Failed to attach screen content: $error\n$stackTrace',
-              );
-              return null;
-            });
-          },
-          onAttachNotifications: () {
-            _handleSpecialAttachment('notifications_capture').catchError((
-              Object error,
-              StackTrace stackTrace,
-            ) {
-              debugPrint('Failed to attach notifications: $error\n$stackTrace');
-              return null;
-            });
-          },
-          onAttachLocation: () {
-            _handleSpecialAttachment('location_capture').catchError((
-              Object error,
-              StackTrace stackTrace,
-            ) {
-              debugPrint('Failed to attach location: $error\n$stackTrace');
-              return null;
-            });
-          },
+          onAttachScreenContent: _hasAttachmentHostCapability('screen.capture') &&
+                  _hasAttachmentHostCapability('ocr.recognition')
+              ? () => _runAttachmentAction(() => _handleSpecialAttachment('screen_capture'))
+              : null,
+          onAttachNotifications: _hasAttachmentHostCapability('system.notifications.read')
+              ? () => _runAttachmentAction(() => _handleSpecialAttachment('notifications_capture'))
+              : null,
+          onAttachLocation: _hasAttachmentHostCapability('system.location')
+              ? () => _runAttachmentAction(() => _handleSpecialAttachment('location_capture'))
+              : null,
           onAttachPackage: (packageName) {
             _handleAttachPackage(packageName).catchError((
               Object error,

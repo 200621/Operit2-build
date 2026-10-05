@@ -61,3 +61,46 @@ Validation: the Flutter transport tests invoke real FFI function pointers and
 responses, early events, source errors, cancellation, isolated connections,
 protocol failures, and ordered push cleanup. They do not replace device testing
 of the Rust library and platform host together.
+
+## Host and bridge ownership
+
+The crate entry point only declares modules and exports the public ABI. The
+responsibilities below are intentionally not duplicated between platforms:
+
+| Module | Responsibility |
+| --- | --- |
+| `BridgeRuntime` | One local Core lifecycle, permission requester, and runtime-owned scheduler |
+| `BridgeTransport` | Shared push registration, sequence validation, watch opening, cancellation, and registration generations |
+| `BridgeCodec` | Existing compact MessagePack requests, results, and event frames |
+| `FlutterHostAdapters` | Browser automation, browser sessions, web visits, and Compose owner boundaries |
+| `FlutterOwnerCapabilities` | Typed audio, music, TTS, inference, system, and terminal host adapters |
+| `PlatformRuntimeFactory` | One common startup pipeline with no target conditions in the file itself |
+| `platform_runtime/*` | One complete host assembly module per target, selected in one small selector |
+| `PlatformRuntimeExecution` | Blocking-vs-Promise execution and native watch queue delivery |
+| `PlatformRuntimeAbi` | ABI module selection, separate from host construction |
+| `BridgeExports` / `FfiTransport` / `AndroidJni` | Public ABI decoding, pointer ownership, and frontend connection delivery |
+
+Platform-specific dependencies and conditional compilation stay at the host or
+ABI dispatch boundary. Shared runtime and stream code do not import platform
+host implementations or JavaScript types. The bridge does not allocate an unused
+second Tokio runtime. Each connection schedules work through the scheduler
+installed on its own Core host manager.
+
+System callback routing is selected once during assembly. Android identity is
+supplied by JNI before owner UI subscriptions exist. Apple identity comes from
+the native system host. macOS screenshot requests use the real system screenshot
+host; they do not call the owner channel that explicitly rejects that operation.
+Media adapters implement the host traits directly rather than converting to
+platform command enums and parsing string-valued commands again.
+
+Duplicate push ids are rejected without replacing the original session. Every
+watch owns a registration generation, so an old completing task cannot remove a
+new subscription that reuses its id. Source-open failures are reported before a
+legacy C watch-open acknowledgement. The public function names and MessagePack
+layouts are unchanged.
+
+Architecture contracts can be checked without building the application:
+
+```powershell
+node --test tools/tests/flutter_bridge_architecture.test.mjs tools/tests/android_runtime_contracts.test.mjs
+```

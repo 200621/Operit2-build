@@ -63,9 +63,9 @@
         },
         {
             "name": "upload",
-            "description": { "zh": "向当前文件选择器上传文件。", "en": "Upload files to the current file chooser." },
+            "description": { "zh": "向点击或执行脚本打开的当前文件选择器上传文件；支持单文件、多文件及取消，上传失败保留选择器。", "en": "Upload files to the chooser opened by a click or page script. Supports single/multiple files and cancellation; failed uploads preserve the chooser." },
             "parameters": [
-                { "name": "paths", "description": { "zh": "可选，绝对路径数组；不传则取消 file chooser。", "en": "Optional absolute file paths; omit to cancel the file chooser." }, "type": "array", "required": false }
+                { "name": "paths", "description": { "zh": "可选，host 文件系统中的绝对文件路径数组；省略表示取消并保留已选文件，空数组表示清空。多个文件要求选择器支持 multiple。", "en": "Optional absolute file paths in the host file system. Omission cancels without changing selected files; an empty array clears the selection. Multiple files require a multiple chooser." }, "type": "array", "required": false }
             ]
         },
         {
@@ -384,6 +384,7 @@ async function evaluate(params: EvaluatePayload) {
     return maybePersistLargeBrowserResponse(result, "evaluate");
 }
 
+/** Uploads host-backed files into the active chooser or explicitly cancels it. */
 async function upload(params: UploadPayload = {}) {
     const result = await Tools.Net.browserFileUpload(params);
     return maybePersistLargeBrowserResponse(result, "upload");

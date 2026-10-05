@@ -109,6 +109,7 @@ class OwnerSystemCapabilityChannel(
     private var musicVolume: Double = 1.0
     private var musicLoopPlayback: Boolean = false
     private var musicMessage: String = "android music player idle"
+    private val locationReader = AndroidLocationReader(activity)
     private val bluetoothClassicSockets = ConcurrentHashMap<String, BluetoothSocket>()
     private val bluetoothClassicServers = ConcurrentHashMap<String, BluetoothServerSocket>()
     private val bluetoothBleSessions = ConcurrentHashMap<String, BluetoothBleSession>()
@@ -242,6 +243,11 @@ class OwnerSystemCapabilityChannel(
     }
 
     /** Executes one generic Core-owned system operation. */
+    /** Delivers the permission result to the location request that owns it. */
+    fun onRequestPermissionsResult(requestCode: Int): Boolean =
+        locationReader.onRequestPermissionsResult(requestCode)
+
+    /** Dispatches owner system operations on the runtime worker. */
     private fun ownerSystemOperation(call: MethodCall, result: MethodChannel.Result) {
         val payload = call.arguments as? Map<*, *>
         if (payload == null) {
@@ -259,6 +265,15 @@ class OwnerSystemCapabilityChannel(
                 val response =
                     when (operation) {
                         "send_notification" -> systemSendNotification(JSONObject(paramsJson))
+                        "get_device_location" -> mapOf(
+                            "resultJson" to JSONObject(locationReader.read(JSONObject(paramsJson))).toString(),
+                        )
+                        "get_notifications" -> {
+                            val params = JSONObject(paramsJson)
+                            mapOf("resultJson" to JSONObject(OperitNotificationListener.read(
+                                activity, params.getInt("limit"), params.getBoolean("includeOngoing"),
+                            )).toString())
+                        }
                         "get_device_info" -> mapOf(
                             "resultJson" to AndroidHostDeviceInfo.read(activity.applicationContext),
                         )

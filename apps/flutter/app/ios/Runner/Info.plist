@@ -35,6 +35,8 @@
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Operit2 uses Bluetooth to discover and connect to nearby devices for device communication and control.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Operit uses your current location only when you request a location attachment.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Operit2 uses the camera to capture photos for chat attachments.</string>
 	<key>NSBonjourServices</key>

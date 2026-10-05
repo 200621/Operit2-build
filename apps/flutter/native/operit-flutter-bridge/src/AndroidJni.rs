@@ -1,7 +1,11 @@
-use crate::*;
+use crate::BridgeExports::*;
+use crate::BridgeExports::{last_create_error, panic_payload_message, set_last_create_error};
+use crate::OperitFlutterBridge;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Accepts the borrowed pipe descriptors delivered by the Android Binder endpoint.
 #[no_mangle]
@@ -16,6 +20,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_acceptPluginSd
     }
 }
 
+/// Decodes an exact JNI boolean literal and rejects invalid owner input.
 fn jni_bool_arg(env: &mut JNIEnv, value: &JString, name: &str) -> Result<bool, String> {
     let value = env
         .get_string(value)
@@ -142,7 +147,9 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstr
     };
     new_java_string(
         env,
-        &crate::RuntimeBootstrapStore::readNativeRuntimeBootstrapConfig(default_runtime_root),
+        &crate::PlatformRuntimeAbi::RuntimeBootstrapStore::readNativeRuntimeBootstrapConfig(
+            default_runtime_root,
+        ),
     )
 }
 
@@ -182,7 +189,7 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_runtimeBootstr
     };
     new_java_string(
         env,
-        &crate::RuntimeBootstrapStore::writeNativeRuntimeBootstrapConfig(
+        &crate::PlatformRuntimeAbi::RuntimeBootstrapStore::writeNativeRuntimeBootstrapConfig(
             default_runtime_root,
             &content,
         ),
@@ -206,15 +213,13 @@ pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_connectCoreFfi
     _class: JClass,
     handle: jlong,
 ) -> jstring {
-    let descriptor = crate::PlatformRuntimeFactory::FfiTransport::operit_flutter_bridge_ffi_connect(
+    let descriptor = crate::PlatformRuntimeAbi::FfiTransport::operit_flutter_bridge_ffi_connect(
         handle as *const OperitFlutterBridge,
     );
     let result = new_java_string(env, CStr::from_ptr(descriptor).to_str().expect("FFI JSON"));
     operit_flutter_bridge_free_string(descriptor);
     result
 }
-
-
 
 #[no_mangle]
 pub unsafe extern "system" fn Java_app_operit_OperitRuntimeNative_emitRuntimeEvent(

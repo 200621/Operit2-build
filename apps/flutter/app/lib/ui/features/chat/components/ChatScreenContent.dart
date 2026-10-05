@@ -164,14 +164,14 @@ class ChatScreenContent extends StatelessWidget {
   final ValueChanged<int> onSendPendingQueueMessage;
   final List<AttachmentInfo> attachments;
   final VoidCallback onAttachImage;
-  final VoidCallback onTakePhoto;
+  final VoidCallback? onTakePhoto;
   final VoidCallback onAttachMemory;
   final VoidCallback onAttachFile;
   final ValueChanged<List<String>> onAttachFiles;
   final ValueChanged<List<PastedImageAttachmentPayload>> onPasteImages;
-  final VoidCallback onAttachScreenContent;
-  final VoidCallback onAttachNotifications;
-  final VoidCallback onAttachLocation;
+  final VoidCallback? onAttachScreenContent;
+  final VoidCallback? onAttachNotifications;
+  final VoidCallback? onAttachLocation;
   final ValueChanged<String> onAttachPackage;
   final ValueChanged<String> onRemoveAttachment;
   final ValueChanged<AttachmentInfo> onInsertAttachment;

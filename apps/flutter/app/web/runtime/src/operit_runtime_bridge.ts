@@ -1,3 +1,6 @@
+import { captureBrowserScreen, readBrowserLocation, recognizeBrowserText,
+  type BrowserOcrEngine } from "./browser_system_capabilities.js";
+
 type JsonValue =
   | null
   | boolean
@@ -501,6 +504,7 @@ interface ManagedRuntimeProcess {
 }
 
 interface RuntimeGlobals {
+  Tesseract?: BrowserOcrEngine;
   __OPERIT_MODEL_INSTALL_WORKER__?: boolean;
   __OPERIT_RUNTIME_WORKER__?: boolean;
   __operitRuntime?: RuntimeBridge;
@@ -1703,6 +1707,21 @@ interface ModelInstallWorkerError {
       script.onerror = () => reject(new Error(`failed to load ${assetUrl}`));
       document.head.appendChild(script);
     });
+  }
+
+  let browserOcrEnginePromise: Promise<BrowserOcrEngine> | null = null;
+
+  /** Initializes the bundled OCR script exactly once for the browser runtime owner. */
+  function browserOcrEngine(): Promise<BrowserOcrEngine> {
+    if (browserOcrEnginePromise === null) {
+      browserOcrEnginePromise = (async () => {
+        await loadScript("ocr/tesseract.min.js");
+        const engine = runtimeGlobal.Tesseract;
+        if (engine === undefined) throw new Error("The bundled browser OCR engine is unavailable");
+        return engine;
+      })();
+    }
+    return browserOcrEnginePromise;
   }
 
   async function ensureSqlite(): Promise<void> {
@@ -4457,8 +4476,9 @@ self.onmessage = (event) => {
       stopApp(packageName: string) {
         return { operationType: "stop", packageName, success: false, details: "" };
       },
+      /** Rejects notification history that browsers do not expose to applications. */
       getNotifications() {
-        return { notifications: [] as string[], timestamp: Date.now() };
+        throw new Error("Browsers do not expose other applications' system notifications");
       },
       getAppUsageTime(
         packageName: string,
@@ -4476,19 +4496,20 @@ self.onmessage = (event) => {
           entries: [] as string[],
         };
       },
-      getDeviceLocation() {
-        return {
-          latitude: 0,
-          longitude: 0,
-          accuracy: 0,
-          provider: "web",
-          timestamp: Date.now(),
-          rawData: "",
-          address: "",
-          city: "",
-          province: "",
-          country: "",
-        };
+      /** Acquires a current user-authorized position from the browser. */
+      getDeviceLocation(timeout: number, highAccuracy: boolean, includeAddress: boolean) {
+        return readBrowserLocation(timeout, highAccuracy, includeAddress);
+      },
+      /** Transfers a user-selected screen image to the runtime-owned file-system host. */
+      async captureScreenshot() {
+        const bytes = await captureBrowserScreen();
+        return { path: `temp/clean_on_exit/browser_screen_${createRandomUuid()}.png`, bytes };
+      },
+      /** Recognizes worker-owned image bytes using the application's bundled OCR assets. */
+      async recognizeText(bytes: Uint8Array, language: string, quality: string) {
+        const assetRoot = new URL("./ocr/", import.meta.url);
+        const engine = await browserOcrEngine();
+        return recognizeBrowserText(bytes, language, quality, engine, assetRoot);
       },
       getDeviceInfo() {
         return {
