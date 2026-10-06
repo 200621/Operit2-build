@@ -1444,15 +1444,21 @@ impl OperitTui {
     }
 
     async fn accept_startup_workspace_prompt(&mut self) -> Result<(), String> {
-        let Some(prompt) = self.startup_workspace_prompt.take() else {
+        let Some(prompt) = self.startup_workspace_prompt.clone() else {
             return Ok(());
         };
         let chat_id = self.current_chat_id()?;
-        self.core
+        let bind_result = self
+            .core
             .chat_runtime_holder_main()
             .bindChatToWorkspace(chat_id.clone(), prompt.path.clone())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
+        if let Err(error) = bind_result {
+            self.set_status_message(error);
+            return Ok(());
+        }
+        self.startup_workspace_prompt = None;
         self.refresh_core_snapshot().await?;
         self.refresh_chats().await;
         self.select_chat_by_id(&chat_id);

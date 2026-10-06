@@ -2166,16 +2166,21 @@ impl ChatHistoryDelegate {
             .getWorkspaceForChat(&chatId)
             .map_err(|error| error.to_string())?
         {
-            Some(existing) => self
-                .chatHistoryManager
-                .addWorkspaceFolder(
-                    existing.id,
-                    operit_model::Workspace::WorkspaceFolder {
-                        name: folderName,
-                        path: folderPath,
-                    },
-                )
-                .map_err(|error| error.to_string())?,
+            Some(existing) => {
+                if existing.folders.iter().any(|folder| folder.path == folderPath) {
+                    existing
+                } else {
+                    self.chatHistoryManager
+                        .addWorkspaceFolder(
+                            existing.id,
+                            operit_model::Workspace::WorkspaceFolder {
+                                name: folderName,
+                                path: folderPath,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?
+                }
+            }
             None => {
                 let created = self
                     .chatHistoryManager
