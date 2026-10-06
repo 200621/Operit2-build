@@ -4,6 +4,7 @@ use crate::OperitFlutterBridge;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
+use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 

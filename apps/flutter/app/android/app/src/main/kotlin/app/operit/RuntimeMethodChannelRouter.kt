@@ -50,7 +50,7 @@ class RuntimeMethodChannelRouter(
         permissions: Array<out String>,
         grantResults: IntArray,
     ): Boolean {
-        if (ownerSystem.onRequestPermissionsResult(requestCode)) return true
+        if (ownerSystemChannel.onRequestPermissionsResult(requestCode)) return true
         return androidPlatformChannel.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 

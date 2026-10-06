@@ -202,9 +202,17 @@ val operitPluginSyncPython = if (System.getProperty("os.name").lowercase().conta
 } else {
     operitRepoRoot.resolve(".venv/bin/python")
 }
+val operitIsWindows = System.getProperty("os.name").lowercase().contains("windows")
 val operitBridgeJniLibs = project.layout.projectDirectory.dir("src/main/jniLibs").asFile
-val operitLibclangDir = operitRepoRoot
-    .resolve("target/operit-build-tools/libclang.runtime.win-x64.21.1.8/runtimes/win-x64/native")
+val operitLibclangDir = when {
+    System.getenv("OPERIT_LIBCLANG_DIR") != null ->
+        file(System.getenv("OPERIT_LIBCLANG_DIR"))
+    operitIsWindows ->
+        operitRepoRoot
+            .resolve("target/operit-build-tools/libclang.runtime.win-x64.21.1.8/runtimes/win-x64/native")
+    else ->
+        file("/usr/lib")
+}
 // Converts a file path into the clang-compatible slash format.
 fun File.clangPath(): String = absolutePath.replace('\\', '/')
 
@@ -229,15 +237,15 @@ val cargoBuildOperitFlutterBridgeTasks = selectedOperitRustTargets.map { target 
             .resolve("toolchains")
             .resolve("llvm")
             .resolve("prebuilt")
-            .resolve("windows-x86_64")
+            .resolve(if (operitIsWindows) "windows-x86_64" else "linux-x86_64")
             .resolve("bin")
         val linkerPrefix = if (target.rustTarget == "armv7-linux-androideabi") {
             "armv7a-linux-androideabi"
         } else {
             clangPrefix
         }
-        val linker = ndkToolchain.resolve("${linkerPrefix}${apiLevel}-clang.cmd")
-        val ar = ndkToolchain.resolve("llvm-ar.exe")
+        val linker = ndkToolchain.resolve("${linkerPrefix}${apiLevel}-clang${if (operitIsWindows) ".cmd" else ""}")
+        val ar = ndkToolchain.resolve(if (operitIsWindows) "llvm-ar.exe" else "llvm-ar")
         val clangResourceDir = ndkToolchain
             .parentFile
             .resolve("lib")
