@@ -37,6 +37,19 @@ conversation orchestration, store access, and tool integration.
 - `src/stt`: built-in speech-to-text provider contracts and implementations.
 - `src/market`: provider market services.
 
+## Anthropic Model Discovery
+
+`ModelListFetcher` sends both `ANTHROPIC` and `ANTHROPIC_GENERIC` catalog
+requests through the shared HTTP host, using `x-api-key` authentication and
+`anthropic-version: 2023-06-01`, matching the Kotlin model-list implementation.
+The API key comes from the provider's configured key selection, including
+rotation through enabled key-pool entries. Explicit custom headers replace
+matching header names case-insensitively. Missing required authentication or
+an empty version header returns a configuration error before any HTTP request.
+
+Source contract checks are in `tools/tests/anthropic_model_catalog.test.mjs`;
+request-header unit tests are in `ModelListFetcher.rs`.
+
 ## Boundary
 
 Runtime-owned behavior is requested through `ProviderRuntimeSupport`;

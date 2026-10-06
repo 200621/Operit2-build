@@ -641,7 +641,9 @@ void main() {
       );
       final save = tester.getRect(find.text('Save'));
       expect(save.bottom, lessThan(size.height));
-      final list = tester.widget<ListView>(find.byType(ListView));
+      final list = tester.widget<ListView>(
+        find.byWidgetPredicate((widget) => widget is ListView),
+      );
       list.controller!.jumpTo(list.controller!.position.maxScrollExtent);
       await tester.pumpAndSettle();
       expect(find.text('Field 29'), findsOneWidget);
@@ -744,7 +746,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Entry 0'), findsOneWidget);
     expect(find.text('Entry 199'), findsNothing);
-    final list = tester.widget<ListView>(find.byType(ListView));
+    final list = tester.widget<ListView>(
+      find.byWidgetPredicate((widget) => widget is ListView),
+    );
     list.controller!.jumpTo(list.controller!.position.maxScrollExtent);
     await tester.pumpAndSettle();
     expect(find.text('Entry 199'), findsOneWidget);

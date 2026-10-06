@@ -25,6 +25,7 @@ import android.media.projection.MediaProjection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
@@ -277,6 +278,8 @@ class OwnerSystemCapabilityChannel(
                         "get_device_info" -> mapOf(
                             "resultJson" to AndroidHostDeviceInfo.read(activity.applicationContext),
                         )
+                        "get_system_setting" -> systemGetSystemSetting(JSONObject(paramsJson))
+                        "modify_system_setting" -> systemModifySystemSetting(JSONObject(paramsJson))
                         "execute_privileged_command" -> systemExecutePrivilegedCommand(JSONObject(paramsJson))
                         else -> throw IllegalArgumentException("unsupported system operation: $operation")
                     }
@@ -287,6 +290,50 @@ class OwnerSystemCapabilityChannel(
                 }
             }
         }
+    }
+
+    /** Reads one exact Android settings namespace and returns its stored value. */
+    private fun systemGetSystemSetting(params: JSONObject): Map<String, String> {
+        val namespace = params.getString("namespace")
+        val setting = params.getString("setting")
+        require(setting.isNotBlank()) { "Android system setting name must not be blank" }
+        val resolver = activity.contentResolver
+        val value = when (namespace) {
+            "system" -> Settings.System.getString(resolver, setting)
+            "secure" -> Settings.Secure.getString(resolver, setting)
+            "global" -> Settings.Global.getString(resolver, setting)
+            else -> throw IllegalArgumentException("unsupported Android settings namespace: $namespace")
+        } ?: throw IllegalStateException("Android system setting does not exist: $namespace/$setting")
+        return mapOf(
+            "resultJson" to JSONObject()
+                .put("namespace", namespace)
+                .put("setting", setting)
+                .put("value", value)
+                .toString(),
+        )
+    }
+
+    /** Writes one Android setting and reads back the value accepted by its provider. */
+    private fun systemModifySystemSetting(params: JSONObject): Map<String, String> {
+        val namespace = params.getString("namespace")
+        val setting = params.getString("setting")
+        val value = params.getString("value")
+        require(setting.isNotBlank()) { "Android system setting name must not be blank" }
+        require(value.isNotEmpty()) { "Android system setting value must not be empty" }
+        val resolver = activity.contentResolver
+        val written = when (namespace) {
+            "system" -> {
+                check(Settings.System.canWrite(activity)) {
+                    "Android WRITE_SETTINGS permission is not granted for $namespace/$setting"
+                }
+                Settings.System.putString(resolver, setting, value)
+            }
+            "secure" -> Settings.Secure.putString(resolver, setting, value)
+            "global" -> Settings.Global.putString(resolver, setting, value)
+            else -> throw IllegalArgumentException("unsupported Android settings namespace: $namespace")
+        }
+        check(written) { "Android system setting write was rejected: $namespace/$setting" }
+        return systemGetSystemSetting(params)
     }
 
     /** Posts one native Android notification requested by the Runtime. */

@@ -38,7 +38,7 @@ class JoinBridge extends OperitRuntimeBridge {
   final calls = <String>[];
   Map<String, Object?>? decision;
   Completer<Uint8List>? submission, refresh;
-  bool failSubmit = false, failDecision = false;
+  bool failSubmit = false, failDecision = false, failCancel = false;
   @override
   Future<Uint8List> callBytes(CoreCallRequest request) async {
     calls.add(request.methodName);
@@ -63,6 +63,7 @@ class JoinBridge extends OperitRuntimeBridge {
         );
         return encodeCoreLink([0, response]);
       case 'cancelDeviceSpaceJoin':
+        if (failCancel) throw StateError('Cancellation transport unavailable');
         response = joinRequest(status: 'cancelled');
         return encodeCoreLink([0, response]);
       case 'deviceSpace':
@@ -173,7 +174,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(AlertDialog), findsOneWidget);
       expect(find.text('提交申请'), findsOneWidget);
-      expect(find.textContaining('COMMAND_ERROR'), findsNothing);
+      expect(find.textContaining('COMMAND_ERROR'), findsOneWidget);
       bridge.failSubmit = false;
       await tester.tap(find.text('提交申请'));
       await tester.pumpAndSettle();
@@ -293,6 +294,75 @@ void main() {
     expect(find.text('已取消'), findsOneWidget);
     await dispose(tester, bridge);
   });
+
+  /// Verifies user cancellation is dispatched while an older background refresh is pending.
+  testWidgets(
+    'cancel is enabled during polling and ignores late pending responses',
+    (tester) async {
+      final bridge = JoinBridge();
+      await mount(tester, bridge);
+      await tester.tap(find.text('申请'));
+      await tester.pumpAndSettle();
+      bridge.refresh = Completer<Uint8List>();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(bridge.calls, contains('refreshDeviceSpaceJoin'));
+      await tester.tap(find.text('取消申请'));
+      await tester.pumpAndSettle();
+      expect(bridge.calls, contains('cancelDeviceSpaceJoin'));
+      expect(find.text('已取消'), findsOneWidget);
+      bridge.refresh!.complete(encodeCoreLink([0, joinRequest()]));
+      await tester.pumpAndSettle();
+      expect(find.text('已取消'), findsOneWidget);
+      expect(find.text('等待批准'), findsNothing);
+      await dispose(tester, bridge);
+    },
+  );
+
+  /// Verifies an unacknowledged local submission is not presented as an offline reviewer.
+  testWidgets(
+    'failed unassigned submission shows the real failure and remains cancellable',
+    (tester) async {
+      final pending = joinRequest()
+        ..['reviewerDeviceId'] = null
+        ..['reviewerName'] = null
+        ..['reviewerHops'] = null;
+      final bridge = JoinBridge()
+        ..failSubmit = true
+        ..outgoing = [pending];
+      await mount(tester, bridge);
+      await tester.tap(find.text('申请'));
+      await tester.pumpAndSettle();
+      expect(find.text('等待有审批权限的设备上线'), findsNothing);
+      expect(find.textContaining('COMMAND_ERROR'), findsOneWidget);
+      await tester.tap(find.text('取消申请'));
+      await tester.pumpAndSettle();
+      expect(find.text('已取消'), findsOneWidget);
+      await dispose(tester, bridge);
+    },
+  );
+
+  /// Verifies cancellation errors remain visible and a second click sends a new cancellation.
+  testWidgets('failed cancellation shows its cause and permits retry', (
+    tester,
+  ) async {
+    final bridge = JoinBridge()..failCancel = true;
+    await mount(tester, bridge);
+    await tester.tap(find.text('申请'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消申请'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Cancellation transport unavailable'),
+      findsOneWidget,
+    );
+    bridge.failCancel = false;
+    await tester.tap(find.text('取消申请'));
+    await tester.pumpAndSettle();
+    expect(find.text('已取消'), findsOneWidget);
+    await dispose(tester, bridge);
+  });
+
   testWidgets('approved applicant refresh closes dialog with adopted space', (
     tester,
   ) async {

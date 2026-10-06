@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "rustTestFilter": "device_space",
+  "suites": [
+    {
+      "file": "cancellation.rs",
+      "level": "real-router-isolated-host",
+      "cases": [
+        "local_admin_assignment_and_cancellation_do_not_require_topology",
+        "cancellation_records_a_tombstone_before_delayed_submission_arrives",
+        "withdrawal_preserves_both_spaces_files_permissions_and_identity_after_restart",
+        "lost_cancellation_ack_is_reconciled_without_resubmitting_a_new_request",
+        "cancellation_handles_submission_failure_before_and_after_receiver_commit",
+        "cancelled_request_cannot_be_resurrected_by_an_in_flight_poll",
+        "offline_cancellation_can_be_retried_after_reconnection",
+        "cancellation_and_reviewer_claim_have_explicit_ordered_outcomes",
+        "repeated_cancel_reapply_cycles_preserve_files_and_keep_only_one_active_request"
+      ]
+    },
+    {
+      "file": "facade_state.rs",
+      "level": "facade-state",
+      "cases": [
+        "space_join_preserves_identity_members_and_exact_revision",
+        "overview_subscription_stops_worker_after_last_watch_is_dropped",
+        "paired_device_statuses_follow_active_peer_links_only"
+      ]
+    },
+    {
+      "file": "join_lifecycle.rs",
+      "level": "real-router-isolated-host",
+      "cases": [
+        "independent_space_join_is_pending_then_only_explicit_approval_admits",
+        "rejection_cancel_and_stale_assignment_do_not_admit_or_change_applicant_space",
+        "leaving_joined_space_initializes_admin_and_rejoining_requires_approval",
+        "repeated_leave_initializes_each_new_space_once_without_changing_old_policy",
+        "two_applicants_withdraw_one_approve_other_without_cross_request_mutation",
+        "lost_submission_reply_reuses_request_and_does_not_duplicate_receiver_inbox"
+      ]
+    },
+    {
+      "file": "join_state_machine.rs",
+      "level": "pure-state",
+      "cases": [
+        "outgoing_responses_do_not_resurrect_or_regress_requests",
+        "only_pending_requests_expire_not_committed_or_claimed_decisions",
+        "hop_distances_use_directed_edges_and_do_not_transit_ordinary_members",
+        "every_terminal_request_resists_every_late_response_status",
+        "expiry_boundary_is_inclusive_and_claimed_approval_survives_space_change"
+      ]
+    },
+    {
+      "file": "persistence_contracts.rs",
+      "level": "real-store-and-router-denial",
+      "cases": [
+        "binary_file_updates_and_deletion_converge_over_three_store_hops",
+        "missing_truncated_and_corrupt_blob_delivery_preserve_file_and_clock",
+        "concurrent_file_writers_converge_for_every_two_operation_permutation",
+        "file_sync_rejects_node_local_and_path_escape_entities_without_writes",
+        "pending_cancelled_and_independent_peers_cannot_read_sync_operations"
+      ]
+    },
+    {
+      "file": "policy_contracts.rs",
+      "level": "real-store",
+      "cases": [
+        "policy_replay_converges_with_duplicate_reversed_and_rotated_delivery",
+        "forged_policy_issuer_never_grants_capability",
+        "clearing_the_last_administrator_is_rejected_without_a_policy_write",
+        "permission_revocation_invalidates_a_stale_reviewer_action"
+      ]
+    },
+    {
+      "file": "protocol_boundaries.rs",
+      "level": "real-router-isolated-host",
+      "cases": [
+        "malformed_submission_matrix_preserves_receiver_records_and_files",
+        "paired_third_party_cannot_withdraw_another_devices_request",
+        "source_administrator_cannot_self_approve_target_membership",
+        "expired_pending_request_cannot_be_approved_or_mutate_either_space",
+        "target_space_change_does_not_block_withdrawal_of_an_old_request",
+        "conflicting_reviewer_decisions_cannot_change_a_claimed_outcome"
+      ]
+    },
+    {
+      "file": "reviewer_assignment.rs",
+      "level": "real-router-controlled-transport",
+      "cases": [
+        "nearest_authorized_reviewer_only_then_offline_transfer_and_remote_decision"
+      ]
+    },
+    {
+      "file": "routing_contracts.rs",
+      "level": "real-router-controlled-transport",
+      "cases": [
+        "multi_hop_cycle_partition_and_reconnect_preserve_space_membership",
+        "removing_relay_capability_blocks_transit_but_not_direct_access",
+        "exhausted_route_ttl_is_rejected_without_forwarding",
+        "revoked_target_cannot_be_reached_through_still_connected_peers",
+        "binding_owner_changes_replicate_and_reject_stale_writers"
+      ]
+    },
+    {
+      "file": "space_merge.rs",
+      "level": "real-router-controlled-transport",
+      "cases": [
+        "source_space_chain_merges_all_members_profiles_policy_and_routes",
+        "incomplete_space_merge_snapshot_does_not_change_membership"
+      ]
+    },
+    {
+      "file": "transports.rs",
+      "level": "real-host-transports",
+      "cases": [
+        "real_tcp_single_pairing_admission_enables_scoped_return_channel",
+        "outbound_only_hosts_pair_over_http_and_websocket",
+        "listener_capabilities_validate_all_transports_before_binding",
+        "core_discovery_returns_only_unpaired_devices_for_all_callers"
+      ]
+    }
+  ]
+}

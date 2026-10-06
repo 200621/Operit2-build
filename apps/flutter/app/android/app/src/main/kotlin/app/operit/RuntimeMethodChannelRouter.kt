@@ -45,6 +45,7 @@ class RuntimeMethodChannelRouter(
         runtimeChannel?.invokeMethod("notificationActivation", activation)
     }
 
+    /** Routes Android permission results to the channel that owns the request. */
     fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,

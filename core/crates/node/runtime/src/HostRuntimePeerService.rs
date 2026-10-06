@@ -12,13 +12,18 @@ use serde::{Deserialize, Serialize};
 use std::{collections::{BTreeMap, BTreeSet}, sync::{Arc, Mutex, Weak}};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 #[path = "peer/crypto.rs"] mod crypto;
-use crypto::{Channel, error};
+use crypto::{Channel, ChannelLease, MultiplexedChannel, error};
+#[path = "peer/heartbeat.rs"] mod heartbeat;
+#[path = "peer/live_channel.rs"] mod live_channel;
+use live_channel::LiveChannel;
 #[path = "peer/dispatch.rs"] mod dispatch;
 #[path = "peer/space_channel.rs"] mod space_channel;
 #[path = "peer/availability.rs"] mod availability;
 const HANDSHAKE: &str = "$peer.pairing";
 
 const PAIRING_LIFETIME_MS: i64 = 300_000;
+const MAX_POOLED_CHANNELS_PER_PEER: usize = 8;
+const MAX_LOGICAL_LEASES_PER_CHANNEL: usize = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Pending {
@@ -44,6 +49,8 @@ struct State {
     nodeId: String, info: LinkDeviceInfo, router: Weak<CoreNodeRouter>,
     listeners: AsyncMutex<BTreeMap<PeerTransport, Arc<dyn PeerListener>>>,
     connections: Mutex<BTreeMap<String, Vec<Weak<dyn PeerConnection>>>>,
+    pooledChannels: Mutex<BTreeMap<String, Arc<AsyncMutex<Vec<Arc<MultiplexedChannel>>>>>>,
+    liveChannels: Mutex<BTreeMap<String, Vec<Weak<LiveChannel>>>>,
     advertisements: Mutex<Vec<Box<dyn operit_host_api::ServiceDiscovery::DiscoveryAdvertisement>>>,
     slots: Arc<tokio::sync::Semaphore>,
     active: Mutex<BTreeSet<String>>, changes: broadcast::Sender<()>,
@@ -62,6 +69,7 @@ impl HostRuntimePeerService {
             host, link: HostPeerLink::default(), store: PeerStateStore::new(storage),
             nodeId: router.localNodeId(), info, router: Arc::downgrade(router),
             listeners: AsyncMutex::new(BTreeMap::new()), connections: Mutex::new(BTreeMap::new()),
+            pooledChannels: Mutex::new(BTreeMap::new()), liveChannels: Mutex::new(BTreeMap::new()),
             advertisements: Mutex::new(Vec::new()), slots: Arc::new(tokio::sync::Semaphore::new(64)),
             active: Mutex::new(BTreeSet::new()), changes: broadcast::channel(32).0,
             availability: Mutex::new(None), lifecycle: AsyncMutex::new(()),
@@ -140,7 +148,87 @@ impl HostRuntimePeerService {
         let id = t.sessionId.clone(); let peerNodeId = t.serverNodeId.clone(); let info = reply.info;
         Ok((Channel::new(raw, &key, &context, true)?, id, info, root.to_vec(), peerNodeId))
     }
-    async fn connectAuthorized(&self, node: &str) -> Result<Arc<Channel>, CoreLinkError> {
+    /// Gets the per-peer pool lock without retaining a global lock during network I/O.
+    fn channelPool(&self, node: &str) -> Arc<AsyncMutex<Vec<Arc<MultiplexedChannel>>>> {
+        self.state.pooledChannels.lock().unwrap().entry(node.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(Vec::new()))).clone()
+    }
+
+    /// Tracks an authenticated connection generation and its terminal availability changes.
+    fn startLiveChannel(&self, node: &str, channel: Arc<Channel>) -> Result<Arc<LiveChannel>, CoreLinkError> {
+        let state = Arc::downgrade(&self.state);
+        let peer = node.to_string();
+        let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
+            .ok_or_else(|| error("Host scheduler is not installed"))?;
+        let channel = LiveChannel::start(channel, scheduler, move || {
+            if let Some(state) = state.upgrade() {
+                HostRuntimePeerService { state }.refreshPeerAvailability(&peer);
+            }
+        })?;
+        {
+            let mut channels = self.state.liveChannels.lock().unwrap();
+            let channels = channels.entry(node.into()).or_default();
+            channels.retain(|channel| channel.strong_count() != 0);
+            channels.push(Arc::downgrade(&channel));
+        }
+        self.refreshPeerAvailability(node);
+        Ok(channel)
+    }
+
+    /// Derives peer availability from all current authenticated connection generations.
+    fn refreshPeerAvailability(&self, node: &str) {
+        let channels = self.state.liveChannels.lock().unwrap();
+        let available = self.requirePeerConnectionAllowed(node).is_ok()
+            && channels.get(node).is_some_and(|channels| channels.iter()
+                .filter_map(Weak::upgrade).any(|channel| channel.isAvailable()));
+        let mut active = self.state.active.lock().unwrap();
+        let changed = if available { active.insert(node.into()) } else { active.remove(node) };
+        drop(active);
+        drop(channels);
+        if changed { self.changed(); }
+    }
+
+    /// Reports whether any current authenticated channel can still carry peer traffic.
+    fn hasLiveChannel(&self, node: &str) -> bool {
+        self.state.liveChannels.lock().unwrap().get(node).is_some_and(|channels| channels.iter()
+            .filter_map(Weak::upgrade).any(|channel| channel.isAvailable()))
+    }
+    /// Acquires a lazily created multiplexed channel from the fixed per-peer pool.
+    pub(super) async fn acquirePooledChannel(&self, node: &str) -> Result<ChannelLease, CoreLinkError> {
+        self.requirePeerConnectionAllowed(node)?;
+        let pool = self.channelPool(node);
+        let mut channels = pool.lock().await;
+        channels.retain(|channel| !channel.isFailed());
+        if let Some(channel) = channels.iter().min_by_key(|channel| channel.activeLeases()) {
+            if channel.activeLeases() < MAX_LOGICAL_LEASES_PER_CHANNEL || channels.len() >= MAX_POOLED_CHANNELS_PER_PEER {
+                match self.outbound(node) {
+                    Ok(record) => {
+                        if !channel.hasSpaceOffer(&record.sessionId).await
+                            && self.offerSpaceChannelMultiplexed(node, &record.sessionId, channel).await? {
+                            channel.markSpaceOffer(&record.sessionId).await;
+                        }
+                    }
+                    Err(error) if error.code == "PEER_OUTBOUND_NOT_AUTHORIZED" => {}
+                    Err(error) => return Err(error),
+                }
+                return Ok(channel.lease());
+            }
+        }
+        let raw = self.connectAuthorized(node).await?;
+        let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
+            .ok_or_else(|| error("Host scheduler is not installed"))?;
+        let channel = MultiplexedChannel::start(raw, scheduler)?;
+        channels.push(channel.clone());
+        Ok(channel.lease())
+    }
+
+    /// Returns the number of live pooled channels for one peer in test builds.
+    #[cfg(test)]
+    pub(crate) async fn pooledChannelCount(&self, node: &str) -> usize {
+        self.channelPool(node).lock().await.len()
+    }
+
+    async fn connectAuthorized(&self, node: &str) -> Result<Arc<LiveChannel>, CoreLinkError> {
         self.requirePeerConnectionAllowed(node)?;
         let (purpose, sessionId, secret, endpoint, transport) = match self.outbound(node) {
             Ok(record) => ("session", record.sessionId, record.sessionSecret, record.endpoint, parseTransport(&record.transport)?),
@@ -154,15 +242,12 @@ impl HostRuntimePeerService {
         let raw = self.raw(PeerEndpoint { nodeId: node.into(), address: endpoint }, transport).await?;
         let result = self.handshake(raw.clone(), purpose, &sessionId, Some(&root), None).await;
         let (channel, _, _, _, _) = match result { Ok(result) => result, Err(e) => { raw.close().await; return Err(e); } };
+        self.track(node, &raw);
+        let channel = self.startLiveChannel(node, channel)?;
         if purpose == "session" {
             if let Err(e) = self.offerSpaceChannel(node, &sessionId, &channel).await { raw.close().await; return Err(e); }
         }
         if let Err(e) = self.requirePeerConnectionAllowed(node) { raw.close().await; return Err(e); }
-        self.track(node, &raw);
-        if self.state.active.lock().unwrap().insert(node.into()) {
-            operit_util::AppLogger::AppLogger::i("RuntimePeerService", &format!("Peer online peer={node} transport={transport:?} authorization={purpose}"));
-            self.changed();
-        }
         Ok(channel)
     }
     async fn readHandshake(&self, raw: &Arc<dyn PeerConnection>, method: &str) -> Result<CoreCallRequest, CoreLinkError> {
@@ -237,15 +322,6 @@ impl HostRuntimePeerService {
         if hello.purpose == "start" { return Ok(()); }
         let channel = Channel::new(raw.clone(), &key, &context, false)?;
         self.track(&hello.nodeId, &raw);
-        if matches!(hello.purpose.as_str(), "session" | "space") {
-            // The inbound side is an authenticated live peer too. Previously
-            // only the outbound caller marked itself active, so each device
-            // could show the other as offline depending on who initiated the
-            // first request.
-            if self.state.active.lock().unwrap().insert(hello.nodeId.clone()) {
-                self.changed();
-            }
-        }
         if hello.purpose == "finish" {
             let Some(PeerMessage::Request(CoreLinkRequest::Call(request))) = channel.receive().await? else { return Err(error("Encrypted confirmation Call required")); };
             if request.target != HANDSHAKE || request.methodName != "finish" { return Err(error("Confirmation required before business")); }
@@ -271,6 +347,7 @@ impl HostRuntimePeerService {
             channel.send(PeerMessage::Response(CoreLinkResponse::Call(CoreCallResponse { requestId: request.requestId, result }))).await?;
             return Ok(());
         }
+        let channel = self.startLiveChannel(&hello.nodeId, channel)?;
         dispatch::serve(self.clone(), channel, hello.nodeId, id, hello.purpose == "space").await
     }
 }
@@ -494,19 +571,21 @@ impl RuntimePeerService for HostRuntimePeerService {
         for listener in listeners.into_values() { listener.close().await; }
         let connections = std::mem::take(&mut *self.state.connections.lock().unwrap());
         for raw in connections.into_values().flatten().filter_map(|v| v.upgrade()) { raw.close().await; }
+        self.state.pooledChannels.lock().unwrap().clear();
+        self.state.liveChannels.lock().unwrap().clear();
         self.state.active.lock().unwrap().clear(); self.changed(); Ok(())
     }
     async fn call(&self, node: &str, request: RoutedCoreRequest<CoreCallRequest>) -> CoreCallResponse {
         let id = request.payload.requestId.clone();
         let result = async {
-            let channel = self.connectAuthorized(node).await?;
+            let channel = self.acquirePooledChannel(node).await?;
             let wire = dispatch::routedCall(request)?;
-            let result = channel.exchange(CoreLinkRequest::Call(wire)).await;
-            channel.raw.close().await;
+            let result = channel.channel().exchange(CoreLinkRequest::Call(wire)).await;
             match result? { CoreLinkResponse::Call(r) if r.requestId == id => Ok(r.result), _ => Err(error("Call response mismatch")) }
         }.await;
-        if result.as_ref().err().is_some_and(failureProvesPeerUnavailable)
-            && self.state.active.lock().unwrap().remove(node) { self.changed(); }
+        if result.as_ref().err().is_some_and(failureProvesPeerUnavailable) {
+            self.refreshPeerAvailability(node);
+        }
         // Remote business errors prove a working authenticated link, not an offline peer.
         CoreCallResponse { requestId: id, result: result.and_then(|remote| remote) }
     }
@@ -531,6 +610,8 @@ impl RuntimePeerService for HostRuntimePeerService {
     async fn disconnectPeer(&self, node: &str) -> Result<(), CoreLinkError> {
         let connections = self.state.connections.lock().unwrap().remove(node).unwrap_or_default();
         for raw in connections.into_iter().filter_map(|v| v.upgrade()) { raw.close().await; }
+        self.state.pooledChannels.lock().unwrap().remove(node);
+        self.state.liveChannels.lock().unwrap().remove(node);
         self.state.active.lock().unwrap().remove(node); self.changed(); Ok(())
     }
     async fn removePairedPeer(&self, node: &str) -> Result<(), CoreLinkError> {

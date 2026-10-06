@@ -2,16 +2,19 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../MainLayoutController.dart';
 import '../../theme/OperitTheme.dart';
 import '../TopBarController.dart';
 import '../navigation/AppNavigationModels.dart';
+import '../layout/DrawerMotionScope.dart';
 import '../screens/OperitScreens.dart';
 import 'TopBarTitleText.dart';
 
 class AppContent extends StatefulWidget {
+  /// Creates a page host whose cached screens retain their transition state.
   const AppContent({
     super.key,
     required this.routerState,
@@ -45,6 +48,7 @@ class AppContent extends StatefulWidget {
   final VoidCallback onNavigationButtonPressed;
   final ValueChanged<NavigationEntrySpec> onAppBarEntrySelected;
 
+  /// Creates the cached page and transition lifecycle owner.
   @override
   State<AppContent> createState() => _AppContentState();
 }
@@ -72,7 +76,11 @@ class _AppContentState extends State<AppContent> {
   bool _isTransitioning = false;
   bool _transitionAllowsCrossfade = true;
   Timer? _transitionTimer;
+  ValueListenable<bool>? _drawerMotion;
+  ValueListenable<int>? _drawerContentActivation;
+  String? _drawerSnapshotScreenKey;
 
+  /// Mounts the initial page without marking it as an outgoing transition.
   @override
   void initState() {
     super.initState();
@@ -81,19 +89,61 @@ class _AppContentState extends State<AppContent> {
     _ensureScreenCached(_currentScreenKey, widget.currentScreen);
   }
 
+  /// Connects drawer motion to the page that was current when motion began.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scope = DrawerMotionScope.maybeOf(context);
+    if (_drawerMotion == scope?.isAnimating &&
+        _drawerContentActivation == scope?.contentActivation) {
+      return;
+    }
+    _drawerMotion?.removeListener(_handleDrawerMotion);
+    _drawerContentActivation?.removeListener(_handleDrawerContentActivation);
+    _drawerMotion = scope?.isAnimating;
+    _drawerContentActivation = scope?.contentActivation;
+    _drawerMotion?.addListener(_handleDrawerMotion);
+    _drawerContentActivation?.addListener(_handleDrawerContentActivation);
+    _drawerSnapshotScreenKey = null;
+  }
+
+  /// Freezes only an established page, leaving all entering pages live.
+  void _handleDrawerMotion() {
+    setState(() {
+      _drawerSnapshotScreenKey =
+          _drawerMotion?.value == true && !_isTransitioning
+          ? _currentScreenKey
+          : null;
+    });
+  }
+
+  /// Releases a current-page snapshot when drawer content is activated.
+  void _handleDrawerContentActivation() {
+    setState(() {
+      _drawerSnapshotScreenKey = null;
+    });
+  }
+
+  /// Caches the new page and retargets the active page transition.
   @override
   void didUpdateWidget(covariant AppContent oldWidget) {
     super.didUpdateWidget(oldWidget);
     final currentScreenKey = _currentScreenKey;
+    if (oldWidget.currentRouteEntry.instanceId !=
+        widget.currentRouteEntry.instanceId) {
+      _drawerSnapshotScreenKey = null;
+    }
     _ensureScreenCached(currentScreenKey, widget.currentScreen);
     _updateTransition(currentScreenKey, widget.currentScreen);
   }
 
+  /// Resolves the page identity used by both caching and snapshot ownership.
   String get _currentScreenKey {
     return widget.currentScreen.stableScreenKey() ??
         widget.currentRouteEntry.instanceId;
   }
 
+  /// Retains each page widget independently of its visibility in the stack.
   void _ensureScreenCached(String screenKey, OperitScreen screen) {
     _screenKeepAliveCache[screenKey] = screen.keepAlive;
     _screenCache.putIfAbsent(screenKey, () => Builder(builder: screen.build));
@@ -107,6 +157,7 @@ class _AppContentState extends State<AppContent> {
       return;
     }
 
+    _drawerSnapshotScreenKey = null;
     _transitionTimer?.cancel();
     _removePendingScreen(currentScreenKey);
     final canCrossfade =
@@ -141,16 +192,20 @@ class _AppContentState extends State<AppContent> {
   /// Cancels transition cleanup when the main content host is removed.
   @override
   void dispose() {
+    _drawerMotion?.removeListener(_handleDrawerMotion);
+    _drawerContentActivation?.removeListener(_handleDrawerContentActivation);
     _transitionTimer?.cancel();
     super.dispose();
   }
 
+  /// Returns the configured page motion duration.
   Duration get _pageTransitionDuration {
     return widget.enableNavigationAnimation
         ? _enabledPageTransitionDuration
         : _disabledPageTransitionDuration;
   }
 
+  /// Returns the duration used to clean up the active transition.
   Duration get _activeTransitionDuration {
     return _pageTransitionDuration;
   }
@@ -168,6 +223,7 @@ class _AppContentState extends State<AppContent> {
     _pendingRemovalKey = null;
   }
 
+  /// Builds live transition containers around individually snapshotted pages.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -298,6 +354,9 @@ class _AppContentState extends State<AppContent> {
                         snapshotDuringExit:
                             screenKey == effectivePreviousKey &&
                             screenKey != currentScreenKey,
+                        snapshotDuringDrawerMotion:
+                            screenKey == _drawerSnapshotScreenKey &&
+                            screenKey == currentScreenKey,
                         isNavigatingBack: widget.isNavigatingBack,
                         enableNavigationAnimation:
                             widget.enableNavigationAnimation,
@@ -326,12 +385,14 @@ class _AppContentState extends State<AppContent> {
 }
 
 class _AnimatedScreenSlot extends StatefulWidget {
+  /// Creates a stable page slot with independent snapshot and motion controls.
   const _AnimatedScreenSlot({
     super.key,
     required this.screenKey,
     required this.isActiveInStack,
     required this.isCurrentScreen,
     required this.snapshotDuringExit,
+    required this.snapshotDuringDrawerMotion,
     required this.isNavigatingBack,
     required this.enableNavigationAnimation,
     required this.allowCrossfade,
@@ -344,6 +405,7 @@ class _AnimatedScreenSlot extends StatefulWidget {
   final bool isActiveInStack;
   final bool isCurrentScreen;
   final bool snapshotDuringExit;
+  final bool snapshotDuringDrawerMotion;
   final bool isNavigatingBack;
   final bool enableNavigationAnimation;
   final bool allowCrossfade;
@@ -351,6 +413,7 @@ class _AnimatedScreenSlot extends StatefulWidget {
   final double pageOffset;
   final Widget child;
 
+  /// Creates the page-local snapshot owner and visibility state.
   @override
   State<_AnimatedScreenSlot> createState() => _AnimatedScreenSlotState();
 }
@@ -362,11 +425,12 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
   bool _visible = false;
   int _showRequestId = 0;
 
+  /// Keeps entering pages live and schedules their entrance motion.
   @override
   void initState() {
     super.initState();
     _snapshotController = SnapshotController(
-      allowSnapshotting: widget.snapshotDuringExit,
+      allowSnapshotting: _shouldSnapshot,
     );
     if (widget.isCurrentScreen) {
       _scheduleShow();
@@ -377,12 +441,7 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
   @override
   void didUpdateWidget(covariant _AnimatedScreenSlot oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.snapshotDuringExit != widget.snapshotDuringExit) {
-      _snapshotController.allowSnapshotting = widget.snapshotDuringExit;
-      if (widget.snapshotDuringExit) {
-        _snapshotController.clear();
-      }
-    }
+    _snapshotController.allowSnapshotting = _shouldSnapshot;
     if (oldWidget.isCurrentScreen == widget.isCurrentScreen) {
       return;
     }
@@ -399,6 +458,11 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
     _visible = false;
   }
 
+  /// Limits freezing to this page's drawer motion or outgoing page transition.
+  bool get _shouldSnapshot =>
+      widget.snapshotDuringExit || widget.snapshotDuringDrawerMotion;
+
+  /// Starts entrance motion on the first frame after mounting a page.
   void _scheduleShow() {
     final requestId = ++_showRequestId;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -411,6 +475,7 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
     });
   }
 
+  /// Releases this page's captured image and snapshot notifications.
   @override
   void dispose() {
     _snapshotController.dispose();
@@ -430,7 +495,7 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
         controller: _snapshotController,
         mode: SnapshotMode.forced,
         autoresize: true,
-        child: widget.child,
+        child: RepaintBoundary(child: widget.child),
       ),
     );
 
@@ -466,6 +531,7 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
     );
   }
 
+  /// Fades only the outgoing page, never a drawer-motion snapshot.
   double get _targetOpacity {
     if (!widget.allowCrossfade) {
       return 1.0;
@@ -473,6 +539,7 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
     return _visible ? 1.0 : 0.0;
   }
 
+  /// Resolves the page-local translation outside its captured content.
   double get _targetTranslationX {
     if (!widget.allowCrossfade) {
       return 0.0;

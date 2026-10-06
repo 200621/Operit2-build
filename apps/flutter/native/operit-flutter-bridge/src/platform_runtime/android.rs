@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use operit_host_android_native::{
-    createRuntimeHostManager, AndroidBluetoothHost, AndroidTerminalHost,
+    createRuntimeHostManager, AndroidBluetoothHost, AndroidSystemOperationHost, AndroidTerminalHost,
 };
 use operit_host_api::HostManager::HostManager;
 use operit_host_api::SystemOperationHost;
@@ -13,9 +13,9 @@ use operit_link::LinkDeviceInfo;
 use super::{install_owner_media, BridgeStartup, StartupMetadata};
 use crate::FlutterHostAdapters::FlutterWebVisitBridge;
 use crate::FlutterOwnerCapabilities::{
-    ownerBluetooth, ownerDeviceInfo, ownerLocation, ownerNotifications, ownerRecognizeText,
-    ownerScreenshot, ownerSendNotification, FlutterSystemBindings, FlutterSystemOperationBridge,
-    FlutterTtsSynthesisHost,
+    ownerBluetooth, ownerDeviceInfo, ownerGetSystemSetting, ownerLocation, ownerModifySystemSetting,
+    ownerNotifications, ownerRecognizeText, ownerScreenshot, ownerSendNotification,
+    FlutterSystemBindings, FlutterSystemOperationBridge, FlutterTtsSynthesisHost,
 };
 
 /// Creates Android hosts and binds operations owned by the Flutter application.
@@ -24,6 +24,10 @@ pub(crate) fn create_host_context(startup: &BridgeStartup) -> Result<HostManager
         startup.runtimeRoot.clone(),
         startup.workspaceRoot.clone(),
         Arc::new(FlutterWebVisitBridge::new()),
+        Arc::new(AndroidSystemOperationHost::new(
+            Arc::new(ownerGetSystemSetting),
+            Arc::new(ownerModifySystemSetting),
+        )),
     )
     .withTerminalHost(Arc::new(AndroidTerminalHost::new()));
     let system = context

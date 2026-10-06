@@ -54,6 +54,24 @@ fn waitForBrowserRuntimeDelay(delayMs: u64) -> HostRuntimeTurnFuture {
 }
 
 impl HostRuntimeTaskSchedulerHost for WebHostRuntimeTaskSchedulerHost {
+    /// Reads the browser's monotonic performance clock on the active worker.
+    fn monotonicTimeMillis(&self) -> HostResult<u64> {
+        let global = js_sys::global();
+        let performance = js_sys::Reflect::get(&global, &JsValue::from_str("performance"))
+            .map_err(|error| HostError::new(format!("read browser performance clock failed: {error:?}")))?;
+        let now = js_sys::Reflect::get(&performance, &JsValue::from_str("now"))
+            .map_err(|error| HostError::new(format!("read browser monotonic clock method failed: {error:?}")))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| HostError::new("browser monotonic clock is unavailable"))?;
+        let value = now.call0(&performance)
+            .map_err(|error| HostError::new(format!("read browser monotonic clock failed: {error:?}")))?
+            .as_f64().ok_or_else(|| HostError::new("browser monotonic clock returned a nonnumeric value"))?;
+        if !value.is_finite() || value < 0.0 || value >= u64::MAX as f64 {
+            return Err(HostError::new("browser monotonic clock returned an invalid value"));
+        }
+        Ok(value as u64)
+    }
+
     /// Enqueues the task after the current browser event completes.
     fn scheduleHostRuntimeTask(&self, _taskName: &str, task: HostRuntimeTask) -> HostResult<()> {
         self.scheduleDelayedHostRuntimeTask(_taskName, 0, task)

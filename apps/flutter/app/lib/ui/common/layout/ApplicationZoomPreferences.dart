@@ -22,6 +22,19 @@ class ApplicationZoomPreferences {
   Future<double> load() async {
     final values = await _clients.preferencesPreferenceStorageManager
         .getPreferences(fileName: _fileName, keys: <String>[_zoomKey]);
+    return _decodeZoom(values);
+  }
+
+  /// Observes interface zoom changes committed locally or synchronized from peers.
+  Stream<double> watch() {
+    return _clients.preferencesPreferenceStorageManager
+        .preferencesFlow(fileName: _fileName)
+        .map(_decodeZoom)
+        .distinct();
+  }
+
+  /// Decodes one zoom snapshot with the same validation used for startup reads.
+  double _decodeZoom(Map<String, String> values) {
     final encoded = values[_zoomKey];
     if (encoded == null) {
       return 1.0;

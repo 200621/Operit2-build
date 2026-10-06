@@ -65,6 +65,7 @@ pub fn createRuntimeHostManager(
     runtimeRoot: PathBuf,
     workspaceRoot: PathBuf,
     webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
+    systemOperationHost: Arc<dyn operit_host_api::SystemOperationHost>,
 ) -> HostManager {
     installAndroidLogSink();
     let runtimeStorageWriteHost =
@@ -84,7 +85,7 @@ pub fn createRuntimeHostManager(
         Arc::new(AndroidFileSystemHost::new()),
         webVisitHost,
         Arc::new(AndroidHttpHost::new()),
-        Arc::new(AndroidSystemOperationHost::new()),
+        systemOperationHost,
         Arc::new(AndroidManagedRuntimeHost::new()),
         runtimeStorageHost,
         runtimeSqliteHost,

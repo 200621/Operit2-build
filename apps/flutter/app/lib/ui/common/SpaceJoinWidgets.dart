@@ -73,6 +73,9 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
   generated.SpaceJoinRequest? _request;
   Timer? _timer;
   bool _busy = false;
+  bool _polling = false;
+  bool _cancelling = false;
+  int _responseEpoch = 0;
   String? _error;
   @override
   void initState() {
@@ -93,6 +96,7 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
     super.dispose();
   }
 
+  /// Submits a request and reports transport errors separately from reviewer assignment.
   Future<void> _submit() async {
     if (_busy) return;
     setState(() {
@@ -106,7 +110,7 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
       if (!mounted) return;
       setState(() => _request = request);
       await _completeIfJoined(request);
-    } catch (_) {
+    } catch (error) {
       // Submission may have been persisted before the reply was lost. Recover
       // that request instead of creating another one or displaying COMMAND_ERROR.
       try {
@@ -120,9 +124,7 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
         if (mounted) {
           setState(() {
             if (matches.isNotEmpty) _request = matches.last;
-            _error = matches.isNotEmpty
-                ? l10n.spaceJoinRefreshingFailed
-                : l10n.spaceJoinSubmitFailed;
+            _error = '${l10n.spaceJoinSubmitFailed}\n$error';
           });
         }
       } catch (_) {
@@ -140,34 +142,43 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
     if (mounted) Navigator.pop(context, space);
   }
 
+  /// Keeps cancellation independent of polling and discards responses superseded by user action.
   Future<void> _refresh({bool cancel = false}) async {
     final previous = _request;
     if (_busy ||
+        _cancelling ||
         previous == null ||
-        (!cancel && !spaceJoinIsActive(previous.status))) {
+        (!cancel && (_polling || !spaceJoinIsActive(previous.status)))) {
       return;
     }
-    setState(() => _busy = true);
+    if (cancel) {
+      _responseEpoch++;
+      setState(() => _cancelling = true);
+    } else {
+      _polling = true;
+    }
+    final epoch = _responseEpoch;
     try {
       final service = widget.clients.server.runtimeRemoteLinkService;
       final request = cancel
           ? await service.cancelDeviceSpaceJoin(requestId: previous.requestId)
           : await service.refreshDeviceSpaceJoin(requestId: previous.requestId);
-      if (!mounted) return;
+      if (!mounted || epoch != _responseEpoch) return;
       setState(() {
         _request = request;
         _error = null;
       });
       await _completeIfJoined(request);
-    } catch (_) {
-      if (mounted) {
-        setState(
-          () =>
-              _error = AppLocalizations.of(context)!.spaceJoinRefreshingFailed,
-        );
+    } catch (error) {
+      if (mounted && epoch == _responseEpoch) {
+        setState(() => _error = error.toString());
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (cancel) {
+        if (mounted) setState(() => _cancelling = false);
+      } else {
+        _polling = false;
+      }
     }
   }
 
@@ -235,7 +246,12 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
                               ? (_busy
                                     ? l10n.spaceJoinSending
                                     : l10n.spaceJoinSubmitFailed)
-                              : spaceJoinStatusText(request, l10n),
+                              : (request.status ==
+                                            generated.SpaceJoinStatus.pending &&
+                                        request.reviewerDeviceId == null &&
+                                        _error != null
+                                    ? l10n.spaceJoinSubmitFailed
+                                    : spaceJoinStatusText(request, l10n)),
                           style: TextStyle(
                             color: colors.primary,
                             fontWeight: FontWeight.w600,
@@ -266,7 +282,7 @@ class _SpaceJoinProgressDialogState extends State<SpaceJoinProgressDialog> {
           FilledButton(onPressed: _submit, child: Text(l10n.spaceJoinSubmit)),
         if (request?.status == generated.SpaceJoinStatus.pending)
           TextButton(
-            onPressed: _busy ? null : () => _refresh(cancel: true),
+            onPressed: _cancelling ? null : () => _refresh(cancel: true),
             child: Text(l10n.spaceJoinCancel),
           ),
         TextButton(

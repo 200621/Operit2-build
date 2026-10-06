@@ -61,6 +61,10 @@ pub enum NetworkControlCommand {
     AdmitMember {
         nodeId: String,
     },
+    AdmitSpace {
+        sourceSpaceId: String,
+        nodeIds: BTreeSet<String>,
+    },
     RemoveMember {
         nodeId: String,
     },
@@ -288,6 +292,44 @@ impl NetworkControlStore {
         self.submitLocalCommand(NetworkControlCommand::AdmitMember { nodeId })
     }
 
+    /// Approves every member of one source Space as one auditable policy command.
+    pub fn admitSpace(&self, sourceSpaceId: String, nodeIds: BTreeSet<String>) -> Result<SyncOperation, String> {
+        self.submitLocalCommand(NetworkControlCommand::AdmitSpace { sourceSpaceId, nodeIds })
+    }
+
+    /// Validates and replays a received policy without publishing any received operation.
+    pub fn validateSpacePolicy(&self, spaceId: &str, operations: &[SyncOperation]) -> Result<NetworkControlState, String> {
+        validateSpaceId(spaceId)?;
+        let mut ordered = operations.to_vec();
+        for operation in &ordered { validateControlOperation(operation)?; }
+        ordered.sort_by_key(controlOperationOrder);
+        self.replayCommands(spaceId, &ordered, false).map(|(state, _)| state)
+    }
+
+    /// Proves that an authorized target command admitted the complete source membership.
+    pub fn validateSpaceAdmission(&self, targetSpaceId: &str, sourceSpaceId: &str,
+        members: &BTreeSet<String>, operations: &[SyncOperation]) -> Result<(), String> {
+        let state = self.validateSpacePolicy(targetSpaceId, operations)?;
+        if !members.is_subset(&state.memberNodeIds) || !members.is_disjoint(&state.removedNodeIds) {
+            return Err("Merged Space membership is not authorized by the target policy".into());
+        }
+        let mut ordered = operations.to_vec();
+        ordered.sort_by_key(controlOperationOrder);
+        for (index, operation) in ordered.iter().enumerate() {
+            let record = decodeControlOperation(operation)?;
+            if record.spaceId != targetSpaceId { continue; }
+            if let NetworkControlCommand::AdmitSpace { sourceSpaceId: source, nodeIds } = &record.command {
+                if source == sourceSpaceId && members.is_subset(nodeIds) {
+                    let (mut before, _) = self.replayCommands(targetSpaceId, &ordered[..index], false)?;
+                    if authorizeAndApplyCommand(&mut before, &record, &operation.originDeviceId).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err("Target Space has no approved admission for this source Space".into())
+    }
+
     /// Returns the current Space control commands in authorization order.
     #[allow(non_snake_case)]
     pub fn currentSpaceOperations(&self) -> Result<Vec<SyncOperation>, String> {
@@ -316,7 +358,7 @@ impl NetworkControlStore {
             .map_err(|error| format!("Network control mutation lock poisoned: {error}"))?;
         validateControlOperation(operation)?;
         self.syncOperationStore
-            .appendOperation(operation)
+            .appendUnobservedOperation(operation)
             .map_err(|error| error.to_string())
     }
 
@@ -547,6 +589,11 @@ fn controlAuditSummary(
         NetworkControlCommand::AdmitMember { nodeId } => {
             format!("Admit device {}", controlDeviceLabel(profiles, nodeId)?)
         }
+        NetworkControlCommand::AdmitSpace { sourceSpaceId, nodeIds } => {
+            let labels = nodeIds.iter().map(|node| controlDeviceLabel(profiles, node))
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("Merge Space {sourceSpaceId}; admit {}", labels.join(", "))
+        }
         NetworkControlCommand::RemoveMember { nodeId } => {
             format!("Remove device {}", controlDeviceLabel(profiles, nodeId)?)
         }
@@ -637,6 +684,14 @@ fn validateCommandRecord(record: &NetworkControlCommandRecord) -> Result<(), Str
             validateIdentityAssignment(assignment)
         }
         NetworkControlCommand::RevokeRole { nodeId } => validateNodeId(nodeId),
+        NetworkControlCommand::AdmitSpace { sourceSpaceId, nodeIds } => {
+            validateSpaceId(sourceSpaceId)?;
+            if sourceSpaceId == &record.spaceId || nodeIds.is_empty() {
+                return Err("Space admission requires a distinct source and nonempty membership".into());
+            }
+            for nodeId in nodeIds { validateNodeId(nodeId)?; }
+            Ok(())
+        }
         NetworkControlCommand::AdmitMember { nodeId }
         | NetworkControlCommand::RemoveMember { nodeId }
         | NetworkControlCommand::DisconnectNode { nodeId } => validateNodeId(nodeId),
@@ -779,6 +834,19 @@ fn authorizeAndApplyCommand(
                 state
                     .deviceIdentityIds
                     .insert(nodeId.clone(), "user".to_string());
+            }
+            Ok(())
+        }
+        NetworkControlCommand::AdmitSpace { nodeIds, .. } => {
+            // Validate the entire group before changing any authorization state.
+            for nodeId in nodeIds {
+                requireCapability(state, &record.issuerNodeId, "network.members.join", Some(nodeId))?;
+            }
+            for nodeId in nodeIds {
+                state.removedNodeIds.remove(nodeId);
+                state.disconnectedNodeIds.remove(nodeId);
+                state.memberNodeIds.insert(nodeId.clone());
+                state.deviceIdentityIds.entry(nodeId.clone()).or_insert_with(|| "user".into());
             }
             Ok(())
         }

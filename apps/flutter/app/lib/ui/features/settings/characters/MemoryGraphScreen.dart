@@ -864,11 +864,17 @@ class _MemoryToolbar extends StatelessWidget {
   final VoidCallback onToggleLinkMode;
   final VoidCallback onCreateMemory;
 
-  /// Builds the top memory toolbar.
+  /// Builds a search-first toolbar with fixed-width, labeled icon actions.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final folderLabel = folderPath.isEmpty ? '全部文件夹' : folderPath;
+    final actionStyle = IconButton.styleFrom(
+      minimumSize: const Size(40, 40),
+      maximumSize: const Size(40, 40),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    );
     return Material(
       color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.32),
       child: Container(
@@ -882,66 +888,42 @@ class _MemoryToolbar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
         child: Row(
           children: <Widget>[
-            OutlinedButton.icon(
-              onPressed: busy ? null : onOpenFolders,
-              style: OutlinedButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 0,
-                ),
-                minimumSize: const Size(0, 32),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                side: BorderSide(
-                  color: folderPath.isNotEmpty
-                      ? colorScheme.primary.withValues(alpha: 0.5)
-                      : colorScheme.outlineVariant.withValues(alpha: 0.35),
-                ),
-                foregroundColor: folderPath.isNotEmpty
-                    ? colorScheme.primary
-                    : colorScheme.onSurface,
-              ),
-              icon: const Icon(Icons.folder_outlined, size: 16),
-              label: Text(
-                folderLabel,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(width: 8),
             Expanded(
-              child: SizedBox(
-                height: 32,
-                child: TextField(
-                  controller: controller,
-                  enabled: !busy,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => onSearch(),
-                  style: Theme.of(context).textTheme.bodySmall,
-                  decoration: InputDecoration(
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 6,
-                    ),
-                    prefixIcon: const Icon(Icons.search, size: 16),
-                    suffixIcon: controller.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: '清空',
-                            padding: EdgeInsets.zero,
-                            iconSize: 14,
-                            onPressed: busy ? null : onClearSearch,
-                            icon: const Icon(Icons.clear),
+              child: Tooltip(
+                message: '搜索标题、正文、来源或标签',
+                child: SizedBox(
+                  height: 40,
+                  child: TextField(
+                    controller: controller,
+                    enabled: !busy,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: (_) => onSearch(),
+                    style: Theme.of(context).textTheme.bodySmall,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 36),
+                      suffixIconConstraints: const BoxConstraints(minWidth: 32),
+                      suffixIcon: controller.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: '清空',
+                              padding: EdgeInsets.zero,
+                              iconSize: 16,
+                              onPressed: busy ? null : onClearSearch,
+                              icon: const Icon(Icons.clear),
+                            ),
+                      hintText: '搜索记忆',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(
+                          color: colorScheme.outlineVariant.withValues(
+                            alpha: 0.3,
                           ),
-                    hintText: '搜索标题、正文、来源或标签',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(
-                        color: colorScheme.outlineVariant.withValues(
-                          alpha: 0.3,
                         ),
                       ),
                     ),
@@ -950,49 +932,39 @@ class _MemoryToolbar extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            OutlinedButton.icon(
-              onPressed: busy ? null : onToggleLinkMode,
-              style: OutlinedButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 0,
-                ),
-                minimumSize: const Size(0, 32),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                side: BorderSide(
-                  color: linkMode
+            IconButton.outlined(
+              tooltip: folderLabel,
+              onPressed: busy ? null : onOpenFolders,
+              style: actionStyle.copyWith(
+                foregroundColor: WidgetStatePropertyAll(
+                  folderPath.isNotEmpty
                       ? colorScheme.primary
-                      : colorScheme.outlineVariant.withValues(alpha: 0.35),
+                      : colorScheme.onSurface,
                 ),
-                backgroundColor: linkMode
-                    ? colorScheme.primary.withValues(alpha: 0.12)
-                    : null,
-                foregroundColor: linkMode
-                    ? colorScheme.primary
-                    : colorScheme.onSurface,
+                side: WidgetStatePropertyAll(
+                  BorderSide(
+                    color: folderPath.isNotEmpty
+                        ? colorScheme.primary.withValues(alpha: 0.5)
+                        : colorScheme.outlineVariant.withValues(alpha: 0.35),
+                  ),
+                ),
               ),
-              icon: const Icon(Icons.link, size: 16),
-              label: const Text('关系模式'),
+              icon: const Icon(Icons.folder_outlined, size: 18),
             ),
             const SizedBox(width: 8),
-            FilledButton.icon(
+            IconButton.filledTonal(
+              tooltip: '关系模式',
+              onPressed: busy ? null : onToggleLinkMode,
+              isSelected: linkMode,
+              style: actionStyle,
+              icon: const Icon(Icons.link, size: 18),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filled(
+              tooltip: '新建记忆',
               onPressed: busy ? null : onCreateMemory,
-              style: FilledButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 0,
-                ),
-                minimumSize: const Size(0, 32),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('新建记忆'),
+              style: actionStyle,
+              icon: const Icon(Icons.add, size: 18),
             ),
           ],
         ),

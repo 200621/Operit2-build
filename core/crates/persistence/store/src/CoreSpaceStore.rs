@@ -83,7 +83,7 @@ struct CoreSpaceMemberRecord {
 
 /// Stores the directly paired peers announced by one CoreNode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct CoreSpaceTopologyRecord {
+pub struct CoreSpaceTopologyRecord {
     nodeId: String,
     peers: Vec<String>,
     links: Vec<CoreSpaceLinkAdvertisement>,
@@ -484,13 +484,36 @@ impl CoreSpaceStore {
         Ok(spaceProfiles)
     }
 
+    /// Validates complete device presentations before publishing an incoming Space projection.
+    pub fn validateSpaceProfiles(space: &CoreSpace, profiles: &[CoreSpaceDeviceProfile]) -> Result<(), String> {
+        validateCoreSpace(space)?;
+        let mut ids = BTreeSet::new();
+        for profile in profiles {
+            validateDeviceProfile(profile)?;
+            if !ids.insert(profile.nodeId.clone()) {
+                return Err(format!("Duplicate device profile in Space snapshot: {}", profile.nodeId));
+            }
+        }
+        for nodeId in &space.members {
+            if !ids.contains(nodeId) {
+                return Err(format!("Space snapshot is missing a member profile: {nodeId}"));
+            }
+        }
+        Ok(())
+    }
+
     /// Imports synchronized device presentations carried by the Space control protocol.
     #[allow(non_snake_case)]
     pub fn importDeviceProfiles(
         &self,
         profiles: Vec<CoreSpaceDeviceProfile>,
     ) -> Result<(), String> {
+        for profile in &profiles { validateDeviceProfile(profile)?; }
+        let existing = self.deviceProfiles()?;
         for profile in profiles {
+            if existing.get(&profile.nodeId).is_some_and(|current| current.updatedAt >= profile.updatedAt) {
+                continue;
+            }
             self.writeDeviceProfile(&profile)?;
         }
         Ok(())
@@ -620,7 +643,12 @@ impl CoreSpaceStore {
     /// Returns every directed direct-device connection inside the current device space.
     #[allow(non_snake_case)]
     pub fn deviceConnections(&self) -> Result<Vec<CoreSpaceDeviceConnection>, String> {
-        let members = self.space()?.members.into_iter().collect::<BTreeSet<_>>();
+        self.deviceConnectionsForSpace(&self.space()?)
+    }
+
+    /// Filters connection endpoints against the exact membership snapshot used by the caller.
+    pub fn deviceConnectionsForSpace(&self, space: &CoreSpace) -> Result<Vec<CoreSpaceDeviceConnection>, String> {
+        let members = space.members.iter().cloned().collect::<BTreeSet<_>>();
         let mut connections = BTreeSet::new();
         for record in self.topologyRecords()?.into_values() {
             if !members.contains(&record.nodeId) {
@@ -845,8 +873,22 @@ impl CoreSpaceStore {
         self.space()
     }
 
+    /// Imports validated directed link announcements without replacing fresher local observations.
+    pub fn importTopologyRecords(&self, records: Vec<CoreSpaceTopologyRecord>) -> Result<(), String> {
+        for record in &records { validateTopologyRecord(record)?; }
+        let current = self.topologyRecords()?;
+        let local = CoreNodeIdentityStore::new(self.storage.clone()).initialize()?.nodeId;
+        for record in records {
+            if record.nodeId == local || current.get(&record.nodeId).is_some_and(|old| old.updatedAt >= record.updatedAt) {
+                continue;
+            }
+            self.writeTopologyRecord(&record)?;
+        }
+        Ok(())
+    }
+
     /// Reads every synchronized topology announcement visible to this CoreNode.
-    fn topologyRecords(&self) -> Result<BTreeMap<String, CoreSpaceTopologyRecord>, String> {
+    pub fn topologyRecords(&self) -> Result<BTreeMap<String, CoreSpaceTopologyRecord>, String> {
         let entries = self
             .storage
             .list(RUNTIME_SPACE_TOPOLOGY_DIR_PATH)

@@ -2062,6 +2062,10 @@ pub trait HostJavaScriptRuntimeHost: Send + Sync {
 }
 
 pub trait HostRuntimeTaskSchedulerHost: Send + Sync {
+    /// Reads monotonic milliseconds from this Host's timer clock, independent of wall-clock changes.
+    /// Readings must remain comparable across tasks using the same scheduler instance.
+    fn monotonicTimeMillis(&self) -> HostResult<u64>;
+
     /// Schedules a named one-shot runtime task through the platform execution mechanism.
     fn scheduleHostRuntimeTask(&self, taskName: &str, task: HostRuntimeTask) -> HostResult<()>;
 

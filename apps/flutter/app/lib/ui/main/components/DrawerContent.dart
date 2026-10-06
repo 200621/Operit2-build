@@ -82,7 +82,7 @@ class _DrawerContentState extends State<DrawerContent> {
   List<core_proxy.ChatHistoryListItem>? _pendingOrderedHistories;
   int _historyRenderLimit = _collapsedHistoryLimit;
   bool _searchExpanded = false;
-  bool _groupingModeChanged = false;
+  StreamSubscription<String?>? _groupingModeSubscription;
   late final Future<void> _groupingModeLoadFuture;
   _HistoryGroupingMode _groupingMode = _HistoryGroupingMode.character;
 
@@ -105,14 +105,45 @@ class _DrawerContentState extends State<DrawerContent> {
     unawaited(_reportGroupingModeLoad());
   }
 
-  /// Loads the persisted sidebar grouping mode into the drawer state.
+  /// Observes the persisted grouping mode and awaits its initial snapshot.
   Future<void> _loadGroupingMode() async {
-    final persistedMode = await _preferences.loadChatHistoryGroupingMode();
-    if (!mounted || _groupingModeChanged || persistedMode == null) {
+    final loaded = Completer<void>();
+    _groupingModeSubscription = _preferences
+        .chatHistoryGroupingModeFlow()
+        .listen(
+          (mode) {
+            _applyPersistedGroupingMode(mode);
+            if (!loaded.isCompleted) {
+              loaded.complete();
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (!loaded.isCompleted) {
+              loaded.completeError(error, stackTrace);
+              return;
+            }
+            FlutterError.reportError(
+              FlutterErrorDetails(
+                exception: error,
+                stack: stackTrace,
+                library: 'sidebar grouping preferences',
+                context: ErrorDescription(
+                  'while observing conversation grouping',
+                ),
+              ),
+            );
+          },
+        );
+    await loaded.future;
+  }
+
+  /// Applies committed grouping changes to the drawer's live conversation state.
+  void _applyPersistedGroupingMode(String? persistedMode) {
+    if (!mounted) {
       return;
     }
     final groupingMode = switch (persistedMode) {
-      UserPreferencesManager.CHAT_HISTORY_GROUPING_CHARACTER =>
+      null || UserPreferencesManager.CHAT_HISTORY_GROUPING_CHARACTER =>
         _HistoryGroupingMode.character,
       UserPreferencesManager.CHAT_HISTORY_GROUPING_WORKSPACE =>
         _HistoryGroupingMode.workspace,
@@ -120,6 +151,9 @@ class _DrawerContentState extends State<DrawerContent> {
         'Unsupported persisted sidebar grouping mode: $persistedMode',
       ),
     };
+    if (_groupingMode == groupingMode) {
+      return;
+    }
     setState(() {
       _groupingMode = groupingMode;
     });
@@ -250,6 +284,8 @@ class _DrawerContentState extends State<DrawerContent> {
 
   @override
   void dispose() {
+    unawaited(_groupingModeSubscription?.cancel());
+    _groupingModeSubscription = null;
     _historyScrollController.dispose();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
@@ -314,7 +350,6 @@ class _DrawerContentState extends State<DrawerContent> {
         ? _HistoryGroupingMode.workspace
         : _HistoryGroupingMode.character;
     setState(() {
-      _groupingModeChanged = true;
       _groupingMode = nextMode;
     });
     unawaited(_persistGroupingMode(nextMode));

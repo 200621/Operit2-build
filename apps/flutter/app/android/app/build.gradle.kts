@@ -94,6 +94,8 @@ fun selectedOperitRustTargets(targets: List<OperitRustTarget>): List<OperitRustT
 
 val operitRustTargets = listOf(
     OperitRustTarget("android-arm64", "arm64-v8a", "aarch64-linux-android", "AARCH64_LINUX_ANDROID"),
+    OperitRustTarget("android-x64", "x86_64", "x86_64-linux-android", "X86_64_LINUX_ANDROID"),
+    OperitRustTarget("android-arm", "armeabi-v7a", "armv7-linux-androideabi", "ARMV7_LINUX_ANDROIDEABI"),
 )
 val selectedOperitRustTargets = selectedOperitRustTargets(operitRustTargets)
 

@@ -24,6 +24,7 @@ import '../../chat/screens/AIChatScreen.dart';
 import '../utils/PackageDisplayUtils.dart';
 import 'ToolPkgComposeDslWebView.dart';
 import 'compose_dsl/fill_layout.dart';
+import 'compose_dsl/lazy_viewport.dart';
 import 'compose_dsl/action_scheduler.dart';
 
 part 'compose_dsl/compose_host.dart';

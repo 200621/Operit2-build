@@ -1,5 +1,7 @@
 // ignore_for_file: file_names
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
@@ -53,6 +55,7 @@ class SidebarDockController extends ChangeNotifier {
   final SidebarDockPreferences _preferences;
   SidebarDockLayout? _storedLayout;
   bool _preferencesLoaded = false;
+  StreamSubscription<SidebarDockLayout?>? _preferencesSubscription;
   Future<void>? _saveFuture;
   bool _saveAgain = false;
 
@@ -69,14 +72,45 @@ class SidebarDockController extends ChangeNotifier {
   /// Returns the selected right-side view identifier.
   String get selectedSecondaryViewId => _selectedSecondaryViewId;
 
-  /// Loads the persisted layout before applying subsequent catalog updates.
+  /// Loads and observes committed layouts before applying subsequent catalog updates.
   Future<void> loadPreferences() async {
-    _storedLayout = await _preferences.load();
-    _preferencesLoaded = true;
-    final changed = _applyStoredLayout();
-    if (changed) {
-      notifyListeners();
-    }
+    await _preferencesSubscription?.cancel();
+    final loaded = Completer<void>();
+    _preferencesSubscription = _preferences.watch().listen(
+      (layout) {
+        _storedLayout = layout;
+        _preferencesLoaded = true;
+        if (_applyStoredLayout()) {
+          notifyListeners();
+        }
+        if (!loaded.isCompleted) {
+          loaded.complete();
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!loaded.isCompleted) {
+          loaded.completeError(error, stackTrace);
+          return;
+        }
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'sidebar dock persistence',
+            context: ErrorDescription('while observing sidebar dock layout'),
+          ),
+        );
+      },
+    );
+    await loaded.future;
+  }
+
+  /// Detaches the preference watch before releasing the sidebar state owner.
+  @override
+  void dispose() {
+    unawaited(_preferencesSubscription?.cancel());
+    _preferencesSubscription = null;
+    super.dispose();
   }
 
   /// Reconciles dock placement with the current plugin navigation catalog.
@@ -193,7 +227,16 @@ class SidebarDockController extends ChangeNotifier {
   bool _applyStoredLayout() {
     final layout = _storedLayout;
     if (layout == null) {
-      return false;
+      final changed =
+          !listEquals(_primaryEntryIds, _entriesById.keys.toList()) ||
+          _secondaryEntryIds.isNotEmpty ||
+          _selectedSecondaryViewId != workspaceViewId;
+      _primaryEntryIds
+        ..clear()
+        ..addAll(_entriesById.keys);
+      _secondaryEntryIds.clear();
+      _selectedSecondaryViewId = workspaceViewId;
+      return changed;
     }
     final primaryBefore = List<String>.of(_primaryEntryIds);
     final secondaryBefore = List<String>.of(_secondaryEntryIds);

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use operit_store::PreferencesDataStore::{
-    stringPreferencesKey, PreferencesDataStore, PreferencesDataStoreError,
+    stringPreferencesKey, Flow, PreferencesDataStore, PreferencesDataStoreError,
 };
 use operit_store::RuntimeStorageHost::defaultRuntimeStorageHost;
 use operit_util::OperitPaths;
@@ -44,6 +44,17 @@ impl PreferenceStorageManager {
             }
         }
         Ok(values)
+    }
+
+    /// Observes committed local and synchronized values from a named custom preference file.
+    pub fn preferencesFlow(
+        &self,
+        fileName: &str,
+    ) -> Result<Flow<BTreeMap<String, String>>, PreferencesDataStoreError> {
+        let fileName = normalizePreferenceFileName(fileName)?;
+        Ok(preferencesDataStore(&fileName)
+            .dataFlow()
+            .map(|preferences| preferences.entries().into_iter().collect()))
     }
 
     /// Writes one value to a named custom preference file.
@@ -120,6 +131,7 @@ impl PreferenceStorageManager {
     }
 }
 
+/// Opens the shared host-backed store for one validated custom preference file.
 fn preferencesDataStore(fileName: &str) -> PreferencesDataStore {
     PreferencesDataStore::newWithStorage(
         defaultRuntimeStorageHost(),
@@ -128,6 +140,7 @@ fn preferencesDataStore(fileName: &str) -> PreferencesDataStore {
     )
 }
 
+/// Validates and normalizes a plain custom preference file name.
 fn normalizePreferenceFileName(fileName: &str) -> Result<String, PreferencesDataStoreError> {
     let fileName = fileName.trim();
     if fileName.is_empty() {
@@ -143,6 +156,7 @@ fn normalizePreferenceFileName(fileName: &str) -> Result<String, PreferencesData
     Ok(fileName.to_string())
 }
 
+/// Validates and normalizes one custom preference key.
 fn normalizePreferenceKey(key: &str) -> Result<String, PreferencesDataStoreError> {
     let key = key.trim();
     if key.is_empty() {

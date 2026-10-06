@@ -1,5 +1,6 @@
 // ignore_for_file: file_names, constant_identifier_names
 
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 
 import '../../core/bridge/ProxyCoreRuntimeBridge.dart';
@@ -726,12 +727,60 @@ class UserPreferencesManager {
     _KEY_CUSTOM_USER_AVATAR_URI,
   ];
 
+  /// Observes committed user preferences, including changes synchronized from peers.
+  Stream<Map<String, String>> preferencesFlow() {
+    return _clients.preferencesPreferenceStorageManager
+        .preferencesFlow(fileName: _fileName)
+        .distinct(mapEquals);
+  }
+
+  /// Observes and validates the global long-paste settings from the shared store.
+  Stream<LongPastedTextInputSettings> longPastedTextInputSettingsFlow() {
+    return preferencesFlow()
+        .map(
+          (values) => <String, String>{
+            for (final key in <String>[
+              _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
+              _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
+            ])
+              if (values[key] case final String value) key: value,
+          },
+        )
+        .distinct(mapEquals)
+        .map(_decodeLongPastedTextInputSettings);
+  }
+
+  /// Observes the persisted sidebar conversation grouping mode.
+  Stream<String?> chatHistoryGroupingModeFlow() {
+    return preferencesFlow()
+        .map(
+          (values) => switch (values[_KEY_CHAT_HISTORY_GROUPING_MODE]) {
+            null => null,
+            CHAT_HISTORY_GROUPING_CHARACTER => CHAT_HISTORY_GROUPING_CHARACTER,
+            CHAT_HISTORY_GROUPING_WORKSPACE => CHAT_HISTORY_GROUPING_WORKSPACE,
+            final value => throw FormatException(
+              'Unsupported persisted sidebar grouping mode: $value',
+            ),
+          },
+        )
+        .distinct();
+  }
+
   /// Loads the global settings for converting long pasted text to attachments.
   Future<void> loadLongPastedTextInputSettings() async {
     final values = await _getStrings(<String>[
       _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
       _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
     ]);
+    longPastedTextInputSettings.value = _decodeLongPastedTextInputSettings(
+      values,
+    );
+  }
+
+  /// Decodes persisted long-paste settings without concealing malformed values.
+  LongPastedTextInputSettings _decodeLongPastedTextInputSettings(
+    Map<String, String> values,
+  ) {
     final enabledValue = values[_KEY_LONG_PASTED_TEXT_INPUT_ENABLED];
     final thresholdValue = values[_KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD];
     final settings = LongPastedTextInputSettings(
@@ -747,7 +796,7 @@ class UserPreferencesManager {
         '${settings.threshold}',
       );
     }
-    longPastedTextInputSettings.value = settings;
+    return settings;
   }
 
   /// Persists the global settings for converting long pasted text to attachments.

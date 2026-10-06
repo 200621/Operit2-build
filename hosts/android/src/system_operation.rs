@@ -1,16 +1,32 @@
+use std::sync::Arc;
+
 use operit_host_api::{
     AppListData, AppOperationData, AppUsageTimeResultData, DeviceInfoData, HostError, HostResult,
     LocationData, NotificationData, OCRLanguage, OCRQuality, SystemNotificationRequest,
     SystemOperationHost, SystemSettingData,
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct AndroidSystemOperationHost;
+pub type AndroidSystemSettingReader =
+    Arc<dyn Fn(&str, &str) -> HostResult<SystemSettingData> + Send + Sync>;
+pub type AndroidSystemSettingWriter =
+    Arc<dyn Fn(&str, &str, &str) -> HostResult<SystemSettingData> + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AndroidSystemOperationHost {
+    settingReader: AndroidSystemSettingReader,
+    settingWriter: AndroidSystemSettingWriter,
+}
 
 impl AndroidSystemOperationHost {
-    /// Creates the Android system operation host.
-    pub fn new() -> Self {
-        Self
+    /// Creates an Android system host with its required owner settings bindings.
+    pub fn new(
+        settingReader: AndroidSystemSettingReader,
+        settingWriter: AndroidSystemSettingWriter,
+    ) -> Self {
+        Self {
+            settingReader,
+            settingWriter,
+        }
     }
 }
 
@@ -34,21 +50,19 @@ impl SystemOperationHost for AndroidSystemOperationHost {
         )))
     }
 
+    /// Modifies a setting through the Android owner's settings API.
     fn modifySystemSetting(
         &self,
         namespace: &str,
         setting: &str,
         value: &str,
     ) -> HostResult<SystemSettingData> {
-        Err(HostError::new(format!(
-            "Android modify_system_setting requires the Android system host bridge: {namespace}/{setting}={value}"
-        )))
+        (self.settingWriter)(namespace, setting, value)
     }
 
+    /// Reads a setting through the Android owner's settings API.
     fn getSystemSetting(&self, namespace: &str, setting: &str) -> HostResult<SystemSettingData> {
-        Err(HostError::new(format!(
-            "Android get_system_setting requires the Android system host bridge: {namespace}/{setting}"
-        )))
+        (self.settingReader)(namespace, setting)
     }
 
     fn installApp(&self, path: &str) -> HostResult<AppOperationData> {

@@ -1,12 +1,12 @@
-//! Authenticated availability belongs to the peer runtime, not the persistence
-//! synchronizer. Restored credentials must be usable before a peer is online.
+//! Connection discovery is separate from liveness, which belongs to authenticated channels.
 use super::*;
-use futures_util::{stream, StreamExt};
+use futures_util::{future::LocalBoxFuture, stream::FuturesUnordered, StreamExt};
 use operit_store::NetworkControlStore::NetworkControlStore;
 use tokio::sync::oneshot;
 
-const PROBE_INTERVAL_MS: u64 = 3_000;
-const PROBE_DEADLINE_MS: u64 = 5_000;
+const DISCOVERY_INTERVAL_MS: u64 = 3_000;
+const CONNECT_DEADLINE_MS: u64 = 30_000;
+const MAX_CONNECTING_PEERS: usize = 4;
 
 pub(super) struct AvailabilityWorker {
     stop: oneshot::Sender<()>,
@@ -14,6 +14,7 @@ pub(super) struct AvailabilityWorker {
 }
 
 impl HostRuntimePeerService {
+    /// Rejects transport use forbidden by the current shared Space policy.
     pub(super) fn requirePeerConnectionAllowed(&self, node: &str) -> Result<(), CoreLinkError> {
         let storage = self.state.host.runtimeStorageHost.clone()
             .ok_or_else(|| error("Runtime storage Host is not installed"))?;
@@ -23,7 +24,7 @@ impl HostRuntimePeerService {
         Ok(())
     }
 
-    /// Starts authenticated peer probes independently of inbound listening support.
+    /// Starts bounded, independent connection attempts; established channels monitor themselves.
     pub(super) fn startAvailabilityWorker(&self) -> Result<(), CoreLinkError> {
         let mut worker = self.state.availability.lock().map_err(|_| error("Peer availability lock poisoned"))?;
         if worker.is_some() { return Ok(()); }
@@ -34,70 +35,78 @@ impl HostRuntimePeerService {
         let (stop, mut stopped) = oneshot::channel();
         let (done, finished) = oneshot::channel();
         scheduler.scheduleHostRuntimeAsyncTask("peer-availability", Box::new(move || Box::pin(async move {
+            let mut pending = FuturesUnordered::<LocalBoxFuture<'static, (String, Result<(), CoreLinkError>)>>::new();
+            let mut connecting = BTreeSet::new();
+            let mut tick = tasks.waitForHostRuntimeDelay(0);
+            let mut lastPeer = None;
             loop {
-                let Some(state) = state.upgrade() else { break; };
-                let service = HostRuntimePeerService { state };
-                // Cancellation drops pending probes before stop() closes listeners
-                // and connections, so the worker cannot mark peers online later.
                 tokio::select! {
                     biased;
                     _ = &mut stopped => break,
-                    result = service.probePairedPeers() => {
-                        if let Err(e) = result {
-                            operit_util::AppLogger::AppLogger::w("RuntimePeerService", &format!("Peer availability check failed: {e}"));
+                    result = pending.next(), if !pending.is_empty() => {
+                        if let Some((node, result)) = result {
+                            connecting.remove(&node);
+                            if let Err(error) = result {
+                                if let Some(state) = state.upgrade() {
+                                    HostRuntimePeerService { state }.refreshPeerAvailability(&node);
+                                }
+                                operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Peer connection attempt failed peer={node} error={error}"));
+                            }
+                        }
+                    }
+                    _ = &mut tick => {
+                        tick = tasks.waitForHostRuntimeDelay(DISCOVERY_INTERVAL_MS);
+                        let Some(state) = state.upgrade() else { break; };
+                        let service = HostRuntimePeerService { state };
+                        let peers = match service.pairedPeers() {
+                            Ok(peers) => peers,
+                            Err(error) => {
+                                operit_util::AppLogger::AppLogger::w("RuntimePeerService", &error.to_string());
+                                continue;
+                            }
+                        };
+                        // Round-robin admission prevents unreachable peers from monopolizing dial slots.
+                        let mut peers = peers;
+                        peers.sort_by(|left, right| left.nodeId.cmp(&right.nodeId));
+                        let split = peers.partition_point(|peer| lastPeer.as_ref().is_some_and(|last| &peer.nodeId <= last));
+                        peers.rotate_left(split);
+                        for peer in peers {
+                            if service.requirePeerConnectionAllowed(&peer.nodeId).is_err() {
+                                service.refreshPeerAvailability(&peer.nodeId);
+                                continue;
+                            }
+                            if connecting.contains(&peer.nodeId) || service.hasLiveChannel(&peer.nodeId) { continue; }
+                            if !(peer.outbound || service.spaceOutbound(&peer.nodeId).is_ok()) { continue; }
+                            if connecting.len() >= MAX_CONNECTING_PEERS { break; }
+                            let node = peer.nodeId;
+                            lastPeer = Some(node.clone());
+                            connecting.insert(node.clone());
+                            let service = service.clone();
+                            let tasks = tasks.clone();
+                            pending.push(Box::pin(async move {
+                                let result = tokio::select! {
+                                    result = service.acquirePooledChannel(&node) => result.map(drop),
+                                    _ = tasks.waitForHostRuntimeDelay(CONNECT_DEADLINE_MS) => Err(CoreLinkError::new("PEER_CONNECT_TIMEOUT", "Authenticated connection establishment timed out")),
+                                };
+                                (node, result)
+                            }));
                         }
                     }
                 }
-                drop(service);
-                tokio::select! {
-                    biased;
-                    _ = &mut stopped => break,
-                    _ = tasks.waitForHostRuntimeDelay(PROBE_INTERVAL_MS) => {}
-                }
             }
+            drop(pending);
             let _ = done.send(());
         }))).map_err(|e| error(e.to_string()))?;
         *worker = Some(AvailabilityWorker { stop, done: finished });
         Ok(())
     }
 
-    /// Cancels probes and waits without retaining the worker state lock.
+    /// Cancels connection establishment and waits without retaining the worker state lock.
     pub(super) async fn stopAvailabilityWorker(&self) {
         let worker = self.state.availability.lock().unwrap().take();
         if let Some(AvailabilityWorker { stop, done }) = worker {
             let _ = stop.send(());
             let _ = done.await;
         }
-    }
-
-    async fn probePairedPeers(&self) -> Result<(), CoreLinkError> {
-        let control = NetworkControlStore::new(self.state.host.runtimeStorageHost.clone().ok_or_else(|| error("Runtime storage Host is not installed"))?).map_err(error)?;
-        let mut candidates = Vec::new();
-        for peer in self.pairedPeers()? {
-            // An inbound pairing alone is never outbound permission. A return
-            // grant is usable only while the original pairing and Space agree.
-            if !control.nodeIsDisconnected(&peer.nodeId).map_err(error)?
-                && (peer.outbound || self.spaceOutbound(&peer.nodeId).is_ok()) {
-                candidates.push(peer.nodeId);
-            }
-        }
-        stream::iter(candidates).for_each_concurrent(4, |node| async move {
-            let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.as_ref().unwrap();
-            let result = tokio::select! {
-                result = self.connectAuthorized(&node) => result,
-                _ = scheduler.waitForHostRuntimeDelay(PROBE_DEADLINE_MS) => Err(error("Authenticated availability probe timed out")),
-            };
-            match result {
-                Ok(channel) => { channel.raw.close().await; }
-                Err(e) => {
-                    if failureProvesPeerUnavailable(&e) && self.state.active.lock().unwrap().remove(&node) {
-                        operit_util::AppLogger::AppLogger::i("RuntimePeerService", &format!("Peer offline peer={node} error={e}"));
-                        self.changed();
-                    }
-                    operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Availability probe failed peer={node} error={e}"));
-                }
-            }
-        }).await;
-        Ok(())
     }
 }

@@ -306,6 +306,13 @@ mod tests {
     struct TestHostRuntimeTaskScheduler;
 
     impl HostRuntimeTaskSchedulerHost for TestHostRuntimeTaskScheduler {
+        /// Reads the test Host's process-local monotonic timer clock.
+        fn monotonicTimeMillis(&self) -> HostResult<u64> {
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            Ok(START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64)
+        }
+
+
         /// Starts a synchronous test task on an isolated thread.
         fn scheduleHostRuntimeTask(
             &self,

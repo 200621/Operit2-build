@@ -110,6 +110,42 @@ pub(crate) fn ownerNotifications(limit: i32, includeOngoing: bool) -> HostResult
     )
 }
 
+/// Reads a system setting through the owner's exact settings response schema.
+pub(crate) fn ownerGetSystemSetting(namespace: &str, setting: &str) -> HostResult<SystemSettingData> {
+    ownerSystemSetting(
+        "get_system_setting",
+        serde_json::json!({ "namespace": namespace, "setting": setting }),
+    )
+}
+
+/// Modifies a system setting through the owner's settings authorization boundary.
+pub(crate) fn ownerModifySystemSetting(
+    namespace: &str,
+    setting: &str,
+    value: &str,
+) -> HostResult<SystemSettingData> {
+    ownerSystemSetting(
+        "modify_system_setting",
+        serde_json::json!({ "namespace": namespace, "setting": setting, "value": value }),
+    )
+}
+
+/// Decodes the owner's required setting fields into the shared host data type.
+fn ownerSystemSetting(operation: &str, params: serde_json::Value) -> HostResult<SystemSettingData> {
+    #[derive(serde::Deserialize)]
+    struct SettingResponse {
+        namespace: String,
+        setting: String,
+        value: String,
+    }
+    let response: SettingResponse = ownerSystemOperation(operation, params)?;
+    Ok(SystemSettingData {
+        namespace: response.namespace,
+        setting: response.setting,
+        value: response.value,
+    })
+}
+
 /// Reads device information through the owner system API.
 pub(crate) fn ownerDeviceInfo() -> HostResult<DeviceInfoData> {
     ownerSystemOperation("get_device_info", serde_json::json!({}))

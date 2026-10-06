@@ -36,6 +36,11 @@ impl LocalHostRuntimeTaskSchedulerHost {
 }
 
 impl HostRuntimeTaskSchedulerHost for LocalHostRuntimeTaskSchedulerHost {
+    /// Reads the same native timer clock as the delegated delay implementation.
+    fn monotonicTimeMillis(&self) -> HostResult<u64> {
+        crate::NativeHostRuntimeTaskSchedulerHost.monotonicTimeMillis()
+    }
+
     fn scheduleHostRuntimeTask(&self, name: &str, task: HostRuntimeTask) -> HostResult<()> {
         self.scheduleHostRuntimeAsyncTask(name, Box::new(|| Box::pin(async move { task() })))
     }

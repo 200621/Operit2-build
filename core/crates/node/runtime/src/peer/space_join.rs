@@ -8,10 +8,11 @@ use operit_store::NetworkControlStore::{NetworkControlCommand, NetworkControlCom
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Mutex;
 
-const INBOUND: &str = "runtime/link_access/space_join_inbound.preferences.json";
-const OUTBOUND: &str = "runtime/link_access/space_join_outbound.preferences.json";
-const INBOX: &str = "runtime/link_access/space_join_review_inbox.preferences.json";
-const RESULTS: &str = "runtime/link_access/space_join_review_results.preferences.json";
+// Group consent uses its own durable schema; single-device approval records are not group approvals.
+const INBOUND: &str = "runtime/link_access/space_merge_inbound.preferences.json";
+const OUTBOUND: &str = "runtime/link_access/space_merge_outbound.preferences.json";
+const INBOX: &str = "runtime/link_access/space_merge_review_inbox.preferences.json";
+const RESULTS: &str = "runtime/link_access/space_merge_review_results.preferences.json";
 const LIFETIME_MS: i64 = 15 * 60 * 1000;
 const OFFLINE_GRACE_MS: i64 = 30_000;
 static MUTATION: Mutex<()> = Mutex::new(());
@@ -23,6 +24,7 @@ struct Record {
     sourceRevision: i64,
     targetSpaceId: String,
     profile: CoreSpaceDeviceProfile,
+    source: PeerSpaceSnapshot,
     accepted: Option<PeerSpaceJoin>,
     #[serde(default)]
     unavailableSince: Option<i64>,
@@ -36,6 +38,7 @@ struct Submission {
     sourceRevision: i64,
     targetSpaceId: String,
     profile: CoreSpaceDeviceProfile,
+    source: PeerSpaceSnapshot,
 }
 #[derive(Serialize, Deserialize)]
 struct Decision {
@@ -105,6 +108,7 @@ fn hopDistances(source: &str, edges: &[CoreSpaceDeviceConnection], transit: &BTr
     }
     distances
 }
+/// Assigns the nearest authorized reviewer without consulting topology for a local decision.
 fn assign(service: &RuntimeRemoteLinkService, record: &mut Record, now: i64) -> Result<(), String> {
     if record.request.status != SpaceJoinStatus::Pending { return Ok(()); }
     let local = service.nodeRouter.localNodeId();
@@ -122,19 +126,23 @@ fn assign(service: &RuntimeRemoteLinkService, record: &mut Record, now: i64) -> 
             if now.saturating_sub(since) < OFFLINE_GRACE_MS { return Ok(()); }
         }
     }
-    let peers = service.nodeServices()?.peers().activePeerNodeIds().map_err(|e| e.to_string())?;
-    let mut edges = service.spaceStore.deviceConnections()?;
-    edges.retain(|e| e.firstDeviceId != local);
-    edges.extend(peers.into_iter().filter(|p| space.members.contains(p)).map(|p| CoreSpaceDeviceConnection {
-        firstDeviceId: local.clone(), secondDeviceId: p,
-    }));
-    let distances = hopDistances(&local, &edges, &service.networkControlStore.relayNodeIds()?);
-    let mut candidates = Vec::new();
-    for (node, hops) in distances {
-        if capable(&node)? && service.nodeRouter.nodeIsReachable(&node)? { candidates.push((hops, node)); }
-    }
-    candidates.sort();
-    let chosen = candidates.into_iter().next();
+    let chosen = if capable(&local)? {
+        Some((0, local.clone()))
+    } else {
+        let peers = service.nodeServices()?.peers().activePeerNodeIds().map_err(|e| e.to_string())?;
+        let mut edges = service.spaceStore.deviceConnections()?;
+        edges.retain(|e| e.firstDeviceId != local);
+        edges.extend(peers.into_iter().filter(|p| space.members.contains(p)).map(|p| CoreSpaceDeviceConnection {
+            firstDeviceId: local.clone(), secondDeviceId: p,
+        }));
+        let distances = hopDistances(&local, &edges, &service.networkControlStore.relayNodeIds()?);
+        let mut candidates = Vec::new();
+        for (node, hops) in distances {
+            if capable(&node)? && service.nodeRouter.nodeIsReachable(&node)? { candidates.push((hops, node)); }
+        }
+        candidates.sort();
+        candidates.into_iter().next()
+    };
     let newId = chosen.as_ref().map(|(_, node)| node.clone());
     if newId != record.request.reviewerDeviceId {
         record.request.assignmentVersion = record.request.assignmentVersion.checked_add(1).ok_or("Assignment overflow")?;
@@ -154,6 +162,7 @@ fn reconcile(service: &RuntimeRemoteLinkService, record: &mut Record) -> Result<
     assign(service, record, now)
 }
 
+/// Captures the complete source membership for one explicit Space merge request.
 pub(super) async fn request(service: &RuntimeRemoteLinkService, deviceId: String) -> Result<SpaceJoinRequest, String> {
     paired(service, &deviceId, false)?;
     if let Some(old) = outgoing(service)?.into_iter().find(|r| r.targetDeviceId == deviceId && active(&r.status)) {
@@ -161,30 +170,35 @@ pub(super) async fn request(service: &RuntimeRemoteLinkService, deviceId: String
     }
     let snapshot: PeerSpaceSnapshot = service.callPeerSpace(&deviceId, "snapshot", CoreValue::Null).await?;
     if !snapshot.space.members.contains(&deviceId) { return Err("Target is not in its advertised Space".into()); }
-    let local = service.spaceStore.initialize()?;
+    let source = service.peerSpaceSnapshot()?;
+    let local = source.space.clone();
     let localId = service.nodeRouter.localNodeId();
     if local.spaceId == snapshot.space.spaceId && snapshot.space.members.contains(&localId) {
         return Err("This device is already a member of the target Space".into());
     }
-    let profile = service.spaceStore.deviceProfilesForCurrentSpace()?.into_iter()
-        .find(|p| p.nodeId == localId).ok_or("Local device profile missing")?;
+    let profile = source.deviceProfiles.iter().find(|p| p.nodeId == localId)
+        .cloned().ok_or("Local device profile missing")?;
+    let applicantName = source.deviceProfiles.iter()
+        .filter(|p| source.space.members.iter().any(|node| node == &p.nodeId))
+        .map(|p| p.displayName.clone()).collect::<Vec<_>>().join(", ");
     let now = currentTimeMillis();
     let record = Record {
         request: SpaceJoinRequest { requestId: uuid::Uuid::new_v4().to_string(), targetDeviceId: deviceId,
-            applicantDeviceId: localId, applicantName: profile.displayName.clone(), spaceName: snapshot.space.spaceName,
+            applicantDeviceId: localId, applicantName, spaceName: snapshot.space.spaceName,
             status: SpaceJoinStatus::Pending, createdAt: now, expiresAt: now + LIFETIME_MS, canApprove: false,
             reviewerDeviceId: None, reviewerName: None, reviewerHops: None, assignmentVersion: 0, decisionApprove: None },
         sourceSpaceId: local.spaceId, sourceRevision: local.spaceRevision,
-        targetSpaceId: snapshot.space.spaceId, profile, accepted: None, unavailableSince: None, approvedDecision: None,
+        targetSpaceId: snapshot.space.spaceId, profile, source, accepted: None, unavailableSince: None, approvedDecision: None,
     };
     store(service).putRecord(OUTBOUND, &record.request.requestId, &record)?;
     // refresh also handles a result already approved after a lost initial reply.
     refresh(service, record.request.requestId).await
 }
+/// Resends the immutable source snapshot associated with this request.
 async fn sendSubmission(service: &RuntimeRemoteLinkService, record: &Record) -> Result<Record, String> {
     service.callPeerSpace(&record.request.targetDeviceId, "requestJoin", toCoreValue(Submission {
         requestId: record.request.requestId.clone(), sourceSpaceId: record.sourceSpaceId.clone(),
-        sourceRevision: record.sourceRevision, targetSpaceId: record.targetSpaceId.clone(), profile: record.profile.clone(),
+        sourceRevision: record.sourceRevision, targetSpaceId: record.targetSpaceId.clone(), profile: record.profile.clone(), source: record.source.clone(),
     }).map_err(|e| e.to_string())?).await
 }
 fn validateResponse(local: &Record, remote: &Record) -> Result<(), String> {
@@ -203,15 +217,25 @@ pub(super) fn outgoing(service: &RuntimeRemoteLinkService) -> Result<Vec<SpaceJo
     Ok(records)
 }
 
+/// Receives applicant commands; cancellation never depends on reviewer discovery.
 pub(super) fn receive(service: &RuntimeRemoteLinkService, peer: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
     let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
     paired(service, peer, true)?;
     let current = service.spaceStore.initialize()?;
     let now = currentTimeMillis();
-    let mut record = if request.methodName == "requestJoin" {
+    let cancellation = request.methodName == "cancelJoin";
+    let mut record = if request.methodName == "requestJoin" || cancellation {
         let input: Submission = fromCoreValue(request.args).map_err(|e| e.to_string())?;
+        if !cancellation {
+            CoreSpaceStore::validateSpaceProfiles(&input.source.space, &input.source.deviceProfiles)?;
+            if input.source.space.spaceId != input.sourceSpaceId || input.source.space.spaceRevision != input.sourceRevision
+                || !input.source.space.members.iter().any(|node| node == peer)
+                || !input.source.deviceProfiles.iter().any(|profile| profile == &input.profile) {
+                return Err("Join source snapshot does not match its applicant".into());
+            }
+        }
         uuid::Uuid::parse_str(&input.requestId).map_err(|_| "Invalid join request id")?;
-        if input.profile.nodeId != peer || input.sourceRevision <= 0 || input.targetSpaceId != current.spaceId
+        if input.profile.nodeId != peer || input.sourceRevision <= 0 || (!cancellation && input.targetSpaceId != current.spaceId)
             || input.sourceSpaceId.is_empty() || input.profile.displayName.len() > 512 {
             return Err("Join request identity/Space mismatch".into());
         }
@@ -223,21 +247,23 @@ pub(super) fn receive(service: &RuntimeRemoteLinkService, peer: &str, request: C
             }
             old.clone()
         } else {
-            if records.values().filter(|r| active(&r.request.status) && r.request.expiresAt > now).count() >= 64 {
+            if !cancellation && records.values().filter(|r| active(&r.request.status) && r.request.expiresAt > now).count() >= 64 {
                 return Err("Too many pending join requests".into());
             }
-            if records.values().any(|r| r.request.applicantDeviceId == peer && r.targetSpaceId == current.spaceId
+            if !cancellation && records.values().any(|r| r.request.applicantDeviceId == peer && r.targetSpaceId == current.spaceId
                 && active(&r.request.status) && (r.request.status != SpaceJoinStatus::Pending || r.request.expiresAt > now)) {
                 return Err("An active join request already exists".into());
             }
             Record {
                 request: SpaceJoinRequest { requestId: input.requestId, targetDeviceId: service.nodeRouter.localNodeId(),
-                    applicantDeviceId: peer.into(), applicantName: input.profile.displayName.clone(),
+                    applicantDeviceId: peer.into(), applicantName: input.source.deviceProfiles.iter()
+                        .filter(|p| input.source.space.members.iter().any(|node| node == &p.nodeId))
+                        .map(|p| p.displayName.clone()).collect::<Vec<_>>().join(", "),
                     spaceName: current.spaceName.clone(), status: SpaceJoinStatus::Pending,
                     createdAt: now, expiresAt: now + LIFETIME_MS, canApprove: false,
                     reviewerDeviceId: None, reviewerName: None, reviewerHops: None, assignmentVersion: 0, decisionApprove: None },
                 sourceSpaceId: input.sourceSpaceId, sourceRevision: input.sourceRevision,
-                targetSpaceId: input.targetSpaceId, profile: input.profile, accepted: None,
+                targetSpaceId: input.targetSpaceId, profile: input.profile, source: input.source, accepted: None,
                 unavailableSince: None, approvedDecision: None,
             }
         }
@@ -247,9 +273,12 @@ pub(super) fn receive(service: &RuntimeRemoteLinkService, peer: &str, request: C
         if record.request.applicantDeviceId != peer { return Err("Join request belongs to another device".into()); }
         record
     };
-    reconcile(service, &mut record)?;
-    if request.methodName == "cancelJoin" && record.request.status == SpaceJoinStatus::Pending {
-        record.request.status = SpaceJoinStatus::Cancelled;
+    if request.methodName == "cancelJoin" {
+        if record.request.status == SpaceJoinStatus::Pending {
+            record.request.status = SpaceJoinStatus::Cancelled;
+        }
+    } else {
+        reconcile(service, &mut record)?;
     }
     store(service).putRecord(INBOUND, &record.request.requestId, &record)?;
     toCoreValue(record).map_err(|e| e.to_string())
@@ -299,6 +328,7 @@ fn validateAssignment(service: &RuntimeRemoteLinkService, record: &Record, origi
     }
     Ok(())
 }
+/// Claims and commits the exact group membership selected by the reviewer.
 pub(super) fn receiveApproval(service: &RuntimeRemoteLinkService, origin: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
     let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
     let current = service.spaceStore.initialize()?;
@@ -334,8 +364,7 @@ pub(super) fn receiveApproval(service: &RuntimeRemoteLinkService, origin: &str, 
                 || !matches!(record.request.status, SpaceJoinStatus::Approving | SpaceJoinStatus::Approved | SpaceJoinStatus::Rejected) {
                 return Err("Join request is no longer awaiting this decision".into());
             }
-            toCoreValue(Claim { record, current: PeerSpaceJoin { space: current,
-                controlOperations: service.networkControlStore.currentSpaceOperations()? } }).map_err(|e| e.to_string())
+            toCoreValue(Claim { record, current: service.peerSpaceSnapshot()? }).map_err(|e| e.to_string())
         }
         "complete" => {
             let outcome: Outcome = fromCoreValue(request.args).map_err(|e| e.to_string())?;
@@ -350,20 +379,25 @@ pub(super) fn receiveApproval(service: &RuntimeRemoteLinkService, origin: &str, 
                 let operation = outcome.admission.as_ref().ok_or("Approval has no admission operation")?;
                 let command: NetworkControlCommandRecord = serde_json::from_value(operation.payload.clone()).map_err(|e| e.to_string())?;
                 if command.spaceId != record.targetSpaceId || command.issuerNodeId != origin
-                    || !matches!(command.command, NetworkControlCommand::AdmitMember { ref nodeId } if nodeId == &record.request.applicantDeviceId) {
+                    || !matches!(command.command, NetworkControlCommand::AdmitSpace { ref sourceSpaceId, ref nodeIds }
+                        if sourceSpaceId == &record.sourceSpaceId && nodeIds == &record.source.space.members.iter().cloned().collect()) {
                     return Err("Approval operation is not this reviewer's admission for this applicant".into());
                 }
+                let members = record.source.space.members.iter().cloned().collect();
+                let mut operations = service.networkControlStore.currentSpaceOperations()?;
+                if !operations.iter().any(|existing| existing.opId == operation.opId) { operations.push(operation.clone()); }
+                service.networkControlStore.validateSpaceAdmission(&record.targetSpaceId,
+                    &record.sourceSpaceId, &members, &operations)?;
+                service.spaceStore.importDeviceProfiles(record.source.deviceProfiles.clone())?;
+                service.spaceStore.importTopologyRecords(record.source.topology.clone())?;
                 service.networkControlStore.applyBootstrapOperation(operation)?;
-                if !service.networkControlStore.currentState()?.memberNodeIds.contains(&record.request.applicantDeviceId) {
-                    return Err("Admission was not authorized by the Space policy".into());
-                }
                 let mut joined = current;
-                if !joined.members.contains(&record.request.applicantDeviceId) { joined.members.push(record.request.applicantDeviceId.clone()); }
+                joined.members.extend(record.source.space.members.clone());
                 joined.members.sort();
+                joined.members.dedup();
                 joined.spaceRevision = joined.spaceRevision.max(outcome.revision).max(record.sourceRevision).checked_add(1).ok_or("Space revision overflow")?;
-                service.spaceStore.importDeviceProfiles(vec![record.profile.clone()])?;
-                record.accepted = Some(PeerSpaceJoin { space: service.spaceStore.adopt(joined)?,
-                    controlOperations: service.networkControlStore.currentSpaceOperations()? });
+                service.spaceStore.adopt(joined)?;
+                record.accepted = Some(service.peerSpaceSnapshot()?);
                 record.request.status = SpaceJoinStatus::Approved;
             } else {
                 if outcome.admission.is_some() { return Err("Rejection must not contain an admission".into()); }
@@ -376,6 +410,7 @@ pub(super) fn receiveApproval(service: &RuntimeRemoteLinkService, origin: &str, 
     }
 }
 
+/// Approves the complete source Space in one policy operation before publishing membership.
 pub(super) async fn decide(service: &RuntimeRemoteLinkService, id: String, version: u64, approve: bool) -> Result<SpaceJoinRequest, String> {
     let local = service.nodeRouter.localNodeId();
     if !canReview(service, &local)? { return Err("This device cannot approve Space join requests".into()); }
@@ -392,16 +427,23 @@ pub(super) async fn decide(service: &RuntimeRemoteLinkService, id: String, versi
     } else {
         let mut revision = claim.current.space.spaceRevision;
         let admission = if approve {
+            CoreSpaceStore::validateSpaceProfiles(&claim.current.space, &claim.current.deviceProfiles)?;
+            service.spaceStore.importDeviceProfiles(claim.current.deviceProfiles.clone())?;
+            service.spaceStore.importTopologyRecords(claim.current.topology.clone())?;
             for operation in &claim.current.controlOperations { service.networkControlStore.applyBootstrapOperation(operation)?; }
             let mut joined = service.spaceStore.initialize()?;
             if joined.spaceId != claim.record.targetSpaceId { return Err("Reviewer changed Space".into()); }
             for node in claim.current.space.members { if !joined.members.contains(&node) { joined.members.push(node); } }
-            let operation = service.networkControlStore.admitMember(claim.record.request.applicantDeviceId.clone())?;
-            if !joined.members.contains(&claim.record.request.applicantDeviceId) { joined.members.push(claim.record.request.applicantDeviceId.clone()); }
+            CoreSpaceStore::validateSpaceProfiles(&claim.record.source.space, &claim.record.source.deviceProfiles)?;
+            service.spaceStore.importDeviceProfiles(claim.record.source.deviceProfiles.clone())?;
+            service.spaceStore.importTopologyRecords(claim.record.source.topology.clone())?;
+            let operation = service.networkControlStore.admitSpace(claim.record.sourceSpaceId.clone(),
+                claim.record.source.space.members.iter().cloned().collect())?;
+            joined.members.extend(claim.record.source.space.members.clone());
             joined.members.sort();
+            joined.members.dedup();
             revision = revision.max(joined.spaceRevision).max(claim.record.sourceRevision).checked_add(1).ok_or("Space revision overflow")?;
             joined.spaceRevision = revision;
-            service.spaceStore.importDeviceProfiles(vec![claim.record.profile.clone()])?;
             service.spaceStore.adopt(joined)?;
             Some(operation)
         } else { None };
@@ -414,6 +456,7 @@ pub(super) async fn decide(service: &RuntimeRemoteLinkService, id: String, versi
     Ok(record.request)
 }
 
+/// Applies the approved group merge with profiles and policy preceding member publication.
 pub(super) async fn refresh(service: &RuntimeRemoteLinkService, id: String) -> Result<SpaceJoinRequest, String> {
     let local = load(service, OUTBOUND, &id)?;
     if !active(&local.request.status) { return Ok(local.request); }
@@ -436,69 +479,65 @@ pub(super) async fn refresh(service: &RuntimeRemoteLinkService, id: String) -> R
         if snapshot.space.spaceId != local.targetSpaceId || !snapshot.space.members.contains(&local.request.applicantDeviceId) {
             return Err("Approved target membership changed".into());
         }
-        service.spaceStore.adopt(snapshot.space)?;
-        for operation in &accepted.controlOperations { service.networkControlStore.applyBootstrapOperation(operation)?; }
+        CoreSpaceStore::validateSpaceProfiles(&snapshot.space, &snapshot.deviceProfiles)?;
+        let members = local.source.space.members.iter().cloned().collect();
+        service.networkControlStore.validateSpaceAdmission(&snapshot.space.spaceId,
+            &local.sourceSpaceId, &members, &snapshot.controlOperations)?;
+        let currentMembers = current.members.iter().collect::<BTreeSet<_>>();
+        let approvedMembers = snapshot.space.members.iter().collect::<BTreeSet<_>>();
+        if !currentMembers.is_subset(&approvedMembers) {
+            return Err("Source Space gained members after approval; submit a new merge request".into());
+        }
         service.spaceStore.importDeviceProfiles(snapshot.deviceProfiles)?;
+        service.spaceStore.importTopologyRecords(snapshot.topology)?;
+        for operation in &snapshot.controlOperations { service.networkControlStore.applyBootstrapOperation(operation)?; }
+        service.spaceStore.adopt(snapshot.space)?;
         remote.request.status = SpaceJoinStatus::Joined;
     }
     remote.request.canApprove = false;
-    store(service).putRecord(OUTBOUND, &id, &remote)?;
-    if remote.request.status == SpaceJoinStatus::Joined {
+    let published = publishOutgoingResponse(service, &id, &remote)?;
+    if published.status == SpaceJoinStatus::Joined {
         if let Err(e) = service.persistenceSyncService().synchronizeReachablePeer(local.request.targetDeviceId, 512, true).await {
             operit_util::AppLogger::AppLogger::w("SpaceJoin", &format!("Join approved; initial data sync failed: {e}"));
         }
     }
-    Ok(remote.request)
+    Ok(published)
 }
+
+/// Publishes a response without allowing an older poll to resurrect a terminal request.
+fn publishOutgoingResponse(service: &RuntimeRemoteLinkService, id: &str, remote: &Record) -> Result<SpaceJoinRequest, String> {
+    let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
+    let current = load(service, OUTBOUND, id)?;
+    if preserveOutgoingStatus(&current.request.status, &remote.request.status) {
+        return Ok(current.request);
+    }
+    store(service).putRecord(OUTBOUND, id, remote)?;
+    Ok(remote.request.clone())
+}
+
+/// Prevents delayed responses from rolling a durable request back to an earlier state.
+fn preserveOutgoingStatus(current: &SpaceJoinStatus, incoming: &SpaceJoinStatus) -> bool {
+    !active(current)
+        || (*current == SpaceJoinStatus::Approving && *incoming == SpaceJoinStatus::Pending)
+        || (*current == SpaceJoinStatus::Approved
+            && matches!(incoming, SpaceJoinStatus::Pending | SpaceJoinStatus::Approving))
+}
+
+/// Cancels a pending request and persists its acknowledged state before any stale poll can finish.
 pub(super) async fn cancel(service: &RuntimeRemoteLinkService, id: String) -> Result<SpaceJoinRequest, String> {
     let local = load(service, OUTBOUND, &id)?;
-    let remote: Record = service.callPeerSpace(&local.request.targetDeviceId, "cancelJoin", toCoreValue(id.clone()).map_err(|e| e.to_string())?).await?;
+    let remote: Record = service.callPeerSpace(&local.request.targetDeviceId, "cancelJoin", toCoreValue(Submission {
+        requestId: id.clone(), sourceSpaceId: local.sourceSpaceId.clone(),
+        sourceRevision: local.sourceRevision, targetSpaceId: local.targetSpaceId.clone(), profile: local.profile.clone(), source: local.source.clone(),
+    }).map_err(|e| e.to_string())?).await?;
     validateResponse(&local, &remote)?;
-    store(service).putRecord(OUTBOUND, &id, &remote)?;
+    let published = publishOutgoingResponse(service, &id, &remote)?;
     // A simultaneous claim/approval wins. Apply it rather than pretend cancellation succeeded.
-    if active(&remote.request.status) { return refresh(service, id).await; }
-    Ok(remote.request)
+    if active(&published.status) { return refresh(service, id).await; }
+    Ok(published)
 }
 
 #[cfg(test)]
-mod state_tests {
-    use super::*;
-    fn record(status: SpaceJoinStatus) -> Record {
-        Record {
-            request: SpaceJoinRequest { requestId: "request".into(), targetDeviceId: "gateway".into(),
-                applicantDeviceId: "applicant".into(), applicantName: "Applicant".into(), spaceName: "Space".into(),
-                status, createdAt: 1, expiresAt: 100, canApprove: false, reviewerDeviceId: None,
-                reviewerName: None, reviewerHops: None, assignmentVersion: 0, decisionApprove: None },
-            sourceSpaceId: "source".into(), sourceRevision: 1, targetSpaceId: "target".into(),
-            profile: CoreSpaceDeviceProfile { nodeId: "applicant".into(), displayName: "Applicant".into(),
-                userName: String::new(), platform: "test".into(), model: "test".into(), coreVersion: None, updatedAt: 1 },
-            accepted: None, unavailableSince: None, approvedDecision: None,
-        }
-    }
-    #[test]
-    fn only_pending_requests_expire_not_committed_or_claimed_decisions() {
-        for status in [SpaceJoinStatus::Approving, SpaceJoinStatus::Approved, SpaceJoinStatus::Joined, SpaceJoinStatus::Rejected] {
-            let mut r = record(status.clone());
-            expire(&mut r, 101, "target");
-            assert_eq!(r.request.status, status);
-        }
-        let mut r = record(SpaceJoinStatus::Pending);
-        expire(&mut r, 101, "target");
-        assert_eq!(r.request.status, SpaceJoinStatus::Expired);
-        let mut r = record(SpaceJoinStatus::Pending);
-        expire(&mut r, 1, "another");
-        assert_eq!(r.request.status, SpaceJoinStatus::Cancelled);
-    }
-    #[test]
-    fn hop_distances_use_directed_edges_and_do_not_transit_ordinary_members() {
-        let edge = |a: &str, b: &str| CoreSpaceDeviceConnection { firstDeviceId: a.into(), secondDeviceId: b.into() };
-        let edges = [edge("gateway", "near"), edge("gateway", "relay"), edge("relay", "far"),
-            edge("near", "not_reachable"), edge("relay", "gateway")];
-        let distances = hopDistances("gateway", &edges, &BTreeSet::from(["relay".into()]));
-        assert_eq!(distances["gateway"], 0);
-        assert_eq!(distances["near"], 1);
-        assert_eq!(distances["far"], 2);
-        assert!(!distances.contains_key("not_reachable"));
-        assert_eq!(hopDistances("far", &edges, &BTreeSet::new()).len(), 1);
-    }
+mod device_space_state_tests {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/device_space/join_state_machine.rs"));
 }

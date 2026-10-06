@@ -88,7 +88,20 @@ class SidebarDockPreferences {
   Future<SidebarDockLayout?> load() async {
     final values = await _clients.preferencesPreferenceStorageManager
         .getPreferences(fileName: _fileName, keys: <String>[_layoutKey]);
-    final encoded = values[_layoutKey];
+    return _decodeLayout(values[_layoutKey]);
+  }
+
+  /// Observes sidebar layouts committed locally or synchronized from peers.
+  Stream<SidebarDockLayout?> watch() {
+    return _clients.preferencesPreferenceStorageManager
+        .preferencesFlow(fileName: _fileName)
+        .map((values) => values[_layoutKey])
+        .distinct()
+        .map(_decodeLayout);
+  }
+
+  /// Decodes one layout snapshot using the same schema as startup reads.
+  SidebarDockLayout? _decodeLayout(String? encoded) {
     if (encoded == null) {
       return null;
     }

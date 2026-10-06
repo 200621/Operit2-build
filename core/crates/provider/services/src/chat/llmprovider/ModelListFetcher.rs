@@ -154,12 +154,18 @@ fn headers(
     provider: &ProviderProfile,
     operation: &ProviderOperationSpec,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     let customHeaders = serde_json::from_str::<serde_json::Value>(&provider.customHeaders)
         .map_err(|error| error.to_string())?;
     let object = customHeaders
         .as_object()
         .ok_or_else(|| "customHeaders is not a JSON object".to_string())?;
+    if matches!(
+        provider.providerType,
+        ApiProviderType::ANTHROPIC | ApiProviderType::ANTHROPIC_GENERIC
+    ) {
+        return anthropicHeaders(provider, operation, object);
+    }
+    let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     let isOpenCode = provider.providerType == ApiProviderType::OPENCODE;
     let mut hasAuthorization = false;
     for (name, value) in object {
@@ -191,6 +197,44 @@ fn headers(
             "User-Agent".to_string(),
             format!("Operit/{}", env!("CARGO_PKG_VERSION")),
         ));
+    }
+    Ok(headers)
+}
+
+/// Builds Anthropic protocol headers with explicit custom-header overrides.
+#[allow(non_snake_case)]
+fn anthropicHeaders(
+    provider: &ProviderProfile,
+    operation: &ProviderOperationSpec,
+    customHeaders: &serde_json::Map<String, Value>,
+) -> Result<Vec<(String, String)>, String> {
+    // Match the Kotlin model-list request and the Claude inference protocol.
+    // Anthropic requires its version header and authenticates with x-api-key.
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("anthropic-version".to_string(), "2023-06-01".to_string()),
+    ];
+    if let Some(apiKey) = apiKey(provider) {
+        headers.push(("x-api-key".to_string(), apiKey.to_string()));
+    }
+    for (name, value) in customHeaders {
+        let headerValue = value
+            .as_str()
+            .ok_or_else(|| format!("customHeaders value for {name} is not a string"))?;
+        headers.retain(|(existingName, _)| !existingName.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), headerValue.to_string()));
+    }
+    if !headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("anthropic-version") && !value.trim().is_empty()
+    }) {
+        return Err("Anthropic anthropic-version header is required".to_string());
+    }
+    if operation.requiresApiKey
+        && !headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("x-api-key") && !value.trim().is_empty())
+    {
+        return Err("Anthropic x-api-key header is required".to_string());
     }
     Ok(headers)
 }
@@ -458,6 +502,7 @@ mod tests {
     use super::*;
     use operit_model::ModelConfigData::{ApiProviderType, ProviderOperationResultSpec};
 
+    /// Creates a provider profile for model-list request tests.
     fn testProvider(apiKey: &str, customHeaders: &str) -> ProviderProfile {
         let mut provider = ProviderProfile::new(
             "test-provider".to_string(),
@@ -470,6 +515,7 @@ mod tests {
         provider
     }
 
+    /// Creates a model-list operation with configurable authentication requirements.
     fn testOperation(requiresApiKey: bool) -> ProviderOperationSpec {
         ProviderOperationSpec {
             operationType: "list_models".to_string(),
@@ -495,6 +541,93 @@ mod tests {
                 amountCurrencyJsonPath: None,
             },
         }
+    }
+
+    /// Keeps official and generic Anthropic model requests on the same protocol.
+    #[test]
+    fn anthropic_model_list_uses_version_and_api_key_headers() {
+        for providerType in [
+            ApiProviderType::ANTHROPIC,
+            ApiProviderType::ANTHROPIC_GENERIC,
+        ] {
+            let mut provider = testProvider("sk-ant-test", "{}");
+            provider.providerType = providerType;
+            let headers = headers(&provider, &testOperation(true)).unwrap();
+            assert_eq!(
+                headers,
+                vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                    ("x-api-key".to_string(), "sk-ant-test".to_string()),
+                ]
+            );
+        }
+    }
+
+    /// Applies explicit Anthropic header overrides without duplicate header names.
+    #[test]
+    fn anthropic_custom_headers_override_protocol_headers_case_insensitively() {
+        let mut provider = testProvider(
+            "sk-ant-test",
+            r#"{"X-Api-Key":"custom-key","Anthropic-Version":"2023-06-01","X-Test":"keep-me"}"#,
+        );
+        provider.providerType = ApiProviderType::ANTHROPIC_GENERIC;
+        let headers = headers(&provider, &testOperation(true)).unwrap();
+        for (name, expected) in [
+            ("x-api-key", "custom-key"),
+            ("anthropic-version", "2023-06-01"),
+            ("x-test", "keep-me"),
+        ] {
+            let values: Vec<_> = headers
+                .iter()
+                .filter(|(headerName, _)| headerName.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(values, vec![expected]);
+        }
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Authorization")));
+    }
+
+    /// Rejects missing or explicitly emptied Anthropic protocol headers.
+    #[test]
+    fn anthropic_invalid_authentication_and_version_are_reported() {
+        for (apiKey, customHeaders) in [
+            ("", "{}"),
+            ("", r#"{"Authorization":"Bearer custom"}"#),
+            ("sk-ant-test", r#"{"X-Api-Key":" "}"#),
+            ("sk-ant-test", r#"{"Anthropic-Version":" "}"#),
+            ("sk-ant-test", r#"{"X-Api-Key":123}"#),
+        ] {
+            let mut provider = testProvider(apiKey, customHeaders);
+            provider.providerType = ApiProviderType::ANTHROPIC;
+            assert!(headers(&provider, &testOperation(true)).is_err());
+        }
+    }
+
+    /// Authenticates Anthropic requests with the enabled key selected by rotation.
+    #[test]
+    fn anthropic_model_list_uses_the_selected_api_key_pool_entry() {
+        use operit_model::ApiKeyInfo::ApiKeyInfo;
+        let mut provider = testProvider("unused", "{}");
+        provider.providerType = ApiProviderType::ANTHROPIC;
+        provider.useMultipleApiKeys = true;
+        let mut disabled = ApiKeyInfo::new("disabled".to_string(), "disabled-key".to_string());
+        disabled.isEnabled = false;
+        provider.apiKeyPool = vec![
+            disabled,
+            ApiKeyInfo::new("blank".to_string(), " ".to_string()),
+            ApiKeyInfo::new("first".to_string(), "sk-ant-first".to_string()),
+            ApiKeyInfo::new("second".to_string(), "sk-ant-second".to_string()),
+        ];
+        provider.currentKeyIndex = -1;
+        let headers = headers(&provider, &testOperation(true)).unwrap();
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "x-api-key" && value == "sk-ant-second"));
+        provider.apiKeyPool.clear();
+        assert!(super::headers(&provider, &testOperation(true)).is_err());
     }
 
     #[test]

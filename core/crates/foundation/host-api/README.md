@@ -24,6 +24,11 @@ through trait objects and data models.
   serial devices/accessories and exchanging ordered bytes. Link framing and
   pairing remain in Core; device access and capability errors belong to Hosts.
 
+`HostRuntimeTaskSchedulerHost` owns delay scheduling and monotonic millisecond
+readings. Runtime consumers use the injected scheduler for elapsed-time measurements;
+platform clock access stays in concrete Host implementations. Timer clock errors
+are reported explicitly, without substituting wall-clock time.
+
 ## Key Files
 
 - `src/lib.rs`: host capability traits, request and response data models,

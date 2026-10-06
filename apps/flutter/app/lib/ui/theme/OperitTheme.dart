@@ -66,6 +66,8 @@ class _OperitThemeState extends State<OperitTheme> {
       const ApplicationZoomPreferences();
   double _zoom = 1.0;
   Future<void> _zoomSave = Future<void>.value();
+  StreamSubscription<double>? _zoomSubscription;
+  StreamSubscription<LongPastedTextInputSettings>? _longPasteSubscription;
   late final OperitThemeController _controller = OperitThemeController(
     onChanged: () {
       if (mounted) {
@@ -107,6 +109,7 @@ class _OperitThemeState extends State<OperitTheme> {
     _stopRuntimeStartupStatusPolling();
     _runtimeManager.removeListener(_handleRuntimeBootstrapChanged);
     _controller.dispose();
+    _cancelPreferenceSubscriptions();
     super.dispose();
   }
 
@@ -116,6 +119,7 @@ class _OperitThemeState extends State<OperitTheme> {
       _runtimeGeneration++;
       _stopRuntimeStartupStatusPolling();
       _controller.dispose();
+      _cancelPreferenceSubscriptions();
       setState(() {
         _runtimeUiReady = false;
         _runtimeStartCompleted = false;
@@ -148,6 +152,22 @@ class _OperitThemeState extends State<OperitTheme> {
           !_runtimeManager.runtimeConfigured) {
         return;
       }
+      _zoomSubscription = _zoomPreferences.watch().listen((zoom) {
+        if (!mounted || generation != _runtimeGeneration || _zoom == zoom) {
+          return;
+        }
+        setState(() {
+          _zoom = zoom;
+        });
+      });
+      _longPasteSubscription = const UserPreferencesManager()
+          .longPastedTextInputSettingsFlow()
+          .listen((settings) {
+            if (!mounted || generation != _runtimeGeneration) {
+              return;
+            }
+            UserPreferencesManager.longPastedTextInputSettings.value = settings;
+          });
       setState(() {
         _zoom = zoom;
         _runtimeUiReady = true;
@@ -175,6 +195,14 @@ class _OperitThemeState extends State<OperitTheme> {
         _runtimeStartFuture = null;
       }
     }
+  }
+
+  /// Detaches application-level preference caches from the active runtime.
+  void _cancelPreferenceSubscriptions() {
+    unawaited(_zoomSubscription?.cancel());
+    _zoomSubscription = null;
+    unawaited(_longPasteSubscription?.cancel());
+    _longPasteSubscription = null;
   }
 
   /// Starts reading Android native runtime stages while Core-backed UI is starting.
@@ -364,24 +392,31 @@ class OperitThemeController {
   /// Creates the controller that owns the effective application theme.
   OperitThemeController({
     required VoidCallback onChanged,
+    Future<void> Function(ThemeMode)? saveStartupThemeMode,
     UserPreferencesManager preferencesManager = const UserPreferencesManager(),
     GeneratedCoreProxyClients clients = const GeneratedCoreProxyClients(
       ProxyCoreRuntimeBridge(),
     ),
   }) : _onChanged = onChanged,
+       _saveStartupThemeMode =
+           saveStartupThemeMode ?? _saveStartupThemeModeDefault,
        _preferencesManager = preferencesManager,
        _clients = clients;
 
   final VoidCallback _onChanged;
+  final Future<void> Function(ThemeMode) _saveStartupThemeMode;
   final UserPreferencesManager _preferencesManager;
   final GeneratedCoreProxyClients _clients;
   StreamSubscription<Object?>? _activePromptSubscription;
+  StreamSubscription<Map<String, String>>? _themePreferencesSubscription;
   ThemePreferenceSnapshot _themePreferenceSnapshot =
       UserPreferencesManager.defaultThemePreferenceSnapshot;
   String? _activeCharacterCardId;
   String? _activeCharacterGroupId;
   String? _activeThemeTargetName;
   int _activePromptRevision = 0;
+  int _themePreferenceRevision = 0;
+  int _lifecycleRevision = 0;
   bool _suppressThemeAnimation = false;
 
   ThemeMode get themeMode => _themePreferenceSnapshot.themeMode;
@@ -420,10 +455,16 @@ class OperitThemeController {
 
   /// Starts core-backed theme preferences and active prompt subscriptions.
   Future<void> start() async {
+    final lifecycleRevision = ++_lifecycleRevision;
+    await _themePreferencesSubscription?.cancel();
+    _themePreferencesSubscription = null;
     await _activePromptSubscription?.cancel();
     _activePromptSubscription = null;
     final activePrompt = await _clients.preferencesActivePromptManager
         .getActivePrompt();
+    if (lifecycleRevision != _lifecycleRevision) {
+      return;
+    }
     _applyActivePrompt(activePrompt);
     final revision = ++_activePromptRevision;
     _activePromptSubscription = _clients.preferencesActivePromptManager
@@ -432,11 +473,21 @@ class OperitThemeController {
           unawaited(_handleActivePromptChange(activePrompt));
         });
     await _loadActiveThemeTarget(revision);
+    if (lifecycleRevision != _lifecycleRevision) {
+      return;
+    }
+    _themePreferencesSubscription = _preferencesManager
+        .preferencesFlow()
+        .listen((_) => unawaited(_reloadThemePreferenceSnapshot()));
   }
 
-  /// Cancels the active prompt subscription.
+  /// Cancels active prompt and theme preference subscriptions.
   void dispose() {
+    _lifecycleRevision++;
     _activePromptRevision++;
+    _themePreferenceRevision++;
+    unawaited(_themePreferencesSubscription?.cancel());
+    _themePreferencesSubscription = null;
     unawaited(_activePromptSubscription?.cancel());
     _activePromptSubscription = null;
   }
@@ -718,14 +769,22 @@ class OperitThemeController {
 
   /// Reloads and commits the latest snapshot for the active target.
   Future<void> _reloadThemePreferenceSnapshot() async {
+    final targetRevision = _activePromptRevision;
+    final preferenceRevision = ++_themePreferenceRevision;
     final snapshot = await _preferencesManager.resolveThemePreferenceSnapshot(
       characterCardId: _activeCharacterCardId,
       characterGroupId: _activeCharacterGroupId,
     );
     await _loadCustomFontIfNeeded(snapshot);
-    await RuntimeBootstrapManager.instance.saveStartupThemeMode(
-      snapshot.themeMode,
-    );
+    if (targetRevision != _activePromptRevision ||
+        preferenceRevision != _themePreferenceRevision) {
+      return;
+    }
+    await _saveStartupThemeMode(snapshot.themeMode);
+    if (targetRevision != _activePromptRevision ||
+        preferenceRevision != _themePreferenceRevision) {
+      return;
+    }
     _themePreferenceSnapshot = snapshot;
     _onChanged();
   }
@@ -775,20 +834,11 @@ class OperitThemeController {
       characterCardId: cardId,
       characterGroupId: groupId,
     );
-    final snapshot = await _preferencesManager.resolveThemePreferenceSnapshot(
-      characterCardId: cardId,
-      characterGroupId: groupId,
-    );
-    await _loadCustomFontIfNeeded(snapshot);
     if (revision != _activePromptRevision) {
       return;
     }
-    await RuntimeBootstrapManager.instance.saveStartupThemeMode(
-      snapshot.themeMode,
-    );
     _activeThemeTargetName = targetName;
-    _themePreferenceSnapshot = snapshot;
-    _onChanged();
+    await _reloadThemePreferenceSnapshot();
   }
 
   /// Resolves the display name for one explicit theme target.
@@ -830,6 +880,11 @@ class OperitThemeController {
     _activeCharacterGroupId = nextGroupId;
     return true;
   }
+}
+
+/// Persists the first-frame theme mode through the existing bootstrap host.
+Future<void> _saveStartupThemeModeDefault(ThemeMode themeMode) {
+  return RuntimeBootstrapManager.instance.saveStartupThemeMode(themeMode);
 }
 
 class _OperitThemeScope extends InheritedWidget {

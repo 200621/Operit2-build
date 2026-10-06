@@ -462,47 +462,24 @@ impl SpacePersistenceSyncService {
 
     /// Exchanges authenticated Device Space projections and reports whether business sync is allowed.
     #[allow(non_snake_case)]
-    async fn exchangePairedDeviceSpaceProjection(
+    pub(crate) async fn exchangePairedDeviceSpaceProjection(
         &self,
         peerNodeId: &str,
     ) -> Result<bool, String> {
-        let localSpace = self.state.spaceStore.initialize()?;
+        let remote: crate::RuntimeRemoteLinkService::PeerSpaceSnapshot = callRemoteService(
+            &self.state.nodeRouter, peerNodeId,
+            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET, "snapshot", Value::Null,
+        ).await?;
+        let service = crate::RuntimeRemoteLinkService::RuntimeRemoteLinkService::newWithRouter(
+            (*self.state.localRuntime).clone(), self.state.nodeRouter.clone());
+        service.observePeerSpaceSnapshot(peerNodeId, remote)?;
+        let local = service.peerSpaceSnapshot()?;
         let remoteSpace: CoreSpace = callRemoteService(
-            &self.state.nodeRouter,
-            peerNodeId,
-            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET,
-            "deviceSpace",
-            Value::Null,
-        )
-        .await?;
-        if !remoteSpace
-            .members
-            .iter()
-            .any(|member| member == peerNodeId)
-        {
-            return Err("Paired device is not present in its announced device space".to_string());
-        }
-        self.state
-            .spaceStore
-            .observePairedDeviceSpace(peerNodeId.to_string(), remoteSpace)?;
-        let _: CoreSpace = callRemoteService(
-            &self.state.nodeRouter,
-            peerNodeId,
-            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET,
-            "observePairedDeviceSpace",
-            serde_json::to_value(localSpace).map_err(|error| error.to_string())?,
-        )
-        .await?;
-        let currentLocalSpace = self.state.spaceStore.space()?;
-        let currentRemoteSpace: CoreSpace = callRemoteService(
-            &self.state.nodeRouter,
-            peerNodeId,
-            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET,
-            "deviceSpace",
-            Value::Null,
-        )
-        .await?;
-        Ok(currentLocalSpace.spaceId == currentRemoteSpace.spaceId)
+            &self.state.nodeRouter, peerNodeId,
+            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET, "observeSpaceSnapshot",
+            serde_json::to_value(local).map_err(|error| error.to_string())?,
+        ).await?;
+        Ok(self.state.spaceStore.space()?.spaceId == remoteSpace.spaceId)
     }
 
     /// Validates that one reachable CoreNode belongs to the same synchronized Device Space.

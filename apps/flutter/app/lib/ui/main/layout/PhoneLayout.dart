@@ -12,10 +12,12 @@ import '../components/DrawerConversationState.dart';
 import '../components/DrawerContent.dart';
 import '../components/NavigationDrawerAppearance.dart';
 import '../navigation/AppNavigationModels.dart';
+import 'DrawerMotionScope.dart';
 import '../../theme/OperitGlassSurface.dart';
 import '../../common/interactions/DrawerGestureExclusion.dart';
 
 class PhoneLayout extends StatefulWidget {
+  /// Creates the retained phone content and its animated navigation drawer.
   const PhoneLayout({
     super.key,
     required this.content,
@@ -45,6 +47,7 @@ class PhoneLayout extends StatefulWidget {
   final ValueChanged<NavigationEntrySpec> onNavigationEntrySelected;
   final VoidCallback onConversationActivated;
 
+  /// Creates the state that drives drawer motion independently of page content.
   @override
   State<PhoneLayout> createState() => _PhoneLayoutState();
 }
@@ -57,10 +60,12 @@ class _PhoneLayoutState extends State<PhoneLayout>
   static const double _dragThreshold = 40;
 
   late final AnimationController _drawerProgressController;
-  final SnapshotController _contentSnapshotController = SnapshotController();
+  final ValueNotifier<bool> _drawerIsAnimating = ValueNotifier<bool>(false);
+  final ValueNotifier<int> _contentActivation = ValueNotifier<int>(0);
   double _currentDrag = 0;
   double _verticalDrag = 0;
 
+  /// Connects the drawer state to its spring animation and motion lifecycle.
   @override
   void initState() {
     super.initState();
@@ -72,6 +77,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
     widget.drawerOpenState.addListener(_animateDrawerProgress);
   }
 
+  /// Rebinds drawer state changes while retaining the animation controller.
   @override
   void didUpdateWidget(covariant PhoneLayout oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -82,6 +88,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
     }
   }
 
+  /// Releases the animation and its page-local motion notification source.
   @override
   void dispose() {
     widget.drawerOpenState.removeListener(_animateDrawerProgress);
@@ -89,20 +96,17 @@ class _PhoneLayoutState extends State<PhoneLayout>
       _handleDrawerAnimationStatus,
     );
     _drawerProgressController.dispose();
-    _contentSnapshotController.dispose();
+    _drawerIsAnimating.dispose();
+    _contentActivation.dispose();
     super.dispose();
   }
 
-  /// Flatten the expensive content layer tree only for the short transition.
-  /// A RepaintBoundary retains display lists, not necessarily rasterized pixels:
-  /// changing scale/rotation can still make the engine rasterize them each frame.
+  /// Notifies page owners when a drawer motion starts or finishes.
   void _handleDrawerAnimationStatus(AnimationStatus status) {
-    // CanvasKit shares the UI/raster thread, where snapshot capture can regress
-    // performance. Native platform views use permissive's live-paint fallback.
-    _contentSnapshotController.allowSnapshotting =
-        !kIsWeb && _drawerProgressController.isAnimating;
+    _drawerIsAnimating.value = _drawerProgressController.isAnimating;
   }
 
+  /// Retargets the drawer spring from its current position and velocity.
   void _animateDrawerProgress() {
     final target = widget.drawerOpenState.value ? 1.0 : 0.0;
     final dampingRatio = widget.drawerOpenState.value
@@ -121,11 +125,25 @@ class _PhoneLayoutState extends State<PhoneLayout>
     _drawerProgressController.animateWith(simulation);
   }
 
+  /// Releases current-page freezing after a drawer navigation action begins.
+  void _handleNavigationEntrySelected(NavigationEntrySpec entry) {
+    widget.onNavigationEntrySelected(entry);
+    _contentActivation.value++;
+  }
+
+  /// Keeps in-page conversation loading live when the drawer closes.
+  void _handleConversationActivated() {
+    widget.onConversationActivated();
+    _contentActivation.value++;
+  }
+
+  /// Resets accumulated movement for a new drawer gesture.
   void _handleHorizontalDragStart(DragStartDetails details) {
     _currentDrag = 0;
     _verticalDrag = 0;
   }
 
+  /// Opens or closes the drawer after a deliberate horizontal gesture.
   void _handleHorizontalDragUpdate(DragUpdateDetails details) {
     _currentDrag += details.primaryDelta ?? 0;
     _verticalDrag += details.delta.dy;
@@ -143,6 +161,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
     }
   }
 
+  /// Clears gesture movement after the pointer is released.
   void _handleHorizontalDragEnd(DragEndDetails details) {
     _currentDrag = 0;
     _verticalDrag = 0;
@@ -154,13 +173,10 @@ class _PhoneLayoutState extends State<PhoneLayout>
     final appearance = navigationDrawerAppearanceOf(context);
     final animatedChild = _PhoneLayoutAnimatedChild(
       content: RepaintBoundary(
-        child: SnapshotWidget(
-          controller: _contentSnapshotController,
-          mode: SnapshotMode.permissive,
-          autoresize: true,
-          // Keep the live subtree mounted, and reuse its display lists when
-          // taking a snapshot or returning to live content after the animation.
-          child: RepaintBoundary(child: widget.content),
+        child: DrawerMotionScope(
+          isAnimating: _drawerIsAnimating,
+          contentActivation: _contentActivation,
+          child: widget.content,
         ),
       ),
       drawerContent: RepaintBoundary(
@@ -187,8 +203,8 @@ class _PhoneLayoutState extends State<PhoneLayout>
                 currentChatId: drawerState.currentChatId,
                 errorMessage: drawerState.errorMessage,
                 loading: drawerState.loading,
-                onNavigationEntrySelected: widget.onNavigationEntrySelected,
-                onConversationActivated: widget.onConversationActivated,
+                onNavigationEntrySelected: _handleNavigationEntrySelected,
+                onConversationActivated: _handleConversationActivated,
               );
             },
           ),
@@ -358,6 +374,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
 
 class _DrawerHorizontalDragGestureRecognizer
     extends HorizontalDragGestureRecognizer {
+  /// Keeps gestures beginning in editable or excluded content out of the arena.
   @override
   bool isPointerAllowed(PointerEvent event) {
     if (!super.isPointerAllowed(event)) {
@@ -366,12 +383,14 @@ class _DrawerHorizontalDragGestureRecognizer
     return !_startsInExcludedRegion(event);
   }
 
+  /// Applies the same exclusion policy to pointer pan and zoom gestures.
   @override
   bool isPointerPanZoomAllowed(PointerPanZoomStartEvent event) {
     return super.isPointerPanZoomAllowed(event) &&
         !_startsInExcludedRegion(event);
   }
 
+  /// Resolves gesture exclusions using the transformed hit-test path.
   bool _startsInExcludedRegion(PointerEvent event) {
     // Reject before entering the arena, not in onUpdate: winning the arena
     // would already cancel the text field's cursor/selection recognizers.
@@ -391,6 +410,7 @@ class _DrawerHorizontalDragGestureRecognizer
 }
 
 class _PhoneLayoutAnimatedChild extends StatelessWidget {
+  /// Retains the drawer and content widgets between presentation frames.
   const _PhoneLayoutAnimatedChild({
     required this.content,
     required this.drawerContent,
@@ -399,6 +419,7 @@ class _PhoneLayoutAnimatedChild extends StatelessWidget {
   final Widget content;
   final Widget drawerContent;
 
+  /// Provides an inert animation child while its retained fields are reused.
   @override
   Widget build(BuildContext context) {
     return const SizedBox.shrink();

@@ -79,31 +79,34 @@ class _ComposeLazyListState extends State<_ComposeLazyList> {
             _scheduleEndScroll();
             return false;
           },
-          child: ListView.custom(
+          child: ComposeDslLazyListView(
             controller: _controller,
             scrollDirection: widget.axis,
             reverse: widget.reverse,
             shrinkWrap: widget.axis == Axis.vertical
                 ? !constraints.hasBoundedHeight
                 : !constraints.hasBoundedWidth,
-            padding: EdgeInsets.zero,
             childrenDelegate: SliverChildBuilderDelegate(
               (context, index) {
                 final child = widget.itemBuilder(context, index);
-                return Padding(
+                return ComposeDslLazyListItem(
                   key: child.key,
-                  padding: widget.axis == Axis.vertical
-                      ? EdgeInsets.only(
-                          bottom: index + 1 < widget.nodes.length
-                              ? widget.spacing
-                              : 0,
-                        )
-                      : EdgeInsets.only(
-                          right: index + 1 < widget.nodes.length
-                              ? widget.spacing
-                              : 0,
-                        ),
-                  child: Align(alignment: widget.alignment, child: child),
+                  axis: widget.axis,
+                  alignment: widget.alignment,
+                  child: Padding(
+                    padding: widget.axis == Axis.vertical
+                        ? EdgeInsets.only(
+                            bottom: index + 1 < widget.nodes.length
+                                ? widget.spacing
+                                : 0,
+                          )
+                        : EdgeInsets.only(
+                            right: index + 1 < widget.nodes.length
+                                ? widget.spacing
+                                : 0,
+                          ),
+                    child: child,
+                  ),
                 );
               },
               childCount: widget.nodes.length,

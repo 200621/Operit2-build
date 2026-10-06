@@ -39,7 +39,7 @@ impl CoreLinkClient for RoutedClient {
         self.router.routedOpenPush(self.peer.clone(), r).await
     }
 }
-pub(super) async fn serve(service: HostRuntimePeerService, channel: Arc<Channel>, peer: String, sessionId: String, spaceChannel: bool) -> Result<(), CoreLinkError> {
+pub(super) async fn serve(service: HostRuntimePeerService, channel: Arc<LiveChannel>, peer: String, sessionId: String, spaceChannel: bool) -> Result<(), CoreLinkError> {
     let mut session = CoreLinkSession::new(RoutedClient { router: service.router()?, peer: peer.clone() }, 32);
     loop {
         enum Incoming { Message(Option<PeerMessage>), Event(Option<CoreLinkResponse>) }
@@ -77,73 +77,62 @@ pub(super) async fn serve(service: HostRuntimePeerService, channel: Arc<Channel>
     Ok(())
 }
 pub(super) async fn watchSnapshot(service: &HostRuntimePeerService, node: &str, request: RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEvent, CoreLinkError> {
-    let channel = service.connectAuthorized(node).await?;
+    let channel = service.acquirePooledChannel(node).await?;
     let id = request.payload.requestId.clone();
-    let result = channel.exchange(CoreLinkRequest::Watch(CoreLinkWatchRequest::Snapshot(routedWatch(request)?))).await;
-    channel.raw.close().await;
-    match result? {
-        CoreLinkResponse::Watch { requestId, result } if requestId == id => match result? {
-            CoreLinkWatchResponse::Snapshot(event) => Ok(event), _ => Err(error("Watch snapshot response mismatch")),
-        }, _ => Err(error("Watch correlation mismatch")),
+    let result = channel.channel().exchange(CoreLinkRequest::Watch(CoreLinkWatchRequest::Snapshot(routedWatch(request)?))).await?;
+    match result {
+        CoreLinkResponse::Watch { requestId, result: Ok(CoreLinkWatchResponse::Snapshot(event)) } if requestId == id => Ok(event),
+        CoreLinkResponse::Watch { result: Err(error), .. } => Err(error),
+        _ => Err(error("Watch snapshot response mismatch")),
     }
 }
 pub(super) async fn watch(service: &HostRuntimePeerService, node: &str, request: RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEventStream, CoreLinkError> {
-    let channel = service.connectAuthorized(node).await?;
-    let id = request.payload.requestId.clone();
-    let opened = channel.exchange(CoreLinkRequest::Watch(CoreLinkWatchRequest::Open(routedWatch(request)?))).await?;
-    match opened {
-        CoreLinkResponse::Watch { requestId, result } if requestId == id => match result? {
-            CoreLinkWatchResponse::Opened => {}, _ => { channel.raw.close().await; return Err(error("Watch open response mismatch")); },
-        }, _ => { channel.raw.close().await; return Err(error("Watch correlation mismatch")); },
-    }
-    let (tx, stream) = CoreEventStream::channel();
-    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
-    let scheduler = service.state.host.hostRuntimeTaskSchedulerHost.as_ref().ok_or_else(|| error("Host scheduler missing"))?;
-    scheduler.scheduleHostRuntimeAsyncTask("peer-watch", Box::new(move || Box::pin(async move {
-        loop {
-            let message = tokio::select! { _ = &mut stopped => break, message = channel.receive() => message };
-            match message {
-                Ok(Some(PeerMessage::Response(CoreLinkResponse::Watch { requestId, result: Ok(CoreLinkWatchResponse::Event(event)) })))
-                    if requestId == id => { if tx.send(event).is_err() { break; } },
-                _ => break,
-            }
-        }
-        channel.raw.close().await;
-    }))).map_err(|e| error(e.to_string()))?;
-    Ok(stream.withOnClose(move || { let _ = stop.send(()); }))
+    let channel = service.acquirePooledChannel(node).await?;
+    let (watchLease, stream) = channel.channel().openWatch(routedWatch(request)?).await?;
+    drop(channel);
+    Ok(stream.withOnClose(move || drop(watchLease)))
 }
-struct Push { channel: Arc<Channel>, id: String, next: u64 }
+struct Push {
+    lease: ChannelLease,
+    id: String,
+    next: u64,
+}
+
 #[async_trait]
 impl CoreLinkPushSession for Push {
+    /// Sends one ordered Push item through the shared multiplexed channel.
     async fn send(&mut self, args: CoreValue) -> Result<(), CoreLinkError> {
         let sequence = self.next;
         self.next = sequence.checked_add(1).ok_or_else(|| error("Push sequence exhausted"))?;
-        match self.channel.exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Item(CorePushItem {
+        match self.lease.channel().exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Item(CorePushItem {
             pushId: self.id.clone(), sequence, args,
         }))).await? {
-            CoreLinkResponse::Push { pushId, result } if pushId == self.id => match result? {
-                CoreLinkPushResponse::ItemAccepted { sequence: accepted } if accepted == sequence => Ok(()),
-                _ => Err(error("Push sequence response mismatch")),
-            }, _ => Err(error("Push correlation mismatch")),
+            CoreLinkResponse::Push { pushId, result: Ok(CoreLinkPushResponse::ItemAccepted { sequence: accepted }) }
+                if pushId == self.id && accepted == sequence => Ok(()),
+            CoreLinkResponse::Push { result: Err(error), .. } => Err(error),
+            _ => Err(error("Push sequence response mismatch")),
         }
     }
+
+    /// Closes one logical Push session while retaining the shared channel.
     async fn close(self: Box<Self>) -> Result<(), CoreLinkError> {
-        let result = self.channel.exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Close { pushId: self.id.clone() })).await;
-        self.channel.raw.close().await;
+        let result = self.lease.channel().exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Close {
+            pushId: self.id.clone(),
+        })).await;
         match result? {
-            CoreLinkResponse::Push { pushId, result } if pushId == self.id => match result? {
-                CoreLinkPushResponse::Closed => Ok(()), _ => Err(error("Push close response mismatch")),
-            }, _ => Err(error("Push correlation mismatch")),
+            CoreLinkResponse::Push { pushId, result: Ok(CoreLinkPushResponse::Closed) } if pushId == self.id => Ok(()),
+            CoreLinkResponse::Push { result: Err(error), .. } => Err(error),
+            _ => Err(error("Push close response mismatch")),
         }
     }
 }
 pub(super) async fn openPush(service: &HostRuntimePeerService, node: &str, request: RoutedCoreRequest<CorePushRequest>) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
-    let channel = service.connectAuthorized(node).await?;
+    let lease = service.acquirePooledChannel(node).await?;
     let id = request.payload.requestId.0.clone();
-    match channel.exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Open(routedPush(request)?))).await? {
-        CoreLinkResponse::Push { pushId, result } if pushId == id => match result? {
-            CoreLinkPushResponse::Opened => Ok(Box::new(Push { channel, id, next: 0 })),
-            _ => { channel.raw.close().await; Err(error("Push open response mismatch")) },
-        }, _ => { channel.raw.close().await; Err(error("Push correlation mismatch")) },
+    match lease.channel().exchange(CoreLinkRequest::Push(CoreLinkPushRequestMessage::Open(routedPush(request)?))).await? {
+        CoreLinkResponse::Push { pushId, result: Ok(CoreLinkPushResponse::Opened) } if pushId == id =>
+            Ok(Box::new(Push { lease, id, next: 0 })),
+        CoreLinkResponse::Push { result: Err(error), .. } => Err(error),
+        _ => Err(error("Push open response mismatch")),
     }
 }

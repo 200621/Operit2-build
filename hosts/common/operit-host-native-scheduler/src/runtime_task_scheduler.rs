@@ -120,6 +120,12 @@ impl NativeHostRuntimeTaskSchedulerHost {
 }
 
 impl HostRuntimeTaskSchedulerHost for NativeHostRuntimeTaskSchedulerHost {
+    /// Reads the process-local monotonic clock used for native elapsed-time measurements.
+    fn monotonicTimeMillis(&self) -> HostResult<u64> {
+        static START: OnceLock<std::time::Instant> = OnceLock::new();
+        Ok(START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64)
+    }
+
     /// Starts the task on a named native thread.
     fn scheduleHostRuntimeTask(&self, taskName: &str, task: HostRuntimeTask) -> HostResult<()> {
         std::thread::Builder::new()
@@ -184,5 +190,30 @@ impl HostRuntimeTaskSchedulerHost for NativeHostRuntimeTaskSchedulerHost {
             tokio::time::sleep(std::time::Duration::from_millis(delayMs)).await;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod timer_clock_tests {
+    use super::*;
+
+    /// Verifies wall-clock timestamps are not used and readings advance with native delays.
+    #[test]
+    fn scheduler_clock_is_monotonic_and_shared_between_instances() {
+        let scheduler = NativeHostRuntimeTaskSchedulerHost::new();
+        let before = scheduler.monotonicTimeMillis().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let after = NativeHostRuntimeTaskSchedulerHost::new().monotonicTimeMillis().unwrap();
+        assert!(after >= before + 1);
+    }
+
+    /// Verifies the local executor and its delegated timer use the same clock origin.
+    #[test]
+    fn local_scheduler_uses_the_native_timer_clock() {
+        let local = crate::LocalHostRuntimeTaskSchedulerHost::new().unwrap();
+        let before = NativeHostRuntimeTaskSchedulerHost.monotonicTimeMillis().unwrap();
+        let now = local.monotonicTimeMillis().unwrap();
+        let after = NativeHostRuntimeTaskSchedulerHost.monotonicTimeMillis().unwrap();
+        assert!(before <= now && now <= after);
     }
 }

@@ -51,6 +51,79 @@ test('Android device information is implemented by the Flutter owner', () => {
   assert.doesNotMatch(runtime, /deviceInfoJson|AndroidHostDeviceInfo/);
 });
 
+/** Extracts one required section for focused capability contract checks. */
+function section(content, start, end) {
+  const begin = content.indexOf(start);
+  assert.notEqual(begin, -1, 'Missing section: ' + start);
+  const finish = content.indexOf(end, begin + start.length);
+  assert.notEqual(finish, -1, 'Missing section end: ' + end);
+  return content.slice(begin, finish);
+}
+
+/** Requires Android settings callbacks at construction rather than unimplemented tool stubs. */
+test('Android system settings have required owner bindings at host assembly', () => {
+  const host = source('hosts/android/src/system_operation.rs');
+  assert.match(host, /pub fn new\(\s*settingReader: AndroidSystemSettingReader,\s*settingWriter: AndroidSystemSettingWriter/);
+  assert.match(host, /fn getSystemSetting[\s\S]*?\(self\.settingReader\)\(namespace, setting\)/);
+  assert.match(host, /fn modifySystemSetting[\s\S]*?\(self\.settingWriter\)\(namespace, setting, value\)/);
+  assert.doesNotMatch(host, /Android (get|modify)_system_setting requires|derive\([^)]*Default/);
+  const factory = source('hosts/android/src/lib.rs');
+  assert.match(factory, /systemOperationHost: Arc<dyn operit_host_api::SystemOperationHost>/);
+  assert.match(factory, /Arc::new\(AndroidHttpHost::new\(\)\),\s*systemOperationHost,/);
+  const platform = source('apps/flutter/native/operit-flutter-bridge/src/platform_runtime/android.rs');
+  assert.match(platform, /createRuntimeHostManager\([\s\S]*?AndroidSystemOperationHost::new\(\s*Arc::new\(ownerGetSystemSetting\),\s*Arc::new\(ownerModifySystemSetting\)/);
+  assert.doesNotMatch(host, /jni::|serde_json::from_str/);
+});
+
+/** Preserves exact settings parameters and requires the owner's complete typed response. */
+test('shared owner settings adapters use the existing platform-independent system protocol', () => {
+  const adapters = source('apps/flutter/native/operit-flutter-bridge/src/FlutterOwnerCapabilities.rs');
+  const settings = section(adapters, '/// Reads a system setting', '/// Reads device information');
+  assert.match(settings, /ownerGetSystemSetting\(namespace: &str, setting: &str\)/);
+  assert.match(settings, /"get_system_setting",\s*serde_json::json!\(\{ "namespace": namespace, "setting": setting \}\)/);
+  assert.match(settings, /"modify_system_setting",\s*serde_json::json!\(\{ "namespace": namespace, "setting": setting, "value": value \}\)/);
+  assert.match(settings, /derive\(serde::Deserialize\)/);
+  for (const field of ['namespace', 'setting', 'value']) {
+    assert.match(settings, new RegExp('\\b' + field + ': String'));
+    assert.match(settings, new RegExp('\\b' + field + ': response\\.' + field));
+  }
+  assert.match(settings, /let response: SettingResponse = ownerSystemOperation\(operation, params\)\?/);
+  assert.doesNotMatch(settings, /target_os|target_arch|wasm|jni::|serde\(default|Option<|unwrap_or|or_else|\.contains\(/);
+});
+
+/** Reads brightness and other settings directly from their exact Android provider namespace. */
+test('Android settings reads return provider values and reject absent or invalid settings', () => {
+  const owner = source(android + 'src/main/kotlin/app/operit/OwnerSystemCapabilityChannel.kt');
+  assert.match(owner, /"get_system_setting" -> systemGetSystemSetting\(JSONObject\(paramsJson\)\)/);
+  const settings = section(owner, '/** Reads one exact Android settings namespace', '/** Writes one Android setting');
+  for (const [namespace, provider] of [['system', 'System'], ['secure', 'Secure'], ['global', 'Global']]) {
+    assert.match(settings, new RegExp('"' + namespace + '" -> Settings\\.' + provider + '\\.getString\\(resolver, setting\\)'));
+  }
+  assert.match(settings, /require\(setting\.isNotBlank\(\)\)/);
+  assert.match(settings, /else -> throw IllegalArgumentException\("unsupported Android settings namespace:/);
+  assert.match(settings, /\?: throw IllegalStateException\("Android system setting does not exist: \$namespace\/\$setting"\)/);
+  assert.match(settings, /"resultJson" to JSONObject\(\)/);
+  for (const field of ['namespace', 'setting', 'value']) {
+    assert.match(settings, new RegExp('\\.put\\("' + field + '", ' + field + '\\)'));
+  }
+  assert.doesNotMatch(settings, /optString|\?:\s*""|getInt|ProcessBuilder|execute.*Command|\.contains\(/);
+});
+
+/** Requires authorized, acknowledged writes and returns the actual persisted setting value. */
+test('Android settings writes check permission and provider success before readback', () => {
+  const owner = source(android + 'src/main/kotlin/app/operit/OwnerSystemCapabilityChannel.kt');
+  assert.match(owner, /"modify_system_setting" -> systemModifySystemSetting\(JSONObject\(paramsJson\)\)/);
+  const settings = section(owner, '/** Writes one Android setting', '/** Posts one native Android notification');
+  for (const provider of ['System', 'Secure', 'Global']) {
+    assert.match(settings, new RegExp('Settings\\.' + provider + '\\.putString\\(resolver, setting, value\\)'));
+  }
+  assert.match(settings, /check\(Settings\.System\.canWrite\(activity\)\)/);
+  assert.match(settings, /Android WRITE_SETTINGS permission is not granted/);
+  assert.match(settings, /check\(written\) \{ "Android system setting write was rejected:/);
+  assert.match(settings, /return systemGetSystemSetting\(params\)/);
+  assert.doesNotMatch(settings, /catch\s*\(|optString|\?:\s*""|ProcessBuilder|execute.*Command|\.contains\(/);
+});
+
 /** Supplies only required startup identity before FFI and owner subscriptions become available. */
 test('Android startup receives the device model without querying the owner', () => {
   const kotlin = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);

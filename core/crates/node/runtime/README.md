@@ -30,3 +30,25 @@ require linking the full application proxy into firmware.
 The separate framed/session record models and Edge pairing authority have not
 yet been unified; moving ownership into node does not by itself complete that
 cleanup.
+
+
+## Space merge contract
+
+An approved join merges the applicant's complete current Space, including members
+reachable only through existing peers. The request freezes the source membership,
+real device profiles and directed link advertisements. The reviewer approves that
+exact set with one `AdmitSpace` command; source administrators do not inherit
+administrator rights in the target Space. Approval displays the source device
+names together.
+
+Direct peer projection exchange carries profiles, topology and target control
+operations before publishing member records. A source peer follows a cross-Space
+migration only when an existing source member presents an accepted target
+`AdmitSpace` covering its source membership. B-C-D-(E,F)-G converges hop-by-hop
+without creating direct B-D/B-G pairings. Independent pairings alone do not merge
+Spaces. Topology rendering uses one membership snapshot for devices and endpoints.
+
+Group approval records use `runtime/link_access/space_merge_*.preferences.json`.
+Single-device `space_join_*` records remain untouched and are not interpreted as
+consent to a group merge; pending requests from the previous protocol must be
+resubmitted. All participants must run the updated protocol.

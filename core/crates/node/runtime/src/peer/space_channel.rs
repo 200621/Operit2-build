@@ -55,13 +55,12 @@ impl HostRuntimePeerService {
             .ok_or_else(|| CoreLinkError::new("PEER_OUTBOUND_NOT_AUTHORIZED", "No paired or admitted Space return channel for node"))
     }
 
-    /// Offer only our actual running listener; discovery is not required. The
-    /// receiver combines this port with the transport-observed source IP.
-    pub(super) async fn offerSpaceChannel(&self, peer: &str, pairingId: &str, channel: &Arc<Channel>) -> Result<(), CoreLinkError> {
-        let Some(scope) = self.spaceChannelScope(peer)? else { return Ok(()); };
-        let Some(config) = self.state.store.hostConfig().map_err(error)? else { return Ok(()); };
-        let Ok(socket) = config.bindAddress.parse::<std::net::SocketAddr>() else { return Ok(()); };
-        let Some(transport) = self.state.listeners.lock().await.keys().copied().find(|t| isNetworkTransport(*t)) else { return Ok(()); };
+    /// Builds one scoped callback offer and installs its inbound credential before publication.
+    async fn spaceChannelOfferRequest(&self, peer: &str, pairingId: &str) -> Result<Option<CoreCallRequest>, CoreLinkError> {
+        let Some(scope) = self.spaceChannelScope(peer)? else { return Ok(None); };
+        let Some(config) = self.state.store.hostConfig().map_err(error)? else { return Ok(None); };
+        let Ok(socket) = config.bindAddress.parse::<std::net::SocketAddr>() else { return Ok(None); };
+        let Some(transport) = self.state.listeners.lock().await.keys().copied().find(|t| isNetworkTransport(*t)) else { return Ok(None); };
         if socket.port() == 0 { return Err(error("Space callback listener has no bound port")); }
         let grant = {
             let _guard = self.state.mutation.lock().unwrap();
@@ -79,19 +78,35 @@ impl HostRuntimePeerService {
             grant
         };
         let requestId = operit_link::nextCoreRouteRequestId("space-channel");
-        let request = CoreCallRequest::new(requestId.clone(), TARGET, "offer", toCoreValue(Offer {
+        Ok(Some(CoreCallRequest::new(requestId, TARGET, "offer", toCoreValue(Offer {
             id: grant.id, spaceId: grant.spaceId, secret: grant.secret, port: grant.port, transport: grant.transport,
-        }).map_err(|e| error(e.to_string()))?);
+        }).map_err(|e| error(e.to_string()))?)))
+    }
+
+    /// Publishes a scoped callback offer over the original authenticated channel.
+    pub(super) async fn offerSpaceChannel(&self, peer: &str, pairingId: &str, channel: &Arc<LiveChannel>) -> Result<(), CoreLinkError> {
+        let Some(request) = self.spaceChannelOfferRequest(peer, pairingId).await? else { return Ok(()); };
+        let requestId = request.requestId.0.clone();
         match channel.exchange(CoreLinkRequest::Call(request)).await? {
-            CoreLinkResponse::Call(response) if response.requestId.0 == requestId => {
-                // During adoption the far side can still be applying membership.
-                // An unaccepted offer grants nothing; the next session tries again.
-                match response.result {
-                    Ok(_) => Ok(()),
-                    Err(e) if e.code == "SPACE_CHANNEL_NOT_ADMITTED" => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
+            CoreLinkResponse::Call(response) if response.requestId.0 == requestId => match response.result {
+                Ok(_) => Ok(()),
+                Err(e) if e.code == "SPACE_CHANNEL_NOT_ADMITTED" => Ok(()),
+                Err(e) => Err(e),
+            },
+            _ => Err(error("Space channel offer response mismatch")),
+        }
+    }
+
+    /// Publishes a scoped callback offer through a multiplexed channel already in the pool.
+    pub(super) async fn offerSpaceChannelMultiplexed(&self, peer: &str, pairingId: &str, channel: &Arc<MultiplexedChannel>) -> Result<bool, CoreLinkError> {
+        let Some(request) = self.spaceChannelOfferRequest(peer, pairingId).await? else { return Ok(false); };
+        let requestId = request.requestId.0.clone();
+        match channel.exchange(CoreLinkRequest::Call(request)).await? {
+            CoreLinkResponse::Call(response) if response.requestId.0 == requestId => match response.result {
+                Ok(_) => Ok(true),
+                Err(e) if e.code == "SPACE_CHANNEL_NOT_ADMITTED" => Ok(false),
+                Err(e) => Err(e),
+            },
             _ => Err(error("Space channel offer response mismatch")),
         }
     }
