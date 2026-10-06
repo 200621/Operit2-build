@@ -473,6 +473,22 @@ fvm install --skip-pub-get
 fvm dart pub get --enforce-lockfile
 ```
 
+### Dart Proxy Codegen
+
+`lib/core/proxy/generated/*.g.dart` is generated at build time and gitignored.
+The app build scripts (`build_flutter_android.py`, `build_flutter_ios.py`,
+`build_flutter_macos.py`) regenerate it before `pub get`. When you invoke
+`flutter build`, `flutter analyze`, or `fvm dart pub get` outside those scripts
+on a clean checkout, generate it first, or Dart analysis fails with
+`uri_has_not_been_generated` errors:
+
+```powershell
+cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
+```
+
+Run this from the repository root; the relative manifest path resolves against
+the current working directory.
+
 Windows app release build:
 
 ```powershell
@@ -510,10 +526,13 @@ provide implicitly:
 3. **pnpm 10.7.0 via corepack**. The plugin sync hook invokes `corepack pnpm`, and
    the project pins `packageManager: pnpm@10.7.0`; other pnpm installations on
    `PATH` (scoop/npm shims) shadow corepack and abort with a version check. Remove
-   or align those shims, and run the Web Access prerequisite first:
+   or align those shims. The workflow plugin dependencies must be installed
+   before the Gradle plugin-sync hook runs:
 
    ```powershell
-   python tools\build_scripts\build_flutter_web_access.py
+   cd plugins\packages\buildin\workflow
+   corepack pnpm install --frozen-lockfile
+   cd ..\..\..
    ```
 
 4. **Android runtime (rootfs) artifacts**. `liboperit_busybox.so`, `liboperit_proot.so`,
@@ -521,14 +540,22 @@ provide implicitly:
    and require WSL. Without them the Gradle check
    (`requiredOperitAndroidRuntimeLibraries`) fails.
 
+5. **bindgen libclang**. The Rust bridge build runs bindgen for
+   `aarch64-linux-android` (`rquickjs-sys` with the `bindgen` feature), which
+   loads `libclang.dll` at build time. CI provisions it from nuget.org into
+   `target/operit-build-tools` (see `android-flutter-build.yml`); locally, either
+   place that package the same way or point the Gradle task at a full LLVM
+   install before the daemon starts. Without it the bridge build fails with
+   "Unable to find libclang".
+
 With the prerequisites in place:
 
 ```powershell
 python tools\build_scripts\build_flutter_android.py --build-name 2.0.0 --build-number 11
 ```
 
-The command runs the full chain (Web Access bundle, plugin packaging, Rust bridge
-cross-build, Gradle `assembleRelease`) and writes
+The command runs the full chain (plugin packaging, Rust bridge cross-build,
+Gradle `assembleRelease`) and writes
 `tools/release/dist/operit2-app-android-arm64-v8a.apk`. The NDK is provisioned
 automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
 is still required for the Rust bridge.
