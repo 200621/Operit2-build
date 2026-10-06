@@ -1,5 +1,8 @@
 {
   "@@locale": "en",
+  "workspaceUnsavedChangesTitle": "Unsaved changes",
+  "workspaceUnsavedChangesMessage": "Save your changes before closing this file?",
+  "workspaceDiscardChanges": "Discard changes",
   "askOperitHint": "Ask Operit",
   "aiChat": "AI Chat",
   "fullscreenInput": "Fullscreen input",
@@ -2242,5 +2245,9 @@
   "devicePickerManual": "Connect using an address",
   "deviceSpaceMyRequests": "My requests",
   "deviceSpaceMyReviews": "Awaiting my review",
-  "deviceSpaceNoRequests": "No requests"
+  "deviceSpaceNoRequests": "No requests",
+  "workspaceUndo": "Undo",
+  "workspaceRedo": "Redo",
+  "workspaceInsertSymbol": "Insert {symbol}",
+  "@workspaceInsertSymbol": {"placeholders": {"symbol": {"type": "String"}}}
 }

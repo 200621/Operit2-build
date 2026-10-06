@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import 'package:operit2/core/web_visit/WebVisitModels.dart';
+import '../../../../common/components/RetainedPage.dart';
 import '../../../../main/layout/SidebarDockController.dart';
 
 import '../../../../../l10n/generated/app_localizations.dart';
@@ -24,6 +26,8 @@ import 'WorkspaceUnbindDialog.dart';
 import 'WorkspaceTabStrip.dart';
 import 'browser/WorkspaceBrowserViewStore.dart';
 import 'browser/automation/WorkspaceWebVisitSessionRegistry.dart';
+import 'file_preview/WorkspaceTextDocument.dart';
+import 'file_preview/WorkspaceTextCloseDialog.dart';
 import 'terminal/WorkspaceTerminalSessions.dart';
 
 class WorkspacePanel extends StatefulWidget {
@@ -350,10 +354,15 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
           child: IndexedStack(
             index: selectedIndex,
             children: <Widget>[
-              for (final tab in paneTabs)
+              for (final (tabIndex, tab) in paneTabs.indexed)
                 KeyedSubtree(
                   key: ValueKey<String>('pane-$paneIndex-${_tabIdentity(tab)}'),
-                  child: _buildTabContent(tab, paneIndex: paneIndex),
+                  child: RetainedPage(
+                    active: tabIndex == selectedIndex,
+                    child: Builder(
+                      builder: (_) => _buildTabContent(tab, paneIndex: paneIndex),
+                    ),
+                  ),
                 ),
             ],
           ),
@@ -1785,8 +1794,8 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     ].join('|');
   }
 
-  /// Closes one tab from the requested physical workspace pane.
-  void _closeTab(int index, {int paneIndex = 0}) {
+  /// Confirms unsaved changes before closing a tab from its physical pane.
+  Future<void> _closeTab(int index, {int paneIndex = 0}) async {
     final tabs = _tabsForPane(paneIndex);
     if (index < 0 || index >= tabs.length) {
       return;
@@ -1795,12 +1804,27 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     if (!tab.closable) {
       return;
     }
+    final document = tab.textDocument;
+    if (document != null && (document.isDirty || document.isSaving)) {
+      final confirmed = await confirmWorkspaceTextClose(
+        context,
+        document: document,
+        write: (text) => widget.onWriteWorkspaceFileBytes(
+          tab.filePath!,
+          Uint8List.fromList(utf8.encode(text)),
+        ),
+      );
+      if (!mounted || !confirmed) return;
+    }
+    // Tab positions can change while the close dialog is open.
+    final currentIndex = tabs.indexOf(tab);
+    if (currentIndex < 0) return;
     setState(() {
       final selectedIndex = _selectedIndexForPane(paneIndex);
-      tabs.removeAt(index);
-      if (selectedIndex == index) {
-        _setSelectedIndexForPane(paneIndex, index - 1);
-      } else if (selectedIndex > index) {
+      tabs.removeAt(currentIndex);
+      if (selectedIndex == currentIndex) {
+        _setSelectedIndexForPane(paneIndex, currentIndex - 1);
+      } else if (selectedIndex > currentIndex) {
         _setSelectedIndexForPane(paneIndex, selectedIndex - 1);
       }
       _collapseEmptyPane();
@@ -1856,7 +1880,7 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     if (index < 0) {
       return;
     }
-    _closeTab(index, paneIndex: paneIndex);
+    unawaited(_closeTab(index, paneIndex: paneIndex));
   }
 
   /// Completes a web visit and removes its tab from the owning pane.
@@ -1899,40 +1923,55 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     await _terminalSessions.closePtySession(sessionId);
   }
 
+  /// Activates an existing file tab without reloading its editable draft.
+  bool _activateOpenFile(String absolutePath) {
+    for (final paneIndex in <int>[0, 1]) {
+      final tabs = _tabsForPane(paneIndex);
+      final index = tabs.indexWhere(
+        (tab) =>
+            tab.kind == WorkspaceTabKind.filePreview &&
+            tab.absolutePath == absolutePath,
+      );
+      if (index >= 0) {
+        _selectWorkspaceTab(tabs[index], paneIndex: paneIndex);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Opens a file once and gives editable formats a persistent document.
   Future<void> _openFileTab(WorkspaceFileEntry entry) async {
+    if (_activateOpenFile(entry.path)) return;
     final previewKind = workspacePreviewKindForPath(entry.path);
-    var content = '';
+    WorkspaceTextDocument? document;
     // HTML is loaded by the preview server; pre-reading its text duplicates
     // the core/VFS round trip and allocates an unused copy of the document.
     if (previewKind == WorkspaceFilePreviewKind.text ||
         previewKind == WorkspaceFilePreviewKind.markdown) {
-      content = await widget.onReadWorkspaceTextFile(entry.relativePath);
+      document = WorkspaceTextDocument(
+        await widget.onReadWorkspaceTextFile(entry.relativePath),
+      );
     }
 
     if (!mounted) {
       return;
     }
 
-    final existingIndex = _session.tabs.indexWhere(
-      (item) => item.filePath == entry.path,
-    );
+    // Another open request may complete while this file read is pending.
+    if (_activateOpenFile(entry.path)) return;
     final tab = WorkspaceTab(
       kind: WorkspaceTabKind.filePreview,
       title: entry.name,
       icon: workspacePreviewIconForKind(previewKind),
       filePath: entry.relativePath,
       absolutePath: entry.path,
-      fileContent: content,
+      textDocument: document,
       previewKind: previewKind,
     );
     setState(() {
-      if (existingIndex >= 0) {
-        _session.tabs[existingIndex] = tab;
-        _session.selectedIndex = existingIndex;
-      } else {
-        _session.tabs.add(tab);
-        _session.selectedIndex = _session.tabs.length - 1;
-      }
+      _session.tabs.add(tab);
+      _session.selectedIndex = _session.tabs.length - 1;
     });
   }
 }

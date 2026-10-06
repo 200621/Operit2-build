@@ -2,8 +2,74 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/ui/features/packages/components/PackageGrid.dart';
 
-/// Verifies package grids build lazily and isolate card updates while scrolling.
+/// Verifies package grids fill rows and isolate card updates while scrolling.
 void main() {
+  for (final scenario in <({double width, int items, int columns})>[
+    (width: 280, items: 3, columns: 1),
+    (width: 420, items: 3, columns: 1),
+    (width: 421, items: 3, columns: 1),
+    (width: 560, items: 3, columns: 1),
+    (width: 611, items: 3, columns: 1),
+    (width: 612, items: 3, columns: 2),
+    (width: 800, items: 3, columns: 2),
+    (width: 900, items: 3, columns: 2),
+    (width: 1000, items: 5, columns: 3),
+    (width: 800, items: 1, columns: 2),
+    (width: 1280, items: 1, columns: 3),
+  ]) {
+    testWidgets(
+      '${scenario.items} packages fill each row at width ${scenario.width}',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1400, 900);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.resetPhysicalSize);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: scenario.width,
+                  child: CustomScrollView(
+                    slivers: <Widget>[
+                      PackageSliverList(
+                        itemCount: scenario.items,
+                        itemBuilder: (context, index) =>
+                            SizedBox(key: ValueKey<int>(index), height: 100),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        for (var index = 0; index < scenario.items; index++) {
+          final row = index ~/ scenario.columns;
+          final rowStart = row * scenario.columns;
+          final remaining = scenario.items - rowStart;
+          final rowItems = remaining < scenario.columns
+              ? remaining
+              : scenario.columns;
+          final itemWidth = (scenario.width - 12 * (rowItems - 1)) / rowItems;
+          final item = find.byKey(ValueKey<int>(index));
+          expect(tester.getSize(item).width, closeTo(itemWidth, 0.001));
+          expect(
+            tester.getTopLeft(item).dx,
+            closeTo((index - rowStart) * (itemWidth + 12), 0.001),
+          );
+          expect(tester.getTopLeft(item).dy, row * 100);
+          if (index - rowStart == rowItems - 1) {
+            expect(tester.getTopRight(item).dx, closeTo(scenario.width, 0.001));
+          }
+        }
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   testWidgets('scrolling does not rebuild cards already in the viewport', (
     tester,
   ) async {

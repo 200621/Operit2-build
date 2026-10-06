@@ -15,8 +15,8 @@ chacha20poly1305 = "0.10"
 chrono.workspace = true
 getrandom = "0.2"
 operit-host-api = { version = "0.1.0", path = "../../foundation/host-api" }
-operit-model = { version = "2.0.0-preview.12", path = "../../foundation/model" }
-operit-util = { version = "2.0.0-preview.12", path = "../../foundation/util" }
+operit-model = { version = "2.0.0-preview.13", path = "../../foundation/model" }
+operit-util = { version = "2.0.0-preview.13", path = "../../foundation/util" }
 regex.workspace = true
 jieba-rs = "=0.8.1"
 serde.workspace = true

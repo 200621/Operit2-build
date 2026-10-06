@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
+import 'package:operit2/ui/common/components/RetainedPage.dart';
 import 'package:operit2/ui/features/settings/about/AboutOperitScreen.dart';
 import 'package:operit2/ui/features/settings/components/SettingsCategoryList.dart';
 import 'package:operit2/ui/features/settings/models/SettingsModels.dart';
@@ -44,7 +45,7 @@ void main() {
     });
   }
 
-  testWidgets('cached offstage settings adapt during sidebar resizing', (
+  testWidgets('cached settings retain layout until reactivated after resizing', (
     tester,
   ) async {
     final availableWidth = ValueNotifier<double>(920);
@@ -58,7 +59,7 @@ void main() {
     final state = tester.state(find.byType(SettingsScreen));
 
     hidden.value = true;
-    await tester.pump();
+    await tester.pumpAndSettle();
     for (final width in <double>[800, 760, 744, 640, 520, 340, 520, 760, 920]) {
       availableWidth.value = width;
       await tester.pump();
@@ -68,12 +69,16 @@ void main() {
       );
       expect(
         find.byType(SettingsCategoryList, skipOffstage: false),
-        width >= 760 ? findsOneWidget : findsNothing,
+        findsOneWidget,
       );
       expect(tester.takeException(), isNull);
     }
+    availableWidth.value = 340;
+    await tester.pump();
     hidden.value = false;
     await tester.pumpAndSettle();
+    expect(find.byType(SettingsCategoryList), findsNothing);
+    expect(tester.getSize(find.byType(AboutOperitScreen)).width, 340);
     expect(tester.state(find.byType(SettingsScreen)), same(state));
     expect(tester.takeException(), isNull);
   });
@@ -111,7 +116,7 @@ Future<void> _pumpSettings(
                   initialCategory: SettingsCategory.about,
                 ),
                 builder: (context, offstage, child) =>
-                    Offstage(offstage: offstage, child: child),
+                    RetainedPage(active: !offstage, child: child!),
               ),
               builder: (context, width, child) =>
                   SizedBox(width: width, child: child),

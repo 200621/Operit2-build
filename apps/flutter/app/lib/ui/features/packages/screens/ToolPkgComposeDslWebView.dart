@@ -16,14 +16,11 @@ import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import 'ToolPkgComposeDslWebViewResourceLoader.dart';
+import 'ToolPkgComposeDslWebViewBridgeRuntime.dart';
 
-const String composeDslWebViewInternalBridgeName =
-    '__ComposeDslWebViewHostBridge__';
+export 'ToolPkgComposeDslWebViewBridgeRuntime.dart'
+    show composeDslWebViewInternalBridgeName;
 
-const String _composeDslWebViewBridgeChannelName =
-    '__ComposeDslWebViewHostBridgeChannel__';
-const String _composeDslWebViewBridgeHtmlMarker =
-    'data-operit-webview-bridge-runtime="1"';
 const String _composeDslWebViewLogTag = 'ComposeDslWebView';
 const GeneratedCoreProxyClients _runtimeClients = GeneratedCoreProxyClients(
   ProxyCoreRuntimeBridge(),
@@ -152,6 +149,7 @@ class ComposeDslWebViewHostRegistry {
     required String controllerKey,
     required WebViewController controller,
     required Future<Uri> Function(String url) resolveNavigationUri,
+    required Future<void> Function() prepareDocumentStartBridge,
     required ComposeDslWebViewStateSnapshot state,
   }) {
     if (executionContextKey.trim().isEmpty || controllerKey.trim().isEmpty) {
@@ -170,6 +168,7 @@ class ComposeDslWebViewHostRegistry {
       controllerKey: controllerKey,
       controller: controller,
       resolveNavigationUri: resolveNavigationUri,
+      prepareDocumentStartBridge: prepareDocumentStartBridge,
       state: state,
       javascriptInterfaceActionIds: registeredInterfaces.map(
         (name, methods) => MapEntry(name, Map<String, String>.of(methods)),
@@ -431,8 +430,15 @@ class ComposeDslWebViewHostRegistry {
         case 'loadHtml':
           final html = _string(commandPayload['html']);
           final options = _stringMap(commandPayload['options']);
+          await binding.prepareDocumentStartBridge();
           await controller.loadHtmlString(
-            _injectComposeDslWebViewBridgeRuntimeIntoHtml(html),
+            injectComposeDslWebViewBridgeRuntimeIntoHtml(
+              html,
+              javascriptInterfaces: listJavascriptInterfaces(
+                executionContextKey: executionContextKey,
+                controllerKey: controllerKey,
+              ),
+            ),
             baseUrl: _string(options['baseUrl']).trim().ifNotEmpty,
           );
           return _bridgeSuccess(null);
@@ -467,7 +473,14 @@ class ComposeDslWebViewHostRegistry {
             controllerKey: controllerKey,
             payload: commandPayload,
           );
-          await _refreshComposeDslJavascriptInterfaces(controller);
+          await binding.prepareDocumentStartBridge();
+          await _refreshComposeDslJavascriptInterfaces(
+            controller,
+            javascriptInterfaces: listJavascriptInterfaces(
+              executionContextKey: executionContextKey,
+              controllerKey: controllerKey,
+            ),
+          );
           return result;
         case 'removeJavascriptInterface':
           final result = _unregisterJavascriptInterfaceCommand(
@@ -475,7 +488,14 @@ class ComposeDslWebViewHostRegistry {
             controllerKey: controllerKey,
             payload: commandPayload,
           );
-          await _refreshComposeDslJavascriptInterfaces(controller);
+          await binding.prepareDocumentStartBridge();
+          await _refreshComposeDslJavascriptInterfaces(
+            controller,
+            javascriptInterfaces: listJavascriptInterfaces(
+              executionContextKey: executionContextKey,
+              controllerKey: controllerKey,
+            ),
+          );
           return result;
         default:
           return _bridgeError(
@@ -587,6 +607,10 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
   bool _servingVfsFiles = false;
   Brightness? _brightness;
   Future<void> _themeUpdate = Future<void>.value();
+  Future<void> _bridgeChannelRegistration = Future<void>.value();
+  Future<void> _bridgeScriptUpdate = Future<void>.value();
+  String? _bridgeUserScriptIdentifier;
+  String? _bridgeUserScriptSource;
 
   @override
   void initState() {
@@ -609,12 +633,11 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
       gestureRecognizers: _pageGestureRecognizers,
     );
     if (_supportsComposeDslPageHooks) {
-      _controller
-        ..addJavaScriptChannel(
-          _composeDslWebViewBridgeChannelName,
-          onMessageReceived: _handleBridgeMessage,
-        )
-        ..setOnConsoleMessage(_handleConsoleMessage);
+      _bridgeChannelRegistration = _controller.addJavaScriptChannel(
+        composeDslWebViewBridgeChannelName,
+        onMessageReceived: _handleBridgeMessage,
+      );
+      _controller.setOnConsoleMessage(_handleConsoleMessage);
     }
     if (_supportsJavaScriptDialogCallbacks) {
       _controller
@@ -670,7 +693,9 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     if (!kIsWeb) {
       return true;
     }
-    return _request.html != null || _usesResourceLoader;
+    return widget.hostContext != null ||
+        _request.html != null ||
+        _usesResourceLoader;
   }
 
   @override
@@ -707,6 +732,7 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         controller: _controller,
       );
     }
+    unawaited(_disposeBridgeUserScript());
     unawaited(_disposeResourceLoader());
     unawaited(_controller.loadHtmlString('<html></html>'));
     super.dispose();
@@ -823,8 +849,10 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         _progress = 100;
         await _refreshStateFromController();
         if (_supportsComposeDslPageHooks) {
-          await _installComposeDslWebViewBridgeRuntime(_controller);
-          await _refreshComposeDslJavascriptInterfaces(_controller);
+          await _refreshComposeDslJavascriptInterfaces(
+            _controller,
+            javascriptInterfaces: _javascriptInterfaces,
+          );
         }
         _emit(_callbackIds.onPageFinished, <String, Object?>{
           'url': _currentUrl,
@@ -961,6 +989,54 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         (_callbackIds.onInterceptRequest != null && widget.hostContext != null);
   }
 
+  /// Snapshots registered methods without delaying page startup on a host message.
+  Map<String, List<String>> get _javascriptInterfaces =>
+      ComposeDslWebViewHostRegistry.listJavascriptInterfaces(
+        executionContextKey: widget.hostContext?.executionContextKey ?? '',
+        controllerKey: _boundControllerDescriptor?.key ?? '',
+      );
+
+  /// Serializes native document-start registration before navigation or interface updates.
+  Future<void> _prepareDocumentStartBridge() {
+    _bridgeScriptUpdate = _bridgeScriptUpdate.then((_) async {
+      await _bridgeChannelRegistration;
+      if (!mounted || !_supportsComposeDslPageHooks) return;
+      final source = buildComposeDslWebViewBridgeRuntimeScript(
+        javascriptInterfaces: _javascriptInterfaces,
+      );
+      if (source == _bridgeUserScriptSource) return;
+      final previous = _bridgeUserScriptIdentifier;
+      if (previous != null) {
+        await _controller.removeDocumentStartJavaScript(previous);
+        _bridgeUserScriptIdentifier = null;
+        _bridgeUserScriptSource = null;
+      }
+      _bridgeUserScriptIdentifier = await _controller
+          .addDocumentStartJavaScript(source);
+      _bridgeUserScriptSource = source;
+    });
+    return _bridgeScriptUpdate;
+  }
+
+  /// Releases the native script handle when the owning widget is disposed.
+  Future<void> _disposeBridgeUserScript() async {
+    try {
+      await _bridgeScriptUpdate;
+      final identifier = _bridgeUserScriptIdentifier;
+      if (identifier != null) {
+        await _controller.removeDocumentStartJavaScript(identifier);
+        _bridgeUserScriptIdentifier = null;
+        _bridgeUserScriptSource = null;
+      }
+    } catch (error) {
+      ClientLogger.e(
+        'Document-start bridge cleanup failed: $error',
+        tag: _composeDslWebViewLogTag,
+      );
+    }
+  }
+
+  /// Registers the shared resource handler before loading plugin documents.
   Future<ComposeDslWebViewResourceLoader> _ensureResourceLoader() async {
     if (_resourceLoader == null) {
       final scheme = _controller.localResourceScheme;
@@ -970,8 +1046,9 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         );
       }
       final host = widget.hostContext;
-      if (host == null)
+      if (host == null) {
         throw StateError('Local WebView resources require a plugin identity');
+      }
       final loader = ComposeDslWebViewResourceLoader(
         packageName: host.packageName,
         scheme: scheme,
@@ -1072,12 +1149,16 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
 
   /// Resolves every local navigation through the native VFS resource loader.
   Future<Uri> _webViewUriFor(String url, {required bool isMainFrame}) async {
+    await _prepareDocumentStartBridge();
     _servingVfsFiles = Uri.parse(url).scheme == 'file';
     if (!_usesResourceLoader) {
       return Uri.parse(url);
     }
     if (_servingVfsFiles) {
-      await _refreshComposeDslJavascriptInterfaces(_controller);
+      await _refreshComposeDslJavascriptInterfaces(
+        _controller,
+        javascriptInterfaces: _javascriptInterfaces,
+      );
     }
     final loader = await _ensureResourceLoader();
     return loader.localUriFor(url, isMainFrame: isMainFrame);
@@ -1087,9 +1168,12 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     return _resourceLoader?.originalUrlFor(url) ?? url;
   }
 
+  /// Loads the document only after its theme and host message channel are ready.
   Future<void> _load() async {
     try {
       await _themeUpdate;
+      await _bridgeChannelRegistration;
+      await _prepareDocumentStartBridge();
       if (!mounted) return;
       if (mounted) {
         setState(() {
@@ -1099,14 +1183,20 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
         });
       }
       if (_supportsComposeDslPageHooks) {
-        await _refreshComposeDslJavascriptInterfaces(_controller);
+        await _refreshComposeDslJavascriptInterfaces(
+          _controller,
+          javascriptInterfaces: _javascriptInterfaces,
+        );
       }
       if (_request.url != null) {
         final uri = await _webViewUriFor(_request.url!, isMainFrame: true);
         await _controller.loadRequest(uri, headers: _request.headers);
       } else if (_request.html != null) {
         await _controller.loadHtmlString(
-          _injectComposeDslWebViewBridgeRuntimeIntoHtml(_request.html!),
+          injectComposeDslWebViewBridgeRuntimeIntoHtml(
+            _request.html!,
+            javascriptInterfaces: _javascriptInterfaces,
+          ),
           baseUrl: _request.baseUrl,
         );
       } else {
@@ -1200,6 +1290,7 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
       controllerKey: descriptor.key,
       controller: _controller,
       resolveNavigationUri: (url) => _webViewUriFor(url, isMainFrame: true),
+      prepareDocumentStartBridge: _prepareDocumentStartBridge,
       state: _stateSnapshot(),
     );
   }
@@ -1533,6 +1624,7 @@ class _ComposeDslWebViewControllerBinding {
     required this.controllerKey,
     required this.controller,
     required this.resolveNavigationUri,
+    required this.prepareDocumentStartBridge,
     required this.state,
     required this.javascriptInterfaceActionIds,
   });
@@ -1542,6 +1634,7 @@ class _ComposeDslWebViewControllerBinding {
   final String controllerKey;
   final WebViewController controller;
   final Future<Uri> Function(String url) resolveNavigationUri;
+  final Future<void> Function() prepareDocumentStartBridge;
   ComposeDslWebViewStateSnapshot state;
   final Map<String, Map<String, String>> javascriptInterfaceActionIds;
 }
@@ -1601,180 +1694,21 @@ _ComposeDslWebViewNavigationDecision? _parseNavigationDecision(Object? raw) {
   };
 }
 
+/// Applies the current host descriptors without asynchronous interface discovery.
 Future<void> _refreshComposeDslJavascriptInterfaces(
-  WebViewController controller,
-) {
+  WebViewController controller, {
+  required Map<String, List<String>> javascriptInterfaces,
+}) {
+  final descriptorsJson = jsonEncode(
+    javascriptInterfaces,
+  ).replaceAll('<', r'\u003c');
   return controller.runJavaScript('''
     (function() {
       if (typeof window.__operitInstallComposeDslJavascriptInterfaces === 'function') {
-        window.__operitInstallComposeDslJavascriptInterfaces();
+        window.__operitInstallComposeDslJavascriptInterfaces($descriptorsJson);
       }
-      window.dispatchEvent(new Event('operitComposeDslInterfacesReady'));
     })();
   ''');
-}
-
-Future<void> _installComposeDslWebViewBridgeRuntime(
-  WebViewController controller,
-) {
-  return controller.runJavaScript(_buildComposeDslWebViewBridgeRuntimeScript());
-}
-
-String _injectComposeDslWebViewBridgeRuntimeIntoHtml(String html) {
-  if (html.contains(_composeDslWebViewBridgeHtmlMarker)) {
-    return html;
-  }
-  final scriptTag = _buildComposeDslWebViewBridgeRuntimeScriptTag();
-  final headClose = RegExp('</head>', caseSensitive: false);
-  if (headClose.hasMatch(html)) {
-    return html.replaceFirst(headClose, '$scriptTag</head>');
-  }
-  final headOpen = RegExp(r'<head[^>]*>', caseSensitive: false);
-  final headOpenMatch = headOpen.firstMatch(html);
-  if (headOpenMatch != null) {
-    final headTag = headOpenMatch.group(0)!;
-    return html.replaceFirst(headOpen, '$headTag$scriptTag');
-  }
-  final htmlOpen = RegExp(r'<html[^>]*>', caseSensitive: false);
-  final htmlOpenMatch = htmlOpen.firstMatch(html);
-  if (htmlOpenMatch != null) {
-    final htmlTag = htmlOpenMatch.group(0)!;
-    return html.replaceFirst(htmlOpen, '$htmlTag<head>$scriptTag</head>');
-  }
-  return '$scriptTag$html';
-}
-
-String _buildComposeDslWebViewBridgeRuntimeScriptTag() {
-  final scriptBody = _buildComposeDslWebViewBridgeRuntimeScript().replaceAll(
-    '</script>',
-    '<\\/script>',
-  );
-  return '<script $_composeDslWebViewBridgeHtmlMarker>$scriptBody</script>';
-}
-
-String _buildComposeDslWebViewBridgeRuntimeScript() {
-  final hiddenBridgeNameJson = jsonEncode(composeDslWebViewInternalBridgeName);
-  final channelNameJson = jsonEncode(_composeDslWebViewBridgeChannelName);
-  return '''
-    (function() {
-      var hiddenBridgeName = $hiddenBridgeNameJson;
-      var channelName = $channelNameJson;
-      var channel = window[channelName];
-      if (!channel || typeof channel.postMessage !== 'function') {
-        return;
-      }
-      var sequence = 0;
-      var pending = {};
-      function send(type, payload) {
-        sequence += 1;
-        var id = String(Date.now()) + ':' + String(sequence);
-        return new Promise(function(resolve, reject) {
-          pending[id] = { resolve: resolve, reject: reject };
-          channel.postMessage(JSON.stringify({
-            id: id,
-            type: type,
-            payload: payload === undefined ? null : payload
-          }));
-        });
-      }
-      window.__operitComposeDslWebViewHostReceive = function(message) {
-        var envelope = typeof message === 'string' ? JSON.parse(message) : message;
-        if (!envelope || !envelope.id || !pending[envelope.id]) {
-          return;
-        }
-        var callbacks = pending[envelope.id];
-        delete pending[envelope.id];
-        if (envelope.success === false) {
-          callbacks.reject(new Error(String(envelope.message || '')));
-        } else {
-          callbacks.resolve(envelope.data);
-        }
-      };
-      function defineReadonly(target, key, value) {
-        Object.defineProperty(target, key, {
-          configurable: true,
-          enumerable: true,
-          writable: false,
-          value: value
-        });
-      }
-      var hiddenBridge = {
-        handleControllerCommand: function(payload) {
-          return send('controllerCommand', payload);
-        },
-        listInterfaces: function() {
-          return send('listInterfaces', {});
-        },
-        invoke: function(interfaceName, methodName, argsJson) {
-          return send('invoke', {
-            interfaceName: interfaceName,
-            methodName: methodName,
-            args: argsJson
-          });
-        },
-        dispatchAction: function(actionId, payload) {
-          return send('dispatchAction', {
-            actionId: actionId,
-            payload: payload === undefined ? null : payload
-          });
-        },
-        pickFiles: function(options) {
-          return send('pickFiles', options || {});
-        }
-      };
-      defineReadonly(window, hiddenBridgeName, hiddenBridge);
-      function installInterfaces() {
-        return hiddenBridge.listInterfaces().then(function(descriptors) {
-          descriptors = descriptors || {};
-          var installed =
-            window.__operitComposeDslInstalledJavascriptInterfaces &&
-            typeof window.__operitComposeDslInstalledJavascriptInterfaces === 'object'
-              ? window.__operitComposeDslInstalledJavascriptInterfaces
-              : {};
-          for (var previousInterfaceName in installed) {
-            if (
-              Object.prototype.hasOwnProperty.call(installed, previousInterfaceName) &&
-              !Object.prototype.hasOwnProperty.call(descriptors, previousInterfaceName)
-            ) {
-              try {
-                delete window[previousInterfaceName];
-              } catch (_deleteError) {
-              }
-            }
-          }
-          window.__operitComposeDslInstalledJavascriptInterfaces = {};
-          for (var interfaceName in descriptors) {
-            if (!Object.prototype.hasOwnProperty.call(descriptors, interfaceName)) {
-              continue;
-            }
-            var methodNames = Array.isArray(descriptors[interfaceName])
-              ? descriptors[interfaceName]
-              : [];
-            var hostObject = {};
-            window[interfaceName] = hostObject;
-            for (var i = 0; i < methodNames.length; i += 1) {
-              (function(targetObject, resolvedInterfaceName, resolvedMethodName) {
-                defineReadonly(targetObject, resolvedMethodName, function() {
-                  var args = [];
-                  for (var argIndex = 0; argIndex < arguments.length; argIndex += 1) {
-                    args.push(arguments[argIndex]);
-                  }
-                  return hiddenBridge.invoke(
-                    resolvedInterfaceName,
-                    resolvedMethodName,
-                    JSON.stringify(args)
-                  );
-                });
-              })(hostObject, interfaceName, String(methodNames[i] || '').trim());
-            }
-            window.__operitComposeDslInstalledJavascriptInterfaces[interfaceName] = true;
-          }
-        });
-      }
-      window.__operitInstallComposeDslJavascriptInterfaces = installInterfaces;
-      installInterfaces();
-    })();
-  ''';
 }
 
 String _bridgeSuccess(Object? data) {

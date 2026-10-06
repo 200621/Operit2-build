@@ -66,13 +66,14 @@ impl StandardTerminalTools {
     }
 
     #[allow(non_snake_case)]
-    /// Creates or returns an interactive terminal session with the requested name.
+    /// Creates or returns a named terminal session with an explicitly selected or host-default type.
     pub fn createOrGetSession(&self, tool: &AITool) -> ToolResult {
         let sessionName = parameterValue(tool, "session_name");
-        match self
-            .host()
-            .and_then(|host| host.createOrGetSession(&sessionName))
-        {
+        let requestedType = optionalParameterValue(tool, "type");
+        match self.host().and_then(|host| match requestedType.as_deref() {
+            Some(terminalType) => host.createOrGetTypedSession(&sessionName, terminalType),
+            None => host.createOrGetSession(&sessionName),
+        }) {
             Ok(data) => toolSuccessData(
                 tool,
                 ToolResultData::TerminalSessionCreationResultData(

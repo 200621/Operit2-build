@@ -9,6 +9,7 @@ import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
+import '../../../common/components/PageActivityMixin.dart';
 import '../../../common/components/OperitDialog.dart';
 import '../components/SettingsControlStyles.dart';
 import '../../../theme/OperitGlassSurface.dart';
@@ -26,7 +27,8 @@ class LocalModelSettingsPanel extends StatefulWidget {
       _LocalModelSettingsPanelState();
 }
 
-class _LocalModelSettingsPanelState extends State<LocalModelSettingsPanel> {
+class _LocalModelSettingsPanelState extends State<LocalModelSettingsPanel>
+    with PageActivityMixin<LocalModelSettingsPanel> {
   Future<_LocalModelSettingsData>? _future;
   final Set<String> _activeOperations = <String>{};
   final Set<String> _pausedOperations = <String>{};
@@ -39,6 +41,17 @@ class _LocalModelSettingsPanelState extends State<LocalModelSettingsPanel> {
   void initState() {
     super.initState();
     _reload();
+  }
+
+  /// Polls installation status only while this settings page is active.
+  @override
+  void onPageActivityChanged(bool active) {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    if (!active) {
+      return;
+    }
+    unawaited(_refreshInstallStatuses());
     _progressTimer = Timer.periodic(
       const Duration(milliseconds: 500),
       (_) => _refreshInstallStatuses(),
@@ -47,14 +60,14 @@ class _LocalModelSettingsPanelState extends State<LocalModelSettingsPanel> {
 
   /// Refreshes installation status snapshots while the settings panel is mounted.
   Future<void> _refreshInstallStatuses() async {
-    if (!mounted || _statusRefreshRunning) {
+    if (!mounted || !isPageActive || _statusRefreshRunning) {
       return;
     }
     _statusRefreshRunning = true;
     try {
       final statuses = await widget.clients.servicesLocalModelService
           .getInstallStatuses();
-      if (!mounted) {
+      if (!mounted || !isPageActive) {
         return;
       }
       setState(() {

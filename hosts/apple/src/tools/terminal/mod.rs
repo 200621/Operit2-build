@@ -67,6 +67,11 @@ mod ios {
             Err(HostError::new("iOS does not expose a local PTY host"))
         }
 
+        /// Reports that this host cannot create an explicitly typed terminal session.
+        fn createOrGetTypedSession(&self, _: &str, _: &str) -> HostResult<TerminalSessionInfo> {
+            Err(HostError::new("iOS does not expose a local PTY host"))
+        }
+
         fn executeInSession(&self, _: &str, _: &str, _: u64) -> HostResult<TerminalCommandOutput> {
             Err(HostError::new("iOS does not expose a local PTY host"))
         }
@@ -175,6 +180,13 @@ mod non_apple_target {
         }
 
         fn createOrGetSession(&self, _: &str) -> HostResult<TerminalSessionInfo> {
+            Err(HostError::new(
+                "Apple terminal host is available only on iOS or macOS",
+            ))
+        }
+
+        /// Reports that this host cannot create an explicitly typed terminal session.
+        fn createOrGetTypedSession(&self, _: &str, _: &str) -> HostResult<TerminalSessionInfo> {
             Err(HostError::new(
                 "Apple terminal host is available only on iOS or macOS",
             ))

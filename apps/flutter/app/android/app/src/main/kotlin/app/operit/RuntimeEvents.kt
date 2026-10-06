@@ -59,6 +59,7 @@ object RuntimeEvents {
         const val BLUETOOTH_ADAPTER_POWERED_CHANGED = "bluetooth.adapter.powered_changed"
     }
 
+    /** Builds a normalized Android broadcast payload without invoking native Runtime work. */
     fun androidBroadcast(topic: String, data: JSONObject): JSONObject = JSONObject()
         .put("domain", Domain.HOST)
         .put("source", Source.ANDROID_BROADCAST)
@@ -67,6 +68,7 @@ object RuntimeEvents {
         .put("payload", data)
         .put("occurredAtMillis", System.currentTimeMillis())
 
+    /** Builds a normalized Android lifecycle payload for the shared host event sink. */
     fun androidLifecycle(topic: String, data: JSONObject): JSONObject = JSONObject()
         .put("domain", Domain.HOST)
         .put("source", Source.ANDROID_LIFECYCLE)
@@ -74,14 +76,6 @@ object RuntimeEvents {
         .put("platform", Platform.ANDROID)
         .put("payload", data)
         .put("occurredAtMillis", System.currentTimeMillis())
-
-    /** Delivers one normalized event and requires Core to accept its canonical payload. */
-    fun emit(runtimeHandle: Long, event: JSONObject) {
-        val response = JSONObject(OperitRuntimeNative.emitRuntimeEvent(runtimeHandle, event.toString()))
-        check(response.getBoolean("ok")) {
-            response.optString("error", "Core rejected Android runtime event")
-        }
-    }
 }
 
 object AndroidRuntimeEvents {

@@ -355,6 +355,10 @@ class WebKitWebViewController extends PlatformWebViewController {
   final Map<String, WebKitJavaScriptChannelParams> _javaScriptChannelParams =
       <String, WebKitJavaScriptChannelParams>{};
 
+  final Map<String, WKUserScript> _applicationUserScripts =
+      <String, WKUserScript>{};
+  int _nextUserScriptIdentifier = 0;
+
   bool _zoomEnabled = true;
   bool _verticalScrollBarEnabled = true;
   bool _horizontalScrollBarEnabled = true;
@@ -480,6 +484,40 @@ class WebKitWebViewController extends PlatformWebViewController {
         ..setHttpMethod(params.method.name)
         ..setHttpBody(params.body),
     );
+  }
+
+  /// Registers document-start JavaScript with the native WKUserContentController.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    final identifier = 'operit-user-script-${++_nextUserScriptIdentifier}';
+    final script = WKUserScript(
+      source: buildUserScriptSource(
+        userScript,
+        platformHandlesMainFrameOnly: true,
+      ),
+      injectionTime: UserScriptInjectionTime.atDocumentStart,
+      isForMainFrameOnly: userScript.forMainFrameOnly,
+    );
+    final controller = await _webView.configuration.getUserContentController();
+    await controller.addUserScript(script);
+    _applicationUserScripts[identifier] = script;
+    return identifier;
+  }
+
+  /// Removes an application script while preserving built-in WebKit scripts.
+  @override
+  Future<void> removeUserScript(String identifier) async {
+    if (_applicationUserScripts.remove(identifier) == null) {
+      throw ArgumentError.value(identifier, 'identifier');
+    }
+    await _resetUserScripts();
+  }
+
+  /// Removes application scripts while rebuilding channel and host scripts.
+  @override
+  Future<void> removeAllUserScripts() async {
+    _applicationUserScripts.clear();
+    await _resetUserScripts();
   }
 
   @override
@@ -972,6 +1010,9 @@ class WebKitWebViewController extends PlatformWebViewController {
       if (defaultTargetPlatform == TargetPlatform.macOS)
         _applyMacOSScrollBarStyle(),
     ]);
+    for (final script in _applicationUserScripts.values) {
+      await controller.addUserScript(script);
+    }
   }
 
   /// Applies scrollbar visibility to macOS documents, where WKWebView does

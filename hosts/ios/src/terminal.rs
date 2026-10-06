@@ -405,7 +405,18 @@ impl TerminalHost for IosTerminalHost {
 
     /// Creates or reuses the Host-selected terminal backend for a plugin session.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
-        self.createOrGetBackendSession(self.primaryBackend(), sessionName)
+        self.createOrGetTypedSession(sessionName, SHELL_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses the requested interpreter in the configured iOS terminal backend.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        let backend = self.primaryBackend();
+        let backend = self.requestedBackend(Self::terminalName(backend), terminalType)?;
+        self.createOrGetBackendSession(backend, sessionName)
     }
 
     /// Executes one complete command in the terminal backend registered for the session.

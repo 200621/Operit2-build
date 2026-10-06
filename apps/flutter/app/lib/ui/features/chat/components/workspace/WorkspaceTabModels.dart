@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:operit2/core/web_visit/WebVisitModels.dart';
+import 'file_preview/WorkspaceTextDocument.dart';
 
 enum WorkspaceTabKind {
   home,
@@ -29,6 +30,7 @@ enum WorkspaceFilePreviewKind {
 }
 
 class WorkspaceTab {
+  /// Creates a workspace tab with optional persistent text editing state.
   const WorkspaceTab({
     required this.kind,
     required this.title,
@@ -36,7 +38,7 @@ class WorkspaceTab {
     this.closable = true,
     this.filePath,
     this.absolutePath,
-    this.fileContent,
+    this.textDocument,
     this.previewKind,
     this.url,
     this.userAgent,
@@ -58,7 +60,7 @@ class WorkspaceTab {
   final bool closable;
   final String? filePath;
   final String? absolutePath;
-  final String? fileContent;
+  final WorkspaceTextDocument? textDocument;
   final WorkspaceFilePreviewKind? previewKind;
   final String? url;
   final String? userAgent;

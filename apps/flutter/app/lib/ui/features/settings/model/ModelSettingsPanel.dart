@@ -208,6 +208,7 @@ class ModelSettingsPanelState extends State<ModelSettingsPanel> {
   }
 
   /// Updates a provider after rejecting names already used by other profiles.
+  /// Saves provider edits while preserving its identity and configured models.
   Future<void> _editProvider(
     core_proxy.ProviderProfile provider,
     List<core_proxy.ProviderProfile> providers,
@@ -237,8 +238,10 @@ class ModelSettingsPanelState extends State<ModelSettingsPanel> {
         provider: core_proxy.ProviderProfile(
           id: provider.id,
           name: saveResult.name,
-          providerTypeId: provider.providerTypeId,
-          providerType: provider.providerType,
+          providerTypeId: saveResult.providerTypeId,
+          providerType: core_proxy.ApiProviderType.fromJson(
+            saveResult.providerTypeId,
+          ),
           endpoint: saveResult.endpoint,
           apiKey: saveResult.apiKey,
           useMultipleApiKeys: provider.useMultipleApiKeys,
@@ -1054,6 +1057,7 @@ class _ProviderEditorDialogState extends State<_ProviderEditorDialog> {
     );
   }
 
+  /// Builds editable provider settings for both new and existing profiles.
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -1105,7 +1109,7 @@ class _ProviderEditorDialogState extends State<_ProviderEditorDialog> {
                           ),
                         )
                         .toList(growable: false),
-                    onChanged: editing ? null : _onProviderTypeChanged,
+                    onChanged: _onProviderTypeChanged,
                     validator: (value) {
                       if (value == null || value.isEmpty) {
                         return l10n.settingsModelProviderType;

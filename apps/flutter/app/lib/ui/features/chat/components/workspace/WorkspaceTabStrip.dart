@@ -1,7 +1,6 @@
 // ignore_for_file: file_names
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 
 import '../../../../../l10n/generated/app_localizations.dart';
 import '../../../../theme/OperitGlassSurface.dart';
@@ -24,12 +23,12 @@ class WorkspaceTabStrip extends StatelessWidget {
   final ValueChanged<int> onSelected;
   final ValueChanged<int> onClosed;
 
+  /// Builds a horizontally scrollable strip sized for the available width.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context)!;
     final useTermuxTabs =
-        defaultTargetPlatform == TargetPlatform.android &&
         MediaQuery.sizeOf(context).width < workspaceTabletBreakpoint;
     if (useTermuxTabs) {
       return _TermuxWorkspaceTabStrip(
@@ -175,7 +174,7 @@ class _TermuxWorkspaceTabStrip extends StatelessWidget {
   }
 }
 
-/// Wraps plugin and regular workspace tabs with their appropriate drag payload.
+/// Starts tab docking after a long press so swipes remain scroll gestures.
 Widget _buildTabDragSource(
   BuildContext context,
   WorkspaceTab tab,
@@ -185,7 +184,8 @@ Widget _buildTabDragSource(
     return child;
   }
   if (tab.kind == WorkspaceTabKind.plugin && tab.pluginEntryId != null) {
-    return Draggable<SidebarDockDragPayload>(
+    return LongPressDraggable<SidebarDockDragPayload>(
+      maxSimultaneousDrags: 1,
       data: SidebarDockDragPayload(entryId: tab.pluginEntryId!),
       feedback: Material(
         elevation: 8,
@@ -195,7 +195,8 @@ Widget _buildTabDragSource(
       child: child,
     );
   }
-  return Draggable<WorkspaceTabDragPayload>(
+  return LongPressDraggable<WorkspaceTabDragPayload>(
+    maxSimultaneousDrags: 1,
     data: WorkspaceTabDragPayload(tab: tab),
     feedback: Material(
       elevation: 8,

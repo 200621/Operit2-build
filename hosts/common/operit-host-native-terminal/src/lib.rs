@@ -398,9 +398,19 @@ impl TerminalHost for NativePtyTerminalHost {
         Ok(entries)
     }
 
+    /// Creates or reuses a named session in the configured default terminal.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
+        self.createOrGetTypedSession(sessionName, &self.commandSpec.terminalType)
+    }
+
+    /// Creates or reuses a named session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
         let normalizedSessionName = nonBlank(sessionName, "session_name")?;
-        let normalizedTerminalType = self.commandSpec.terminalType.clone();
+        let normalizedTerminalType = self.normalizeTerminalType(terminalType)?;
         let sessionKey = sessionKey(&normalizedTerminalType, &normalizedSessionName);
         {
             let mut state = self.lockState()?;

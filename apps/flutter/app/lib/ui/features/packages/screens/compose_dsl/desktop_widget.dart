@@ -99,7 +99,8 @@ class ToolPkgDesktopWidgetView extends StatefulWidget {
       _ToolPkgDesktopWidgetViewState();
 }
 
-class _ToolPkgDesktopWidgetViewState extends State<ToolPkgDesktopWidgetView> {
+class _ToolPkgDesktopWidgetViewState extends State<ToolPkgDesktopWidgetView>
+    with PageActivityMixin<ToolPkgDesktopWidgetView> {
   Timer? _timer;
   ToolPkgDesktopWidgetFrame? _render;
   String? _error;
@@ -131,6 +132,19 @@ class _ToolPkgDesktopWidgetViewState extends State<ToolPkgDesktopWidgetView> {
     }
   }
 
+  /// Suspends plugin render polling while the cached presentation is hidden.
+  @override
+  void onPageActivityChanged(bool active) {
+    if (active && _language != null) {
+      _restart();
+    } else if (!active) {
+      _timer?.cancel();
+      _timer = null;
+      _generation += 1;
+      _loading = false;
+    }
+  }
+
   /// Starts a new render generation and a non-overlapping periodic refresh schedule.
   void _restart() {
     if (widget.refreshInterval <= Duration.zero) {
@@ -139,6 +153,7 @@ class _ToolPkgDesktopWidgetViewState extends State<ToolPkgDesktopWidgetView> {
     _timer?.cancel();
     _generation++;
     _loading = false;
+    if (!isPageActive) return;
     unawaited(_refresh());
     _timer = Timer.periodic(widget.refreshInterval, (_) {
       if (!_loading) unawaited(_refresh());
@@ -147,7 +162,7 @@ class _ToolPkgDesktopWidgetViewState extends State<ToolPkgDesktopWidgetView> {
 
   /// Executes the registered render route and its onLoad before exposing the snapshot.
   Future<void> _refresh() async {
-    if (_loading) return;
+    if (_loading || !isPageActive) return;
     final generation = _generation;
     setState(() {
       _loading = true;

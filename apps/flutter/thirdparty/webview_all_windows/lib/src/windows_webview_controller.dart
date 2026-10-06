@@ -148,6 +148,7 @@ class WindowsWebViewController extends PlatformWebViewController {
   final native_webview.WebviewController _webviewController;
   final Map<String, JavaScriptChannelParams> _javaScriptChannelParams =
       <String, JavaScriptChannelParams>{};
+  final Set<String> _userScriptIdentifiers = <String>{};
   final Map<String, String> _javaScriptChannelScriptIds = <String, String>{};
   final Map<String, String> _virtualHostMappings = <String, String>{};
   final List<StreamSubscription<dynamic>> _subscriptions =
@@ -759,6 +760,42 @@ class WindowsWebViewController extends PlatformWebViewController {
     return result as Object;
   }
 
+  /// Registers a WebView2 document-created script and retains its native handle.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    await _ensureInitialized();
+    final identifier = await _webviewController
+        .addScriptToExecuteOnDocumentCreated(
+          buildUserScriptSource(
+            userScript,
+            platformHandlesMainFrameOnly: false,
+          ),
+        );
+    if (identifier == null) {
+      throw StateError('WebView2 did not return a script handle');
+    }
+    _userScriptIdentifiers.add(identifier);
+    return identifier;
+  }
+
+  /// Removes one registered application script without affecting channel scripts.
+  @override
+  Future<void> removeUserScript(String identifier) async {
+    await _ensureInitialized();
+    if (!_userScriptIdentifiers.remove(identifier)) {
+      throw ArgumentError.value(identifier, 'identifier');
+    }
+    await _webviewController.removeScriptToExecuteOnDocumentCreated(identifier);
+  }
+
+  /// Removes all registered application scripts from future documents.
+  @override
+  Future<void> removeAllUserScripts() async {
+    for (final identifier in _userScriptIdentifiers.toList()) {
+      await removeUserScript(identifier);
+    }
+  }
+
   @override
   Future<void> addJavaScriptChannel(
     JavaScriptChannelParams javaScriptChannelParams,
@@ -786,9 +823,10 @@ class WindowsWebViewController extends PlatformWebViewController {
     ''';
     final scriptId = await _webviewController
         .addScriptToExecuteOnDocumentCreated(script);
-    if (scriptId != null) {
-      _javaScriptChannelScriptIds[name] = scriptId;
+    if (scriptId == null) {
+      throw StateError('WebView2 did not return a channel script handle');
     }
+    _javaScriptChannelScriptIds[name] = scriptId;
   }
 
   @override

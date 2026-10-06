@@ -85,7 +85,7 @@ class OperitCoreService : Service() {
                     if (!destroyed.get()) {
                         HostEventBridge.startHostEventReceivers(
                             applicationContext,
-                            runtimeHost::ensureRuntimeHandle,
+                            runtimeHost::emitRuntimeEvent,
                         )
                     }
                 }

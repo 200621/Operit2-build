@@ -937,14 +937,36 @@ ${params.functionBody}
     }
   }
 
-  /// Reports this controller's deterministic user-script injection capability.
-  Future<bool> isUserScriptInjectionSupported(
-    WebViewUserScriptInjectionTime injectionTime,
-  ) async {
-    // The current ArkWeb bridge does not expose deterministic document-start
-    // injection, so advertising it would create a race with page scripts.
-    return false;
+  /// Registers document-start code with ArkWeb's native script list.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    final identifier = await const MethodChannel('operit/webview_user_scripts')
+        .invokeMethod<String>('add', {
+          'viewIdentifier': webViewIdentifier,
+          'source': buildUserScriptSource(
+            userScript,
+            platformHandlesMainFrameOnly: false,
+          ),
+        });
+    if (identifier == null) {
+      throw StateError('ArkWeb did not return a script handle');
+    }
+    return identifier;
   }
+
+  /// Removes a document-start registration after ArkWeb commits the new list.
+  @override
+  Future<void> removeUserScript(String identifier) =>
+      const MethodChannel('operit/webview_user_scripts').invokeMethod<void>(
+        'remove',
+        {'viewIdentifier': webViewIdentifier, 'identifier': identifier},
+      );
+
+  /// Removes application-owned document-start scripts without removing native proxies.
+  @override
+  Future<void> removeAllUserScripts() => const MethodChannel(
+    'operit/webview_user_scripts',
+  ).invokeMethod<void>('removeAll', {'viewIdentifier': webViewIdentifier});
 
   @override
   Future<void> addJavaScriptChannel(

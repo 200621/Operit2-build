@@ -9,6 +9,15 @@ class AppLocalizationsZh extends AppLocalizations {
   AppLocalizationsZh([String locale = 'zh']) : super(locale);
 
   @override
+  String get workspaceUnsavedChangesTitle => '有未保存的修改';
+
+  @override
+  String get workspaceUnsavedChangesMessage => '关闭此文件前，要保存你的修改吗？';
+
+  @override
+  String get workspaceDiscardChanges => '放弃修改';
+
+  @override
   String get askOperitHint => '向 Operit 提问';
 
   @override
@@ -4145,4 +4154,15 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get deviceSpaceNoRequests => '暂无申请';
+
+  @override
+  String get workspaceUndo => '撤销';
+
+  @override
+  String get workspaceRedo => '重做';
+
+  @override
+  String workspaceInsertSymbol(String symbol) {
+    return '插入 $symbol';
+  }
 }

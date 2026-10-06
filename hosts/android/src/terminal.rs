@@ -291,9 +291,20 @@ impl TerminalHost for AndroidTerminalHost {
         Ok(entries)
     }
 
+    /// Creates or reuses a named session in the configured default terminal.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
+        self.createOrGetTypedSession(sessionName, PRIMARY_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses a named session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
         let normalizedSessionName = nonBlank(sessionName, "session_name")?;
-        let normalizedTerminalType = PRIMARY_TERMINAL_TYPE.to_string();
+        let normalizedTerminalType = nonBlank(terminalType, "type")?;
+        let terminal = androidTerminalName(&normalizedTerminalType)?;
         let key = sessionKey(&normalizedTerminalType, &normalizedSessionName);
         {
             let mut state = self.lockState()?;
@@ -303,7 +314,7 @@ impl TerminalHost for AndroidTerminalHost {
                         sessionId,
                         sessionName: normalizedSessionName,
                         platform: PLATFORM.to_string(),
-                        terminal: PROOT_TERMINAL.to_string(),
+                        terminal: terminal.to_string(),
                         terminalType: normalizedTerminalType,
                         isNewSession: false,
                     });
@@ -328,7 +339,7 @@ impl TerminalHost for AndroidTerminalHost {
             sessionId,
             sessionName: normalizedSessionName,
             platform: PLATFORM.to_string(),
-            terminal: PROOT_TERMINAL.to_string(),
+            terminal: terminal.to_string(),
             terminalType: normalizedTerminalType,
             isNewSession: true,
         })
@@ -1858,5 +1869,41 @@ fn pollPidExitCode(pid: AndroidPid) -> HostResult<Option<i32>> {
             return Ok(Some(-libc::WTERMSIG(status)));
         }
         Ok(Some(-1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures the native system shell and proot Bash have distinct implementation identities.
+    #[test]
+    fn interpreter_types_select_exact_android_implementations() {
+        assert_eq!(
+            androidTerminalName("shell").unwrap(),
+            ANDROID_SYSTEM_TERMINAL
+        );
+        assert_eq!(androidTerminalName("bash").unwrap(), PROOT_TERMINAL);
+        assert_ne!(sessionKey("shell", "chat"), sessionKey("bash", "chat"));
+    }
+
+    /// Rejects an unsupported explicit interpreter before creating any PTY or accessing runtime paths.
+    #[test]
+    fn typed_session_rejects_unsupported_interpreter() {
+        let host = AndroidTerminalHost::new();
+        let error = host
+            .createOrGetTypedSession("chat", "powershell")
+            .unwrap_err();
+        assert_eq!(error.message, "Unsupported Android terminal type: powershell");
+        assert!(host.lockState().unwrap().ptySessions.is_empty());
+    }
+
+    /// Rejects an empty explicit interpreter instead of creating the default proot session.
+    #[test]
+    fn typed_session_rejects_empty_interpreter() {
+        let host = AndroidTerminalHost::new();
+        let error = host.createOrGetTypedSession("chat", " ").unwrap_err();
+        assert_eq!(error.message, "type parameter is required");
+        assert!(host.lockState().unwrap().ptySessions.is_empty());
     }
 }

@@ -1,7 +1,6 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -65,7 +64,7 @@ class DrawerContent extends StatefulWidget {
 }
 
 class _DrawerContentState extends State<DrawerContent> {
-  static const int _collapsedHistoryLimit = 4;
+  static const int _groupPreviewLimit = 4;
   static const double _contentEndPadding = 12;
   static final Set<String> _rememberedCollapsedCharacterSections = <String>{};
   static final Set<String> _rememberedCollapsedGroupSections = <String>{};
@@ -80,7 +79,7 @@ class _DrawerContentState extends State<DrawerContent> {
   );
   String? _errorMessage;
   List<core_proxy.ChatHistoryListItem>? _pendingOrderedHistories;
-  int _historyRenderLimit = _collapsedHistoryLimit;
+  final Set<String> _expandedHistoryGroups = <String>{};
   bool _searchExpanded = false;
   StreamSubscription<String?>? _groupingModeSubscription;
   late final Future<void> _groupingModeLoadFuture;
@@ -197,11 +196,13 @@ class _DrawerContentState extends State<DrawerContent> {
               _groupSectionKey(sectionKey, item) == addedGroupKey;
         });
         if (anchorIndex != -1) {
-          final groupItems = previousList.where((item) {
-            final sectionKey = _characterSectionKey(item);
-            return sectionKey == addedSectionKey &&
-                _groupSectionKey(sectionKey, item) == addedGroupKey;
-          }).toList(growable: false);
+          final groupItems = previousList
+              .where((item) {
+                final sectionKey = _characterSectionKey(item);
+                return sectionKey == addedSectionKey &&
+                    _groupSectionKey(sectionKey, item) == addedGroupKey;
+              })
+              .toList(growable: false);
           final groupPinned =
               groupItems.isNotEmpty && groupItems.every((item) => item.pinned);
           final latestById = <String, core_proxy.ChatHistoryListItem>{
@@ -272,13 +273,12 @@ class _DrawerContentState extends State<DrawerContent> {
         targetGroup: added.group,
       );
       if (groupPinned && !added.pinned) {
-        await _chatCoreProxy.updateChatPinned(
-          chatId: added.id,
-          pinned: true,
-        );
+        await _chatCoreProxy.updateChatPinned(chatId: added.id, pinned: true);
       }
     } catch (error, stackTrace) {
-      debugPrint('Failed to preserve group order for new chat: $error\n$stackTrace');
+      debugPrint(
+        'Failed to preserve group order for new chat: $error\n$stackTrace',
+      );
     }
   }
 
@@ -550,7 +550,9 @@ class _DrawerContentState extends State<DrawerContent> {
     }
     final template = group.histories.first;
     final rawGroup = template.group?.trim();
-    final targetGroup = (rawGroup == null || rawGroup.isEmpty) ? null : rawGroup;
+    final targetGroup = (rawGroup == null || rawGroup.isEmpty)
+        ? null
+        : rawGroup;
     setState(() {
       _errorMessage = null;
       if (_collapsedGroupSections.remove(group.key)) {
@@ -586,12 +588,16 @@ class _DrawerContentState extends State<DrawerContent> {
       builder: (context) => RenameGroupDialog(initialName: group.label),
     );
     final normalized = newName?.trim();
-    if (!mounted || normalized == null || normalized.isEmpty || normalized == group.label) {
+    if (!mounted ||
+        normalized == null ||
+        normalized.isEmpty ||
+        normalized == group.label) {
       return;
     }
     await _renameGroup(group, normalized);
   }
 
+  /// Renames every conversation in the complete group and preserves its expansion.
   Future<void> _renameGroup(
     _HistoryGroupSection group,
     String newGroupName,
@@ -608,6 +614,9 @@ class _DrawerContentState extends State<DrawerContent> {
       if (_collapsedGroupSections.remove(group.key)) {
         _collapsedGroupSections.add(newGroupKey);
         _rememberExpansionState();
+      }
+      if (_expandedHistoryGroups.remove(group.key)) {
+        _expandedHistoryGroups.add(newGroupKey);
       }
     });
     try {
@@ -717,10 +726,8 @@ class _DrawerContentState extends State<DrawerContent> {
     final confirmed = await showDialog<bool>(
       context: context,
       useRootNavigator: true,
-      builder: (context) => DeleteGroupDialog(
-        groupName: group.label,
-        count: group.historyCount,
-      ),
+      builder: (context) =>
+          DeleteGroupDialog(groupName: group.label, count: group.historyCount),
     );
     if (!mounted || confirmed != true) {
       return;
@@ -1091,58 +1098,18 @@ class _DrawerContentState extends State<DrawerContent> {
     return sections;
   }
 
-  _VisibleHistoryPlan _buildVisibleHistoryPlan(
-    List<_CharacterHistorySection> sections,
-    int renderLimit,
+  /// Selects a stable group preview without hiding active or pinned conversations.
+  List<core_proxy.ChatHistoryListItem> _previewGroupHistories(
+    _HistoryGroupSection group,
   ) {
-    var remaining = renderLimit;
-    var hiddenCount = 0;
-    final plannedSections = <_CharacterHistorySection>[];
-
-    for (final section in sections) {
-      if (_collapsedCharacterSections.contains(section.key)) {
-        plannedSections.add(section);
-        continue;
-      }
-
-      final plannedGroups = <_HistoryGroupSection>[];
-      for (final group in section.groups) {
-        if (_collapsedGroupSections.contains(group.key)) {
-          plannedGroups.add(group);
-          continue;
-        }
-
-        final visibleCount = math.min(remaining, group.histories.length);
-        final visibleHistories = group.histories
-            .take(visibleCount)
-            .toList(growable: false);
-        hiddenCount += group.histories.length - visibleCount;
-        remaining -= visibleCount;
-        plannedGroups.add(
-          _HistoryGroupSection(
-            key: group.key,
-            label: group.label,
-            histories: visibleHistories,
-            historyCount: group.historyCount,
-          ),
-        );
-      }
-
-      plannedSections.add(
-        _CharacterHistorySection(
-          key: section.key,
-          label: section.label,
-          kind: section.kind,
-          avatarUri: section.avatarUri,
-          groups: plannedGroups,
-        ),
-      );
-    }
-
-    return _VisibleHistoryPlan(
-      sections: plannedSections,
-      hiddenCount: hiddenCount,
-    );
+    return <core_proxy.ChatHistoryListItem>[
+      for (var index = 0; index < group.histories.length; index += 1)
+        if (index < _groupPreviewLimit ||
+            group.histories[index].id == widget.currentChatId ||
+            group.histories[index].pinned ||
+            widget.activeStreamingChatIds.contains(group.histories[index].id))
+          group.histories[index],
+    ];
   }
 
   /// Builds the key used to place a conversation in a top-level section.
@@ -1239,9 +1206,12 @@ class _DrawerContentState extends State<DrawerContent> {
     });
   }
 
-  void _showMoreHistories(int hiddenCount) {
+  /// Toggles the conversation preview for one group without changing other groups.
+  void _toggleGroupHistoryExpanded(String groupKey) {
     setState(() {
-      _historyRenderLimit += hiddenCount;
+      if (!_expandedHistoryGroups.remove(groupKey)) {
+        _expandedHistoryGroups.add(groupKey);
+      }
     });
   }
 
@@ -1254,9 +1224,11 @@ class _DrawerContentState extends State<DrawerContent> {
       ..addAll(_collapsedGroupSections);
   }
 
+  /// Builds visible rows while retaining complete group data for group actions.
   List<_HistoryListEntry> _buildHistoryEntries(
-    List<_CharacterHistorySection> sections,
-  ) {
+    List<_CharacterHistorySection> sections, {
+    required bool searching,
+  }) {
     final entries = <_HistoryListEntry>[];
     for (final section in sections) {
       entries.add(_CharacterHeaderEntry(section));
@@ -1268,14 +1240,28 @@ class _DrawerContentState extends State<DrawerContent> {
         if (_collapsedGroupSections.contains(group.key)) {
           continue;
         }
-        for (final history in group.histories) {
+        final preview = _previewGroupHistories(group);
+        final expanded = _expandedHistoryGroups.contains(group.key);
+        final histories = searching || expanded ? group.histories : preview;
+        for (final history in histories) {
           entries.add(_HistoryRowEntry(history));
+        }
+        final hiddenCount = group.histories.length - preview.length;
+        if (!searching && hiddenCount > 0) {
+          entries.add(
+            _GroupHistoryLimitEntry(
+              groupKey: group.key,
+              hiddenCount: hiddenCount,
+              expanded: expanded,
+            ),
+          );
         }
       }
     }
     return entries;
   }
 
+  /// Renders grouped previews without altering the underlying conversation data.
   @override
   Widget build(BuildContext context) {
     final visibleHistories = _visibleHistories;
@@ -1284,12 +1270,10 @@ class _DrawerContentState extends State<DrawerContent> {
         widget.loading && _histories.isEmpty && errorMessage == null;
     final searching = _searchController.text.trim().isNotEmpty;
     final allCharacterSections = _buildCharacterSections(visibleHistories);
-    final historyPlan = searching
-        ? _VisibleHistoryPlan(sections: allCharacterSections, hiddenCount: 0)
-        : _buildVisibleHistoryPlan(allCharacterSections, _historyRenderLimit);
-    final characterSections = historyPlan.sections;
-    final hiddenHistoryCount = historyPlan.hiddenCount;
-    final historyEntries = _buildHistoryEntries(characterSections);
+    final historyEntries = _buildHistoryEntries(
+      allCharacterSections,
+      searching: searching,
+    );
     final aiChatRouteId = ScreenRouteRegistry.routeIdOf(
       ScreenRouteRegistry.aiChat,
     );
@@ -1354,7 +1338,8 @@ class _DrawerContentState extends State<DrawerContent> {
                                 : Icons.search_rounded,
                             tooltip: _searchExpanded ? '收起搜索' : '搜索对话',
                             appearance: widget.appearance,
-                            active: _searchExpanded ||
+                            active:
+                                _searchExpanded ||
                                 _searchController.text.trim().isNotEmpty,
                             onClick: _toggleSearchExpanded,
                           ),
@@ -1428,13 +1413,27 @@ class _DrawerContentState extends State<DrawerContent> {
                               ),
                           onMoveToGroup: (moved) {
                             if (group.histories.isNotEmpty) {
-                              _moveConversationTo(
-                                moved,
-                                group.histories.first,
-                              );
+                              _moveConversationTo(moved, group.histories.first);
                             }
                           },
                         ),
+                        _GroupHistoryLimitEntry(
+                          :final groupKey,
+                          :final hiddenCount,
+                          :final expanded,
+                        ) =>
+                          _HistoryLimitButton(
+                            key: ValueKey<String>('history-limit:$groupKey'),
+                            icon: expanded
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                            label: expanded ? '收起' : '展开更多 $hiddenCount',
+                            workspaceStyle:
+                                _groupingMode == _HistoryGroupingMode.workspace,
+                            appearance: widget.appearance,
+                            onClick: () =>
+                                _toggleGroupHistoryExpanded(groupKey),
+                          ),
                         _HistoryRowEntry(:final history) =>
                           ConversationDrawerItem(
                             history: history,
@@ -1491,15 +1490,6 @@ class _DrawerContentState extends State<DrawerContent> {
                       };
                     }, childCount: historyEntries.length),
                   ),
-                  if (!searching && hiddenHistoryCount > 0)
-                    SliverToBoxAdapter(
-                      child: _HistoryLimitButton(
-                        icon: Icons.expand_more,
-                        label: '展开更多 $hiddenHistoryCount',
-                        appearance: widget.appearance,
-                        onClick: () => _showMoreHistories(hiddenHistoryCount),
-                      ),
-                    ),
                   if (widget.pluginEntries.isNotEmpty) ...<Widget>[
                     const SliverToBoxAdapter(child: SizedBox(height: 10)),
                     SliverToBoxAdapter(
@@ -1632,32 +1622,22 @@ enum _HistoryGroupingMode { character, workspace }
 enum _HistoryBindingKind { workspace, characterCard, characterGroup, unbound }
 
 class _HistoryGroupSection {
+  /// Retains the complete group data independently of its rendered preview.
   _HistoryGroupSection({
     required this.key,
     required this.label,
     required this.histories,
-    int? historyCount,
-  }) : _historyCount = historyCount;
+  });
 
   final String key;
   final String label;
   final List<core_proxy.ChatHistoryListItem> histories;
-  final int? _historyCount;
 
-  int get historyCount => _historyCount ?? histories.length;
+  /// Reports the full conversation count for group headers and actions.
+  int get historyCount => histories.length;
 
   bool get isPinned =>
       histories.isNotEmpty && histories.every((item) => item.pinned);
-}
-
-class _VisibleHistoryPlan {
-  const _VisibleHistoryPlan({
-    required this.sections,
-    required this.hiddenCount,
-  });
-
-  final List<_CharacterHistorySection> sections;
-  final int hiddenCount;
 }
 
 sealed class _HistoryListEntry {
@@ -1680,6 +1660,19 @@ class _HistoryRowEntry extends _HistoryListEntry {
   const _HistoryRowEntry(this.history);
 
   final core_proxy.ChatHistoryListItem history;
+}
+
+class _GroupHistoryLimitEntry extends _HistoryListEntry {
+  /// Describes the independent expand or collapse control for one group.
+  const _GroupHistoryLimitEntry({
+    required this.groupKey,
+    required this.hiddenCount,
+    required this.expanded,
+  });
+
+  final String groupKey;
+  final int hiddenCount;
+  final bool expanded;
 }
 
 class _ChatBindingForCreate {
@@ -2002,7 +1995,7 @@ class _GroupSectionHeaderState extends State<_GroupSectionHeader> {
                                 appearance: appearance,
                                 compact: true,
                                 onCreateChat: widget.onCreateChat,
-                              onRename: widget.onRename,
+                                onRename: widget.onRename,
                                 onTogglePinned: widget.onTogglePinned,
                                 onDelete: widget.onDelete,
                                 onMenuOpenChanged: (open) {
@@ -2259,6 +2252,7 @@ class _GroupMoreMenuButton extends StatelessWidget {
     );
   }
 }
+
 class _HistoryCountBadge extends StatelessWidget {
   /// Creates a compact count badge for history section rows.
   const _HistoryCountBadge({required this.count, required this.appearance});
@@ -2573,22 +2567,31 @@ class _ToolbarIconButton extends StatelessWidget {
 }
 
 class _HistoryLimitButton extends StatelessWidget {
+  /// Creates the inline control for a group's conversation preview.
   const _HistoryLimitButton({
+    super.key,
     required this.icon,
     required this.label,
+    required this.workspaceStyle,
     required this.appearance,
     required this.onClick,
   });
 
   final IconData icon;
   final String label;
+  final bool workspaceStyle;
   final NavigationDrawerAppearance appearance;
   final VoidCallback onClick;
 
+  /// Renders the reversible preview toggle inline with its conversation group.
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsetsDirectional.only(start: 24, end: 12, top: 2),
+      padding: EdgeInsetsDirectional.only(
+        start: workspaceStyle ? 51 : 56,
+        end: 12,
+        top: 2,
+      ),
       child: TextButton.icon(
         onPressed: onClick,
         icon: Icon(

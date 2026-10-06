@@ -258,3 +258,49 @@ test('Android releases verify the final APK before copying it to dist', () => {
     main.indexOf('copy_required_file('));
   assert.match(main, /"--target-platform",\s*"android-arm64"/);
 });
+
+/** Routes every Android host callback through the existing nonblocking runtime event sink. */
+test('Android host broadcasts cannot call the blocking native event ABI', () => {
+  const bridge = source(`${android}src/main/kotlin/app/operit/HostEventBridge.kt`);
+  const service = source(`${android}src/main/kotlin/app/operit/OperitCoreService.kt`);
+  assert.match(service, /HostEventBridge\.startHostEventReceivers\(\s*applicationContext,\s*runtimeHost::emitRuntimeEvent,/);
+  assert.doesNotMatch(bridge, /OperitRuntimeNative|RuntimeEvents\.emit\(|runtimeHandle|ensureRuntimeHandle/);
+  for (const name of [
+    'startHostEventReceivers',
+    'registerAndroidBroadcastReceiver',
+    'registerBluetoothReceiver',
+    'registerNetworkCallback',
+    'registerPowerIdleReceiver',
+    'emitSessionEvent',
+    'emitNetworkEvent',
+  ]) {
+    assert.match(bridge, new RegExp(`fun ${name}\\([^{}]*?emitRuntimeEvent: \\(JSONObject\\) -> Unit,\\s*[^)]*\\) \\{`));
+  }
+  assert.equal([...bridge.matchAll(/\bemitRuntimeEvent\(event\)/g)].length, 5);
+  assert.match(bridge, /emitRuntimeEvent\(event\)\s*emitSessionEvent\(context, emitRuntimeEvent, intent\.action\)/);
+  assert.match(bridge, /emitNetworkEvent\(emitRuntimeEvent, capabilities\)/);
+  assert.match(bridge, /emitNetworkEvent\(emitRuntimeEvent, null\)/);
+});
+
+/** Keeps TIME_TICK enabled while forbidding a synchronous JNI helper in event serialization. */
+test('Android event payload builders retain time broadcasts without native delivery', () => {
+  const events = source(`${android}src/main/kotlin/app/operit/RuntimeEvents.kt`);
+  assert.match(events, /Intent\.ACTION_TIME_TICK,/);
+  assert.match(events, /Intent\.ACTION_TIME_TICK -> RuntimeEvents\.Topic\.SYSTEM_TIME_TICK/);
+  assert.doesNotMatch(events, /OperitRuntimeNative|fun emit\(/);
+});
+
+/** Confines the blocking event ABI to executor work outside all UI-shared lock scopes. */
+test('Android runtime event JNI runs only inside the existing worker dispatch', () => {
+  const host = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);
+  const dispatch = section(host, 'private fun scheduleRuntimeEventLocked(', '/** Prepares Android runtime assets');
+  assert.match(dispatch, /runtimeExecutor\.execute\s*\{\s*try\s*\{\s*val response = OperitRuntimeNative\.emitRuntimeEvent\(handle, eventJson\)/);
+  assert.match(dispatch, /check\(result\.getBoolean\("ok"\)\)/);
+  assert.equal([...host.matchAll(/OperitRuntimeNative\.emitRuntimeEvent\(/g)].length, 1);
+  for (const { body } of synchronizedScopes(host, 'runtimeLock')) {
+    assert.doesNotMatch(body, /OperitRuntimeNative\.emitRuntimeEvent\(|RuntimeEvents\.emit\(/);
+  }
+  const ingress = section(host, 'fun emitRuntimeEvent(', '/** Schedules queued');
+  assert.doesNotMatch(ingress, /ensureRuntimeHandle|\.get\(|\.join\(|\.await\(|\.recv\(/);
+  assert.match(ingress, /scheduleRuntimeEventLocked\(handle, eventJson\)/);
+});

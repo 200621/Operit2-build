@@ -41,6 +41,7 @@ class TtsProviderSection extends StatefulWidget {
 
 class _TtsProviderSectionState extends State<TtsProviderSection> {
   Future<_TtsSectionData>? _future;
+  late String _currentTtsConfigId;
   String? _testingTtsConfigId;
   final Set<String> _expandedProviderKeys = <String>{};
   bool _providerExpansionInitialized = false;
@@ -57,6 +58,7 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
     });
   }
 
+  /// Loads provider data and initializes the independently updated selection.
   Future<_TtsSectionData> _loadData() async {
     final ttsManager = widget.clients.preferencesTtsConfigManager;
     final ttsConfigs = await ttsManager.getAllTtsConfigs();
@@ -73,18 +75,24 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
         .whereType<String>()
         .where((id) => id.isNotEmpty)
         .toSet();
+    _currentTtsConfigId = currentTtsConfigId;
     return _TtsSectionData(
       configs: ttsConfigs,
-      currentConfigId: currentTtsConfigId,
       providerCatalogEntries: ttsProviderCatalogEntries,
       characterBoundConfigIds: characterBoundConfigIds,
     );
   }
+
+  /// Updates the persisted selection without replacing the expanded provider tree.
   Future<void> _setCurrentTtsConfigId(String id) async {
-    await widget.clients.preferencesTtsConfigManager.setCurrentTtsConfigId(
-      id: id,
-    );
-    _reload();
+    final currentConfigId = await widget.clients.preferencesTtsConfigManager
+        .setCurrentTtsConfigId(id: id);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _currentTtsConfigId = currentConfigId;
+    });
   }
 
   Future<void> _testTtsConfig(core_proxy.TtsConfig config) async {
@@ -450,6 +458,7 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
     });
   }
 
+  /// Builds the provider tree while keeping selection changes out of loading state.
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<_TtsSectionData>(
@@ -462,8 +471,9 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
           return Center(child: Text('语音配置加载失败：${snapshot.error}'));
         }
         final data = snapshot.data!;
+        final currentConfigId = _currentTtsConfigId;
         final groups = _ttsProviderGroups(data.configs);
-        _initializeProviderExpansion(groups, data.currentConfigId);
+        _initializeProviderExpansion(groups, currentConfigId);
         return _SectionCard(
           title: 'TTS 供应商',
           icon: Icons.record_voice_over_outlined,
@@ -476,7 +486,7 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
               children: <Widget>[
                 _TtsProviderManager(
                   groups: groups,
-                  currentConfigId: data.currentConfigId,
+                  currentConfigId: currentConfigId,
                   testingConfigId: _testingTtsConfigId,
                   expandedProviderKeys: _expandedProviderKeys,
                   onToggleProviderExpanded: _toggleProviderExpanded,
@@ -484,12 +494,12 @@ class _TtsProviderSectionState extends State<TtsProviderSection> {
                   onEditProvider: (group) => _editProvider(
                     group,
                     data.providerCatalogEntries,
-                    data.currentConfigId,
+                    currentConfigId,
                     data.characterBoundConfigIds,
                   ),
                   onEditConfig: (config) => _openVoiceEditor(
                     config,
-                    data.currentConfigId,
+                    currentConfigId,
                     data.characterBoundConfigIds,
                   ),
                   onTestConfig: _testTtsConfig,

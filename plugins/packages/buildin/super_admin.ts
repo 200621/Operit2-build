@@ -32,6 +32,9 @@ type PersistedTerminalOutput = {
     output_chars: number;
     operit_clean_on_exit_dir: string;
     hint: string;
+    platform: string;
+    terminal: string;
+    terminalType: string;
     terminalEnvironment?: unknown;
     timeoutMsUsed?: number;
 };
@@ -353,17 +356,17 @@ const superAdmin = (function () {
     const BACKGROUND_TERMINAL_SESSION_PREFIX = "super_admin_background";
 
     /**
-     * Returns the stable foreground terminal session name for the current chat.
+     * Returns a stable foreground session name scoped to the chat and interpreter type.
      */
-    function getDefaultTerminalSessionName(): string {
-        return `${DEFAULT_TERMINAL_SESSION_PREFIX}_${getChatId()}`;
+    function getDefaultTerminalSessionName(type: TerminalCommandType): string {
+        return `${DEFAULT_TERMINAL_SESSION_PREFIX}_${type}_${getChatId()}`;
     }
 
     /**
-     * Returns a distinct terminal session name for a background command.
+     * Returns a distinct background session name scoped to the chat and interpreter type.
      */
-    function getBackgroundTerminalSessionName(): string {
-        return `${BACKGROUND_TERMINAL_SESSION_PREFIX}_${getChatId()}_${Date.now()}`;
+    function getBackgroundTerminalSessionName(type: TerminalCommandType): string {
+        return `${BACKGROUND_TERMINAL_SESSION_PREFIX}_${type}_${getChatId()}_${Date.now()}`;
     }
 
     /**
@@ -386,6 +389,9 @@ const superAdmin = (function () {
             output: "(saved_to_file)",
             exitCode: result?.exitCode,
             sessionId: result?.sessionId,
+            platform: result.platform,
+            terminal: result.terminal,
+            terminalType: result.terminalType,
             timedOut: result?.timedOut === true,
             context_preserved: result?.timedOut !== true,
             output_saved_to: filePath,
@@ -408,7 +414,7 @@ const superAdmin = (function () {
             const command = params.command;
             const background = params.background;
             const timeoutMs = params.timeoutMs;
-            const terminalEnvironment = await Tools.System.terminal.info();
+            const terminalInfo = await Tools.System.terminal.info();
             console.log(`执行终端命令: ${command}`);
             const isBackground = background === "true";
             let timeout;
@@ -425,7 +431,13 @@ const superAdmin = (function () {
                 }
             }
             if (isBackground) {
-                const session = await Tools.System.terminal.create(getBackgroundTerminalSessionName());
+                const session = await Tools.System.terminal.create(getBackgroundTerminalSessionName(type), type);
+                const terminalEnvironment = {
+                    ...terminalInfo,
+                    platform: session.platform,
+                    terminal: session.terminal,
+                    terminalType: session.terminalType
+                };
                 const sessionId = session.sessionId;
                 /**
                  * Runs the background terminal command inside the created session.
@@ -444,12 +456,21 @@ const superAdmin = (function () {
                     background: true,
                     sessionId: sessionId,
                     started: true,
+                    platform: session.platform,
+                    terminal: session.terminal,
+                    terminalType: session.terminalType,
                     terminalEnvironment
                 };
             }
-            const session = await Tools.System.terminal.create(getDefaultTerminalSessionName());
+            const session = await Tools.System.terminal.create(getDefaultTerminalSessionName(type), type);
             const sessionId = session.sessionId;
             const result = await Tools.System.terminal.exec(sessionId, command, timeout);
+            const terminalEnvironment = {
+                ...terminalInfo,
+                platform: result.platform,
+                terminal: result.terminal,
+                terminalType: result.terminalType
+            };
             const timedOut = result.timedOut === true;
             const persistedResult = await persistTerminalOutputIfTooLong(command, result);
             if (persistedResult) {
@@ -462,6 +483,9 @@ const superAdmin = (function () {
                 output: result.output,
                 exitCode: result.exitCode,
                 sessionId: result.sessionId,
+                platform: result.platform,
+                terminal: result.terminal,
+                terminalType: result.terminalType,
                 timedOut: timedOut,
                 timeoutMsUsed: timeout,
                 terminalEnvironment,

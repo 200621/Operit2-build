@@ -2,6 +2,8 @@
 
 import 'package:flutter/material.dart';
 
+import 'RetainedPage.dart';
+
 class AnimatedLazyIndexedStack extends StatefulWidget {
   const AnimatedLazyIndexedStack({
     super.key,
@@ -163,39 +165,38 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
         controller: snapshotController,
         mode: SnapshotMode.forced,
         autoresize: true,
-        child: widget.itemBuilder(context, index),
+        child: Builder(
+          builder: (context) => widget.itemBuilder(context, index),
+        ),
       ),
     );
 
     return Positioned.fill(
       key: ValueKey<int>(index),
-      child: Offstage(
-        offstage: !visible,
-        child: TickerMode(
-          enabled: visible,
-          child: IgnorePointer(
-            ignoring: !isCurrent,
-            child: AnimatedBuilder(
-              animation: visible ? _curve : kAlwaysCompleteAnimation,
-              child: child,
-              builder: (context, child) {
-                final value = _previousIndex == null ? 1.0 : _curve.value;
-                final fade = _fadeCurve.transform(_controller.value);
-                final opacity = isCurrent
-                    ? _incomingOpacity.transform(fade)
-                    : _outgoingOpacity.transform(fade);
-                final offset = isCurrent
-                    ? _incomingOffset.transform(value)
-                    : _outgoingOffset.transform(value);
-                return Opacity(
-                  opacity: opacity,
-                  child: Transform.translate(
-                    offset: Offset(offset, 0),
-                    child: child,
-                  ),
-                );
-              },
-            ),
+      child: RetainedPage(
+        active: visible,
+        child: IgnorePointer(
+          ignoring: !isCurrent,
+          child: AnimatedBuilder(
+            animation: visible ? _curve : kAlwaysCompleteAnimation,
+            child: child,
+            builder: (context, child) {
+              final value = _previousIndex == null ? 1.0 : _curve.value;
+              final fade = _fadeCurve.transform(_controller.value);
+              final opacity = isCurrent
+                  ? _incomingOpacity.transform(fade)
+                  : _outgoingOpacity.transform(fade);
+              final offset = isCurrent
+                  ? _incomingOffset.transform(value)
+                  : _outgoingOffset.transform(value);
+              return Opacity(
+                opacity: opacity,
+                child: Transform.translate(
+                  offset: Offset(offset, 0),
+                  child: child,
+                ),
+              );
+            },
           ),
         ),
       ),

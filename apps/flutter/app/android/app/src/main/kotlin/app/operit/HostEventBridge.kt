@@ -19,17 +19,19 @@ object HostEventBridge {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    /** Installs host callbacks that submit events without waiting for native Runtime work. */
     fun startHostEventReceivers(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
     ) {
         clear(context)
-        registerAndroidBroadcastReceiver(context, runtimeHandle)
-        registerBluetoothReceiver(context, runtimeHandle)
-        registerNetworkCallback(context, runtimeHandle)
-        registerPowerIdleReceiver(context, runtimeHandle)
+        registerAndroidBroadcastReceiver(context, emitRuntimeEvent)
+        registerBluetoothReceiver(context, emitRuntimeEvent)
+        registerNetworkCallback(context, emitRuntimeEvent)
+        registerPowerIdleReceiver(context, emitRuntimeEvent)
     }
 
+    /** Unregisters the Android callbacks owned by the Core service. */
     fun clear(context: Context) {
         for (receiver in receivers) {
             try {
@@ -47,28 +49,31 @@ object HostEventBridge {
         networkCallback = null
     }
 
+    /** Registers system broadcasts and submits their normalized events to the Runtime host. */
     private fun registerAndroidBroadcastReceiver(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
     ) {
         val filter = IntentFilter()
         for (action in AndroidRuntimeEvents.systemBroadcastActions) {
             filter.addAction(action)
         }
         val receiver = object : BroadcastReceiver() {
+            /** Captures the broadcast payload and submits it without waiting for Core processing. */
             override fun onReceive(ctx: Context, intent: Intent) {
                 val event = AndroidRuntimeEvents.systemBroadcast(intent, intentExtrasToJson(intent))
-                RuntimeEvents.emit(runtimeHandle(), event)
-                emitSessionEvent(context, runtimeHandle, intent.action)
+                emitRuntimeEvent(event)
+                emitSessionEvent(context, emitRuntimeEvent, intent.action)
             }
         }
         registerReceiver(context, receiver, filter)
         receivers.add(receiver)
     }
 
+    /** Registers Bluetooth broadcasts without exposing the blocking native event ABI. */
     private fun registerBluetoothReceiver(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
     ) {
         val filter = IntentFilter().apply {
             for (action in AndroidRuntimeEvents.bluetoothBroadcastActions) {
@@ -76,6 +81,7 @@ object HostEventBridge {
             }
         }
         val receiver = object : BroadcastReceiver() {
+            /** Captures Bluetooth state and submits it through the Runtime host event sink. */
             override fun onReceive(ctx: Context, intent: Intent) {
                 val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(
@@ -91,7 +97,7 @@ object HostEventBridge {
                     device,
                     intentExtrasToJson(intent),
                 )
-                RuntimeEvents.emit(runtimeHandle(), event)
+                emitRuntimeEvent(event)
             }
         }
         registerReceiver(context, receiver, filter)
@@ -101,7 +107,7 @@ object HostEventBridge {
     /** Registers Android's active-network callback and emits the shared network payload. */
     private fun registerNetworkCallback(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
     ) {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
@@ -110,12 +116,12 @@ object HostEventBridge {
                 network: Network,
                 capabilities: NetworkCapabilities,
             ) {
-                emitNetworkEvent(runtimeHandle, capabilities)
+                emitNetworkEvent(emitRuntimeEvent, capabilities)
             }
 
             /** Emits the shared disconnected state when Android loses its active network. */
             override fun onLost(network: Network) {
-                emitNetworkEvent(runtimeHandle, null)
+                emitNetworkEvent(emitRuntimeEvent, null)
             }
         }
         manager.registerDefaultNetworkCallback(callback)
@@ -126,7 +132,7 @@ object HostEventBridge {
     /** Registers Android device-idle changes as normalized power sleep and wake events. */
     private fun registerPowerIdleReceiver(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
     ) {
         val receiver = object : BroadcastReceiver() {
             /** Converts Android Doze state into the shared power suspension topic. */
@@ -137,7 +143,7 @@ object HostEventBridge {
                     if (sleeping) RuntimeEvents.Topic.SYSTEM_POWER_SLEEP else RuntimeEvents.Topic.SYSTEM_POWER_WAKE,
                     JSONObject().put("sleeping", sleeping),
                 )
-                RuntimeEvents.emit(runtimeHandle(), event)
+                emitRuntimeEvent(event)
             }
         }
         registerReceiver(
@@ -151,7 +157,7 @@ object HostEventBridge {
     /** Emits Android lock and unlock state alongside screen and user-presence broadcasts. */
     private fun emitSessionEvent(
         context: Context,
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
         action: String?,
     ) {
         val locked = when (action) {
@@ -169,12 +175,12 @@ object HostEventBridge {
             if (locked) RuntimeEvents.Topic.SYSTEM_SESSION_LOCK else RuntimeEvents.Topic.SYSTEM_SESSION_UNLOCK,
             JSONObject().put("locked", locked),
         )
-        RuntimeEvents.emit(runtimeHandle(), event)
+        emitRuntimeEvent(event)
     }
 
     /** Converts Android network capabilities and forwards one normalized event to Core. */
     private fun emitNetworkEvent(
-        runtimeHandle: () -> Long,
+        emitRuntimeEvent: (JSONObject) -> Unit,
         capabilities: NetworkCapabilities?,
     ) {
         val connected = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
@@ -193,9 +199,10 @@ object HostEventBridge {
             RuntimeEvents.Topic.SYSTEM_NETWORK_CHANGED,
             AndroidRuntimeEvents.networkChanged(connected, networkType, metered),
         )
-        RuntimeEvents.emit(runtimeHandle(), event)
+        emitRuntimeEvent(event)
     }
 
+    /** Registers a receiver with the Android API-specific visibility requirement. */
     private fun registerReceiver(context: Context, receiver: BroadcastReceiver, filter: IntentFilter) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -204,6 +211,7 @@ object HostEventBridge {
         }
     }
 
+    /** Copies Intent extras into an event-owned JSON payload before asynchronous delivery. */
     private fun intentExtrasToJson(intent: Intent): JSONObject {
         val json = JSONObject()
         val extras = intent.extras

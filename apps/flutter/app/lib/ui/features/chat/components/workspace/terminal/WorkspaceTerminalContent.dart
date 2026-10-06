@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../../../../common/components/PageActivityMixin.dart';
+
 import '../../../../../theme/OperitGlassSurface.dart';
 import '../../../../../theme/OperitTheme.dart';
 import 'WorkspacePtyProcess.dart';
@@ -29,7 +31,8 @@ class WorkspaceTerminalContent extends StatefulWidget {
       _WorkspaceTerminalContentState();
 }
 
-class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
+class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent>
+    with PageActivityMixin<WorkspaceTerminalContent> {
   late final Terminal _terminal;
   late final TerminalController _controller;
   late final FocusNode _focusNode;
@@ -45,6 +48,7 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
   bool _ctrlLatched = false;
   bool _altLatched = false;
 
+  /// Creates terminal state and requests input focus only for visible content.
   @override
   void initState() {
     super.initState();
@@ -66,7 +70,7 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     };
     WidgetsBinding.instance.endOfFrame.then((_) {
       if (mounted) {
-        _focusNode.requestFocus();
+        if (isPageActive) _focusNode.requestFocus();
         _attachSession();
       }
     });
@@ -227,10 +231,23 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     );
   }
 
+  /// Stops terminal presentation callbacks without terminating the process.
+  @override
+  void onPageActivityChanged(bool active) {
+    if (active) {
+      _outputSubscription?.resume();
+      _scheduleTerminalFlush();
+    } else {
+      _outputSubscription?.pause();
+    }
+  }
+
+  /// Attaches the presentation stream to the existing terminal session.
   Future<void> _attachSession() async {
     await _attachPty();
   }
 
+  /// Attaches the process stream and pauses its presentation while inactive.
   Future<void> _attachPty() async {
     try {
       final pty = attachWorkspacePty(widget.sessionId);
@@ -249,6 +266,9 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
               _exited = true;
             },
           );
+      if (!isPageActive) {
+        _outputSubscription!.pause();
+      }
       unawaited(
         pty.exitCode.then(
           (code) {
@@ -293,18 +313,30 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     _pty?.write(const convert.Utf8Encoder().convert(data));
   }
 
+  /// Buffers terminal output until the visible page can render it.
   void _queueTerminalWrite(String data) {
     if (data.isEmpty) {
       return;
     }
     _pendingTerminalOutput.write(data);
-    if (_terminalFlushScheduled) {
+    _scheduleTerminalFlush();
+  }
+
+  /// Coalesces output only while terminal presentation is active.
+  void _scheduleTerminalFlush() {
+    if (!isPageActive ||
+        _pendingTerminalOutput.isEmpty ||
+        _terminalFlushScheduled) {
       return;
     }
     _terminalFlushScheduled = true;
     WidgetsBinding.instance.scheduleFrameCallback((_) {
       if (!mounted) {
         _pendingTerminalOutput.clear();
+        _terminalFlushScheduled = false;
+        return;
+      }
+      if (!isPageActive) {
         _terminalFlushScheduled = false;
         return;
       }

@@ -100,12 +100,25 @@ impl TerminalHost for AppleTerminalHost {
         })
     }
 
+    /// Creates or reuses a named session in the default macOS interpreter.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
-        self.inner.createOrGetSession(sessionName).map(|mut info| {
-            info.platform = PLATFORM.to_string();
-            info.terminal = TERMINAL.to_string();
-            info
-        })
+        self.createOrGetTypedSession(sessionName, TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses a named session of exactly the requested macOS interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        let terminalType = Self::nativeTerminalType(TERMINAL, terminalType)?;
+        self.inner
+            .createOrGetTypedSession(sessionName, terminalType)
+            .map(|mut info| {
+                info.platform = PLATFORM.to_string();
+                info.terminal = TERMINAL.to_string();
+                info
+            })
     }
 
     fn executeInSession(

@@ -1625,7 +1625,14 @@ pub trait TerminalHost: Send + Sync {
     fn pollPtyExitCode(&self, sessionId: &str) -> HostResult<Option<i32>>;
     fn closePtySession(&self, sessionId: &str) -> HostResult<()>;
     fn listSessions(&self) -> HostResult<Vec<TerminalSessionListEntry>>;
+    /// Creates or reuses a named session in the host's configured default terminal.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo>;
+    /// Creates or reuses a named session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo>;
     fn executeInSession(
         &self,
         sessionId: &str,

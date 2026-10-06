@@ -45,12 +45,15 @@ async function fixture(t, packagePath, output, injectedPath = cleanOnExit) {
       Net: { browserSnapshot: async () => output },
       System: {
         terminal: {
-          info: async () => ({ platform: 'macos' }),
-          async create(name) {
+          /** Describes the fixture's native macOS Bash terminal. */
+          info: async () => ({ platform: 'macos', terminal: 'native', terminalType: 'bash', types: [] }),
+          /** Creates a fixture session with the explicitly requested interpreter. */
+          async create(name, type) {
             if (!sessions.has(name)) sessions.set(name, `session-${sessions.size + 1}`);
-            return { sessionId: sessions.get(name) };
+            return { sessionId: sessions.get(name), platform: 'macos', terminal: 'native', terminalType: type };
           },
-          exec: async (sessionId) => ({ output, sessionId, exitCode: 0, timedOut: false }),
+          /** Returns complete terminal command metadata for the mocked Bash session. */
+          exec: async (sessionId) => ({ output, sessionId, platform: 'macos', terminal: 'native', terminalType: 'bash', exitCode: 0, timedOut: false }),
         },
       },
     },

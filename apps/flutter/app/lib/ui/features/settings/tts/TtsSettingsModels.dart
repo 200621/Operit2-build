@@ -5,13 +5,11 @@ part of 'TtsSettingsPanel.dart';
 class _TtsSectionData {
   const _TtsSectionData({
     required this.configs,
-    required this.currentConfigId,
     required this.providerCatalogEntries,
     required this.characterBoundConfigIds,
   });
 
   final List<core_proxy.TtsConfig> configs;
-  final String currentConfigId;
   final List<core_proxy.TtsProviderCatalogEntry> providerCatalogEntries;
   final Set<String> characterBoundConfigIds;
 }

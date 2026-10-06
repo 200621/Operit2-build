@@ -5,6 +5,8 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import '../../../common/components/PageActivityMixin.dart';
+
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
@@ -50,7 +52,8 @@ class PackageManagerScreen extends StatefulWidget {
   State<PackageManagerScreen> createState() => _PackageManagerScreenState();
 }
 
-class _PackageManagerScreenState extends State<PackageManagerScreen> {
+class _PackageManagerScreenState extends State<PackageManagerScreen>
+    with PageActivityMixin<PackageManagerScreen> {
   late PackageTab _selectedTab = widget.initialTab;
   bool _loading = true;
   bool _searchFiltering = false;
@@ -68,17 +71,29 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
   GeneratedApplicationPackageManagerCoreProxy get _packageManager =>
       widget.clients.application.packageManager();
 
-  /// Subscribes to installed catalog changes before loading the initial list.
+  /// Watches catalog changes only while the retained manager is active.
   @override
-  void initState() {
-    super.initState();
+  void onPageActivityChanged(bool active) {
+    if (!active) {
+      _searchDebounce?.cancel();
+      _searchQuery = _searchInput.trim();
+      _searchFiltering = false;
+      _catalogSubscription?.cancel();
+      _catalogSubscription = null;
+      _scopeSubscription?.cancel();
+      _scopeSubscription = null;
+      _snapshotGeneration += 1;
+      return;
+    }
+    _skillReloadRevision += 1;
+    _mcpReloadRevision += 1;
     _catalogSubscription = ToolPkgCatalogChangeBus.listen(() {
       unawaited(_loadSnapshot(rescan: false));
     });
     _scopeSubscription = widget.clients.application
         .extensionCatalogRevisionFlow()
         .listen((_) {
-          if (!mounted) return;
+          if (!mounted || !isPageActive) return;
           setState(() {
             _skillReloadRevision += 1;
             _mcpReloadRevision += 1;
@@ -109,7 +124,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
 
   /// Loads the current package manager state into the screen.
   Future<void> _loadSnapshot({bool rescan = true}) async {
-    if (!mounted) {
+    if (!mounted || !isPageActive) {
       return;
     }
     final generation = ++_snapshotGeneration;
@@ -128,6 +143,9 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
         _packageManager.getBundledExternalPackageCandidates(),
         _packageManager.getBundledExternalToolPkgContainerRuntimes(),
       ]);
+      if (!mounted || !isPageActive || generation != _snapshotGeneration) {
+        return;
+      }
       final availablePackages =
           results[0] as Map<String, core_proxy.ToolPackage>;
       final enabledPackages = results[1] as List<String>;
@@ -139,6 +157,9 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
       final bundledExternalToolPkgContainers =
           results[5] as List<core_proxy.ToolPkgContainerRuntime>;
       final pluginLoadIssues = await _packageManager.getToolPkgLoadIssues();
+      if (!mounted || !isPageActive || generation != _snapshotGeneration) {
+        return;
+      }
       final scopes = await widget.clients.application.getExtensionScopes(
         kind: 'package',
       );

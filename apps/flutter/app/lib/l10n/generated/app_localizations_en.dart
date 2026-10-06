@@ -9,6 +9,16 @@ class AppLocalizationsEn extends AppLocalizations {
   AppLocalizationsEn([String locale = 'en']) : super(locale);
 
   @override
+  String get workspaceUnsavedChangesTitle => 'Unsaved changes';
+
+  @override
+  String get workspaceUnsavedChangesMessage =>
+      'Save your changes before closing this file?';
+
+  @override
+  String get workspaceDiscardChanges => 'Discard changes';
+
+  @override
   String get askOperitHint => 'Ask Operit';
 
   @override
@@ -4317,4 +4327,15 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get deviceSpaceNoRequests => 'No requests';
+
+  @override
+  String get workspaceUndo => 'Undo';
+
+  @override
+  String get workspaceRedo => 'Redo';
+
+  @override
+  String workspaceInsertSymbol(String symbol) {
+    return 'Insert $symbol';
+  }
 }

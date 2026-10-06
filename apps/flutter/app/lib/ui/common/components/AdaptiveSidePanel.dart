@@ -4,6 +4,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'RetainedPage.dart';
+
 /// Hosts a resizable trailing panel on wide layouts and an overlay panel on phones.
 class AdaptiveSidePanel extends StatefulWidget {
   /// Creates a responsive trailing panel around the primary content.
@@ -46,6 +48,25 @@ class AdaptiveSidePanel extends StatefulWidget {
 class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
   double? _panelWidth;
   bool _resizing = false;
+  bool _closing = false;
+
+  /// Keeps the panel live only until its visible closing transition completes.
+  @override
+  void didUpdateWidget(covariant AdaptiveSidePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.open) {
+      _closing = false;
+    } else if (oldWidget.open) {
+      _closing = _animationDuration > Duration.zero;
+    }
+  }
+
+  /// Suspends the retained panel after it leaves the visible viewport.
+  void _finishPanelTransition() {
+    if (_closing && !widget.open) {
+      setState(() => _closing = false);
+    }
+  }
 
   /// Changes only geometry when the available width crosses the breakpoint.
   @override
@@ -124,6 +145,7 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
         AnimatedPositionedDirectional(
           // The dismiss barrier must not shift the retained panel's Stack slot.
           key: const ValueKey<String>('sidePanelLayer'),
+          onEnd: _finishPanelTransition,
           duration: _animationDuration,
           curve: Curves.easeOutCubic,
           top: 0,
@@ -133,7 +155,12 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           child: Stack(
             clipBehavior: Clip.none,
             children: <Widget>[
-              Positioned.fill(child: widget.panel),
+              Positioned.fill(
+                child: RetainedPage(
+                  active: widget.open || _closing,
+                  child: widget.panel,
+                ),
+              ),
               if (useWideLayout && widget.open)
                 PositionedDirectional(
                   top: 0,

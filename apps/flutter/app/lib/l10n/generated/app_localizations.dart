@@ -98,6 +98,24 @@ abstract class AppLocalizations {
     Locale('zh'),
   ];
 
+  /// No description provided for @workspaceUnsavedChangesTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Unsaved changes'**
+  String get workspaceUnsavedChangesTitle;
+
+  /// No description provided for @workspaceUnsavedChangesMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Save your changes before closing this file?'**
+  String get workspaceUnsavedChangesMessage;
+
+  /// No description provided for @workspaceDiscardChanges.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard changes'**
+  String get workspaceDiscardChanges;
+
   /// No description provided for @askOperitHint.
   ///
   /// In en, this message translates to:
@@ -7686,6 +7704,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No requests'**
   String get deviceSpaceNoRequests;
+
+  /// No description provided for @workspaceUndo.
+  ///
+  /// In en, this message translates to:
+  /// **'Undo'**
+  String get workspaceUndo;
+
+  /// No description provided for @workspaceRedo.
+  ///
+  /// In en, this message translates to:
+  /// **'Redo'**
+  String get workspaceRedo;
+
+  /// No description provided for @workspaceInsertSymbol.
+  ///
+  /// In en, this message translates to:
+  /// **'Insert {symbol}'**
+  String workspaceInsertSymbol(String symbol);
 }
 
 class _AppLocalizationsDelegate

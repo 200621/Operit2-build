@@ -114,7 +114,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(panelKey.currentState, isNull);
+    open.value = true;
+    await tester.pumpAndSettle();
     final panelState = panelKey.currentState;
+    expect(panelState, isNotNull);
     for (var cycle = 0; cycle < 3; cycle++) {
       open.value = true;
       await tester.pumpAndSettle();

@@ -321,9 +321,18 @@ impl TerminalHost for OhosTerminalHost {
 
     /// Creates or returns a named QEMU-vroot Alpine session used by tools and plugins.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
-        let backend = OhosTerminalBackend::QemuVroot;
+        self.createOrGetTypedSession(sessionName, SHELL_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses the requested interpreter in the configured QEMU-vroot backend.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        let backend = self.backendForTerminal(QEMU_VROOT_TERMINAL, terminalType)?;
         self.prepareBackend(backend)?;
-        let session = self.vrootShell.createOrGetSession(sessionName)?;
+        let session = self.vrootShell.createOrGetTypedSession(sessionName, terminalType)?;
         self.recordSession(&session.sessionId, backend)?;
         Ok(mapSessionInfo(session, backend))
     }

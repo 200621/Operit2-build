@@ -1,6 +1,6 @@
 // Generated from operit-plugin-sdk Rust declarations.
 
-import type { AppListData, AppOperationData, AppUsageTimeResultData, BluetoothBleNotificationData, BluetoothBleServicesData, BluetoothBondedDevicesData, BluetoothReadData, BluetoothScanResultData, BluetoothSessionData, BluetoothStateData, BluetoothTransferData, DeviceInfoResultData, HiddenTerminalCommandResultData, LocationData, MusicPlaybackResultData, NotificationData, SleepResultData, SystemSettingData, TerminalCommandResultData, TerminalInfoResultData, TerminalSessionCloseResultData, TerminalSessionCreationResultData, TerminalSessionScreenResultData, TerminalStreamEventData } from "./results";
+import type { AppListData, AppOperationData, AppUsageTimeResultData, BluetoothBleNotificationData, BluetoothBleServicesData, BluetoothBondedDevicesData, BluetoothReadData, BluetoothScanResultData, BluetoothSessionData, BluetoothStateData, BluetoothTransferData, DeviceInfoResultData, HiddenTerminalCommandResultData, LocationData, MusicPlaybackResultData, NotificationData, SleepResultData, SystemSettingData, TerminalCommandResultData, TerminalInfoResultData, TerminalSessionCloseResultData, TerminalSessionCreationResultData, TerminalSessionScreenResultData, TerminalStreamEventData, TerminalType } from "./results";
 
 /**
  * Provides device settings, application control, notifications, usage, and location services.
@@ -592,9 +592,10 @@ export namespace System {
     /**
      * Creates or returns an interactive terminal session with the supplied name.
      * @param sessionName Stable name used to identify the terminal session.
-     * @returns Promise resolving to the session creation result.
+     * @param type Exact interpreter type; omission requests the host's configured default terminal.
+     * @returns Promise resolving to the actual session creation result.
      */
-    function create(sessionName: string): Promise<TerminalSessionCreationResultData>;
+    function create(sessionName: string, type?: TerminalType): Promise<TerminalSessionCreationResultData>;
     /**
      * Execute a command in a terminal session.
      * @param sessionId The ID of the session.

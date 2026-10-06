@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../common/components/RetainedPage.dart';
 import '../MainLayoutController.dart';
 import '../../theme/OperitTheme.dart';
 import '../TopBarController.dart';
@@ -521,12 +522,9 @@ class _AnimatedScreenSlotState extends State<_AnimatedScreenSlot> {
     );
 
     return Positioned.fill(
-      child: Offstage(
-        offstage: !widget.isActiveInStack,
-        child: TickerMode(
-          enabled: widget.isActiveInStack,
-          child: animatedScreen,
-        ),
+      child: RetainedPage(
+        active: widget.isActiveInStack,
+        child: animatedScreen,
       ),
     );
   }

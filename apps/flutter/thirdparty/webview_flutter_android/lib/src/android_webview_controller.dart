@@ -472,6 +472,37 @@ class AndroidWebViewController extends PlatformWebViewController {
   int get webViewIdentifier =>
       android_webview.PigeonInstanceManager.instance.getIdentifier(_webView)!;
 
+  /// Installs a native ScriptHandler before future page scripts execute.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    final identifier = await const MethodChannel('operit/webview_user_scripts')
+        .invokeMethod<String>('add', {
+          'viewIdentifier': webViewIdentifier,
+          'source': buildUserScriptSource(
+            userScript,
+            platformHandlesMainFrameOnly: false,
+          ),
+        });
+    if (identifier == null) {
+      throw StateError('Android WebView did not return a script handle');
+    }
+    return identifier;
+  }
+
+  /// Removes one native document-start ScriptHandler.
+  @override
+  Future<void> removeUserScript(String identifier) =>
+      const MethodChannel('operit/webview_user_scripts').invokeMethod<void>(
+        'remove',
+        {'viewIdentifier': webViewIdentifier, 'identifier': identifier},
+      );
+
+  /// Removes application scripts without touching Android JavaScript interfaces.
+  @override
+  Future<void> removeAllUserScripts() => const MethodChannel(
+    'operit/webview_user_scripts',
+  ).invokeMethod<void>('removeAll', {'viewIdentifier': webViewIdentifier});
+
   @override
   String get localResourceScheme => 'https';
 

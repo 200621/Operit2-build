@@ -135,18 +135,15 @@ android {
 
     sourceSets.getByName("main").assets.setSrcDirs(emptyList<String>())
 
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            selectedOperitRustTargets.forEach { target ->
-                include(target.abi)
-            }
-            isUniversalApk = false
-        }
-    }
-
     buildTypes {
+        configureEach {
+            // Flutter owns ABI splits; filter native libraries only for non-split builds.
+            if (providers.gradleProperty("split-per-abi").orNull != "true") {
+                ndk.abiFilters.clear()
+                ndk.abiFilters.addAll(selectedOperitRustTargets.map { it.abi })
+            }
+        }
+
         release {
             signingConfig = signingConfigs.getByName("release")
             proguardFiles("proguard-rules.pro")

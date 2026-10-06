@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
@@ -12,6 +13,7 @@ import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart'
 import 'package:operit2/ui/features/packages/screens/PackageManagerScreen.dart';
 import 'package:operit2/ui/features/packages/dialogs/PackageEnvironmentVariablesDialog.dart';
 import 'package:operit2/ui/main/navigation/ToolPkgCatalogChangeBus.dart';
+import 'package:operit2/ui/common/components/RetainedPage.dart';
 
 /// Verifies installation notifications update an already mounted package list.
 void main() {
@@ -45,6 +47,57 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     ToolPkgCatalogChangeBus.notifyCatalogChanged();
     await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('cached manager stops catalog work and refreshes on activation', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge();
+    final active = ValueNotifier<bool>(true);
+    addTearDown(active.dispose);
+    await tester.pumpWidget(
+      OperitTheme(
+        initialThemePreferenceSnapshot:
+            UserPreferencesManager.defaultThemePreferenceSnapshot,
+        initialThemeIsReady: false,
+        unconfiguredChildEnabled: true,
+        hostInteractionHostsEnabled: false,
+        child: ValueListenableBuilder<bool>(
+          valueListenable: active,
+          child: PackageManagerScreen(
+            clients: GeneratedCoreProxyClients(bridge),
+          ),
+          builder: (context, visible, child) =>
+              RetainedPage(active: visible, child: child!),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final state = tester.state(find.byType(PackageManagerScreen));
+    expect(bridge.watchers, 1);
+    active.value = false;
+    await tester.pumpAndSettle();
+    expect(bridge.watchers, 0);
+    final reads = bridge.catalogReads;
+    bridge.installed = true;
+    for (var i = 0; i < 4; i += 1) {
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+    expect(bridge.catalogReads, reads);
+    expect(
+      tester.state(find.byType(PackageManagerScreen, skipOffstage: false)),
+      same(state),
+    );
+    active.value = true;
+    await tester.pumpAndSettle();
+    expect(bridge.watchers, 1);
+    expect(bridge.catalogReads, greaterThan(reads));
+    expect(find.text('Demo ToolPkg'), findsOneWidget);
+    expect(tester.state(find.byType(PackageManagerScreen)), same(state));
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(bridge.watchers, 0);
     expect(tester.takeException(), isNull);
   });
 
@@ -96,13 +149,22 @@ class _CatalogBridge extends OperitRuntimeBridge {
   Future<CoreEvent> watchSnapshot(CoreWatchRequest request) =>
       throw UnimplementedError();
 
-  /// Rejects stream watches outside this catalog fixture.
+  /// Exposes the catalog revision stream with observable listener ownership.
   @override
-  Stream<CoreEvent> watchStream(CoreWatchRequest request) =>
-      throw UnimplementedError();
+  Stream<CoreEvent> watchStream(CoreWatchRequest request) {
+    if (request.propertyName != 'extensionCatalogRevisionFlow') {
+      throw StateError('Unexpected catalog watch: ${request.propertyName}');
+    }
+    return Stream<CoreEvent>.multi((controller) {
+      watchers += 1;
+      controller.onCancel = () => watchers -= 1;
+    });
+  }
 
   bool installed = false;
   int scans = 0;
+  int watchers = 0;
+  int catalogReads = 0;
   int environmentCatalogReads = 0;
 
   /// Encodes catalog responses with the native bridge envelope.
@@ -120,9 +182,14 @@ class _CatalogBridge extends OperitRuntimeBridge {
       case 'getAvailablePackages':
         environmentCatalogReads++;
         return <String, Object?>{};
+      case 'getExtensionScopes':
+        return installed
+            ? <String, Object?>{'demo_toolpkg': 'device'}
+            : <String, Object?>{};
       case 'getExecutableAvailablePackages':
         return <String, Object?>{};
       case 'getToolPkgContainerRuntimes':
+        catalogReads += 1;
         return installed ? [_pluginRuntime().toJson()] : [];
       case 'getEnabledPackageNames':
       case 'getToolPkgContainerOrder':

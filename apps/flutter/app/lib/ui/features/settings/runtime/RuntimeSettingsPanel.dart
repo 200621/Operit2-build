@@ -3,6 +3,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 
+import '../../../common/components/PageActivityMixin.dart';
+
 import '../../../../core/bridge/PlatformCoreProxy.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
@@ -41,8 +43,10 @@ class RuntimeSettingsPanel extends StatefulWidget {
   State<RuntimeSettingsPanel> createState() => _RuntimeSettingsPanelState();
 }
 
-class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
+class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
+    with PageActivityMixin<RuntimeSettingsPanel> {
   bool _busy = false;
+  int _pageGeneration = 0;
   Map<String, generated.SpaceJoinRequest> _spaceJoins = {};
   String? _connectionMessage;
   bool _connectionFailed = false;
@@ -61,9 +65,17 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
     ProxyCoreRuntimeBridge(coreProxy: platformCoreProxy),
   );
 
+  /// Watches device presentation state only while this page is active.
   @override
-  void initState() {
-    super.initState();
+  void onPageActivityChanged(bool active) {
+    _pageGeneration += 1;
+    if (!active) {
+      _pairedDevicesSubscription?.cancel();
+      _pairedDevicesSubscription = null;
+      _pairedDeviceStatusesSubscription?.cancel();
+      _pairedDeviceStatusesSubscription = null;
+      return;
+    }
     unawaited(_refreshCurrentDeviceSpace());
     _watchPairedDevices();
     _watchPairedDeviceStatuses();
@@ -122,7 +134,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
   void _applyPairedDeviceStatuses(
     Map<String, generated.RuntimePairedDeviceStatus> statuses,
   ) {
-    if (!mounted) {
+    if (!mounted || !isPageActive) {
       return;
     }
     setState(() {
@@ -144,19 +156,22 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
 
   /// Reads the synchronized device space projection from the current device.
   Future<void> _refreshCurrentDeviceSpace() async {
+    if (!mounted || !isPageActive) return;
+    final generation = _pageGeneration;
     try {
       final deviceSpace = await _clients.server.runtimeRemoteLinkService
           .deviceSpace();
+      if (!mounted || !isPageActive || generation != _pageGeneration) return;
       final topology = await _clients.server.runtimeRemoteLinkService
           .deviceSpaceTopology();
-      if (mounted) {
+      if (mounted && isPageActive && generation == _pageGeneration) {
         setState(() {
           _currentDeviceSpace = deviceSpace;
           _topology = topology;
         });
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && isPageActive && generation == _pageGeneration) {
         setState(() {
           _connectionMessage = error.toString();
           _connectionFailed = true;
@@ -186,7 +201,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
 
   /// Applies one paired-device snapshot without network probing.
   void _applyPairedDevices(Map<String, generated.RuntimePairedDevice> devices) {
-    if (!mounted) {
+    if (!mounted || !isPageActive) {
       return;
     }
     setState(() {

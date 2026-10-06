@@ -88,6 +88,7 @@ class WorkspaceTabContent extends StatelessWidget {
   final VoidCallback onUnbindWorkspace;
   final MarkdownContentSplitter splitMarkdownContent;
 
+  /// Builds the selected tab with shared workspace capability callbacks.
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -187,6 +188,7 @@ class WorkspaceTabContent extends StatelessWidget {
         return WorkspaceFilePreviewContent(
           tab: tab,
           onReadWorkspaceFileBytes: onReadWorkspaceFileBytes,
+          onWriteWorkspaceFileBytes: onWriteWorkspaceFileBytes,
           onOpenWorkspaceFile: onOpenWorkspaceFile,
           onOpenBrowser: onOpenBrowser,
           splitMarkdownContent: splitMarkdownContent,

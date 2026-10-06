@@ -20,6 +20,8 @@ class PackageSliverList extends StatelessWidget {
 
   final int itemCount;
   final IndexedWidgetBuilder itemBuilder;
+
+  /// The target maximum width used to choose the number of columns.
   final double maxItemWidth;
   final double minItemWidth;
   final double horizontalSpacing;
@@ -42,13 +44,10 @@ class PackageSliverList extends StatelessWidget {
     );
   }
 
-  /// Builds variable-height rows with independent card repaint boundaries.
+  /// Builds full-width variable-height rows with isolated card repaint boundaries.
   Widget _buildRows(double width) {
     final columnCount = _columnCountForWidth(width);
     final rowCount = _rowCountForItems(itemCount, columnCount);
-    final naturalItemWidth =
-        (width - horizontalSpacing * (columnCount - 1)) / columnCount;
-    final itemWidth = math.min(maxItemWidth, naturalItemWidth).toDouble();
     return SliverList(
       delegate: SliverChildBuilderDelegate(
         (context, rowIndex) {
@@ -60,8 +59,7 @@ class PackageSliverList extends StatelessWidget {
             children: <Widget>[
               for (var offset = 0; offset < visibleCount; offset++) ...<Widget>[
                 if (offset > 0) SizedBox(width: horizontalSpacing),
-                SizedBox(
-                  width: itemWidth,
+                Expanded(
                   child: RepaintBoundary(
                     child: itemBuilder(context, firstIndex + offset),
                   ),
@@ -76,7 +74,7 @@ class PackageSliverList extends StatelessWidget {
     );
   }
 
-  /// Calculates the number of columns that respect the item width bounds.
+  /// Chooses columns using the target width and minimum multi-column card width.
   int _columnCountForWidth(double width) {
     var count = math.max(
       1,

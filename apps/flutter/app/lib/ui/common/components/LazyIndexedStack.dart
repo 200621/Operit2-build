@@ -2,6 +2,8 @@
 
 import 'package:flutter/widgets.dart';
 
+import 'RetainedPage.dart';
+
 class LazyIndexedStack extends StatefulWidget {
   const LazyIndexedStack({
     super.key,
@@ -40,6 +42,7 @@ class _LazyIndexedStackState extends State<LazyIndexedStack> {
     }
   }
 
+  /// Mounts visited tabs while suspending every nonselected tab subtree.
   @override
   Widget build(BuildContext context) {
     return IndexedStack(
@@ -50,7 +53,12 @@ class _LazyIndexedStackState extends State<LazyIndexedStack> {
         }
         return KeyedSubtree(
           key: ValueKey<int>(index),
-          child: widget.itemBuilder(context, index),
+          child: RetainedPage(
+            active: index == widget.index,
+            child: Builder(
+              builder: (context) => widget.itemBuilder(context, index),
+            ),
+          ),
         );
       }),
     );

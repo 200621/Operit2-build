@@ -130,6 +130,16 @@ class WebViewController {
   Future<void> setPreferredColorScheme(Brightness brightness) =>
       platform.setPreferredColorScheme(brightness);
 
+  /// Registers document-start JavaScript through the current WebView host.
+  Future<String> addDocumentStartJavaScript(String source) =>
+      platform.addUserScript(
+        WebViewUserScript(source: source, forMainFrameOnly: false),
+      );
+
+  /// Removes one document-start registration through the current WebView host.
+  Future<void> removeDocumentStartJavaScript(String identifier) =>
+      platform.removeUserScript(identifier);
+
   /// Scheme for native, socket-free resources; null on unsupported platforms.
   String? get localResourceScheme => platform.localResourceScheme;
 

@@ -16,10 +16,12 @@ import 'html_preview/WorkspaceHtmlPreviewWidget.dart';
 import 'WorkspaceTabModels.dart';
 
 class WorkspaceFilePreviewContent extends StatelessWidget {
+  /// Creates a file view with shared workspace read and write capabilities.
   const WorkspaceFilePreviewContent({
     super.key,
     required this.tab,
     required this.onReadWorkspaceFileBytes,
+    required this.onWriteWorkspaceFileBytes,
     required this.onOpenWorkspaceFile,
     required this.onOpenBrowser,
     required this.splitMarkdownContent,
@@ -27,6 +29,8 @@ class WorkspaceFilePreviewContent extends StatelessWidget {
 
   final WorkspaceTab tab;
   final Future<Uint8List> Function(String path) onReadWorkspaceFileBytes;
+  final Future<void> Function(String path, Uint8List bytes)
+  onWriteWorkspaceFileBytes;
   final Future<void> Function(String path) onOpenWorkspaceFile;
   final void Function({
     String? url,
@@ -36,20 +40,17 @@ class WorkspaceFilePreviewContent extends StatelessWidget {
   onOpenBrowser;
   final MarkdownContentSplitter splitMarkdownContent;
 
+  /// Routes editable text formats to the editor and other formats to previews.
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final kind = tab.previewKind ?? WorkspaceFilePreviewKind.binary;
     switch (kind) {
       case WorkspaceFilePreviewKind.text:
+      case WorkspaceFilePreviewKind.markdown:
         return WorkspaceTextPreview(
           tab: tab,
-          onOpenBrowser: onOpenBrowser,
-          splitMarkdownContent: splitMarkdownContent,
-        );
-      case WorkspaceFilePreviewKind.markdown:
-        return WorkspaceMarkdownPreview(
-          tab: tab,
+          onWriteWorkspaceFileBytes: onWriteWorkspaceFileBytes,
           onOpenBrowser: onOpenBrowser,
           splitMarkdownContent: splitMarkdownContent,
         );

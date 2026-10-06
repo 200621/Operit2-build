@@ -221,6 +221,27 @@ abstract class PlatformWebViewController extends PlatformInterface {
     );
   }
 
+  /// Registers a native document-start script and returns its host-owned handle.
+  Future<String> addUserScript(WebViewUserScript userScript) {
+    throw UnimplementedError(
+      'addUserScript must be implemented by the WebView host',
+    );
+  }
+
+  /// Removes one native document-start script without removing channel scripts.
+  Future<void> removeUserScript(String identifier) {
+    throw UnimplementedError(
+      'removeUserScript must be implemented by the WebView host',
+    );
+  }
+
+  /// Removes application-owned scripts while retaining the host's bridge scripts.
+  Future<void> removeAllUserScripts() {
+    throw UnimplementedError(
+      'removeAllUserScripts must be implemented by the WebView host',
+    );
+  }
+
   /// Runs the given JavaScript in the context of the current page.
   ///
   /// The Future completes with an error if a JavaScript error occurred.

@@ -560,9 +560,14 @@ pub trait SystemTerminalHost: Send + Sync {
     ///
     ///Creates or returns an interactive terminal session with the supplied name.
     ///@param sessionName Stable name used to identify the terminal session.
-    ///@returns Promise resolving to the session creation result.
+    ///@param type Exact interpreter type; omission requests the host's configured default terminal.
+    ///@returns Promise resolving to the actual session creation result.
     ///
-    fn create(&self, sessionName: String) -> JsFuture<TerminalSessionCreationResultData>;
+    fn create(
+        &self,
+        sessionName: String,
+        r#type: Option<TerminalType>,
+    ) -> JsFuture<TerminalSessionCreationResultData>;
     ///
     ///Execute a command in a terminal session.
     ///@param sessionId The ID of the session.

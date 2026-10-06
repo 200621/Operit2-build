@@ -1,3 +1,4 @@
+import { FrameCallback } from '@kit.ArkUI';
 import web_webview from '@ohos.web.webview';
 import PlatformView from '@ohos/flutter_ohos/src/main/ets/plugin/platform/PlatformView';
 import { WebViewPlatformView } from './WebViewPlatformView';
@@ -6,6 +7,30 @@ import { WebViewPlatformView } from './WebViewPlatformView';
 export declare class Params {
   direction: Direction;
   platformView: PlatformView;
+}
+
+/** Completes a native script-list update only after the ArkUI frame is committed. */
+class DocumentStartScriptCommit extends FrameCallback {
+  private settled: boolean = false;
+
+  /** Retains the platform-channel acknowledgement callbacks for one render frame. */
+  constructor(private complete: () => void, private fail: (error: Error) => void) {
+    super();
+  }
+
+  /** Acknowledges registration after native Web attributes have been applied. */
+  onIdle(_timeLeftInNano: number): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.complete();
+  }
+
+  /** Rejects an unfinished registration when the native component is detached. */
+  cancel(): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.fail(new Error('WebView detached before document-start scripts were committed'));
+  }
 }
 
 @Component
@@ -18,16 +43,52 @@ export struct OhosWebView {
 
   @State textZoomRatio: number = this.webView.getWebSettings().getTextZoom();
   @State disposed: boolean = false;
+  @State documentStartScripts: Array<ScriptItem> = [];
+  private scriptCommits: Set<DocumentStartScriptCommit> = new Set();
 
+  /** Binds deterministic script registration to this native Web component. */
   aboutToAppear(): void {
+    this.documentStartScripts = this.webView.getDocumentStartScripts();
+    this.webView.bindDocumentStartScriptHost((scripts: Array<ScriptItem>): Promise<void> => this.commitDocumentStartScripts(scripts));
     this.webView.getWebSettings().onTextZoomChanged((ratio: number) => {
       this.textZoomRatio = ratio;
     });
     this.webView.setOnDisposeCallback(() => {
       this.disposed = true;
+      this.cancelScriptCommits();
     });
   }
 
+  /** Commits a new native script list before the channel permits navigation. */
+  private commitDocumentStartScripts(scripts: Array<ScriptItem>): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error('WebView is disposed'));
+    this.documentStartScripts = scripts;
+    return new Promise((resolve, reject) => {
+      const commit = new DocumentStartScriptCommit((): void => {
+        this.scriptCommits.delete(commit);
+        resolve();
+      }, (error: Error): void => {
+        this.scriptCommits.delete(commit);
+        reject(error);
+      });
+      this.scriptCommits.add(commit);
+      this.getUIContext().postFrameCallback(commit);
+    });
+  }
+
+  /** Rejects pending frame acknowledgements when the component disappears. */
+  aboutToDisappear(): void {
+    this.webView.unbindDocumentStartScriptHost();
+    this.cancelScriptCommits();
+  }
+
+  /** Cancels all in-flight registrations without reporting false success. */
+  private cancelScriptCommits(): void {
+    this.scriptCommits.forEach((commit: DocumentStartScriptCommit): void => commit.cancel());
+    this.scriptCommits.clear();
+  }
+
+  /** Applies the registered scripts through ArkWeb's document-start attribute. */
   build() {
     Column() {
       if (!this.disposed) {
@@ -40,6 +101,7 @@ export struct OhosWebView {
           .allowWindowOpenMethod(this.webView.getWebSettings().getJavaScriptCanOpenWindowsAutomatically())
           .multiWindowAccess(false)
           .javaScriptAccess(this.webView.getWebSettings().getJavaScriptEnabled())
+          .runJavaScriptOnDocumentStart(this.documentStartScripts)
           .mediaPlayGestureAccess(this.webView.getWebSettings().getMediaPlaybackRequiresUserGesture())
           .zoomAccess(this.webView.getWebSettings().getSupportZoom())
           .overviewModeAccess(this.webView.getWebSettings().getLoadWithOverviewMode())

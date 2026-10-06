@@ -147,7 +147,7 @@ class AndroidRuntimeHost(context: Context) {
         runtimeExecutor.execute(block)
     }
 
-    /** Delivers an Android lifecycle event after the native Core runtime is available. */
+    /** Queues Android host and lifecycle events without waiting for native Core processing. */
     fun emitRuntimeEvent(event: org.json.JSONObject) {
         val eventJson = event.toString()
         synchronized(runtimeLock) {
@@ -160,14 +160,14 @@ class AndroidRuntimeHost(context: Context) {
         }
     }
 
-    /** Schedules queued lifecycle events while the caller holds the state lock. */
+    /** Schedules queued host events while the caller holds the state lock. */
     private fun flushPendingRuntimeEventsLocked() {
         while (pendingRuntimeEvents.isNotEmpty()) {
             scheduleRuntimeEventLocked(runtimeHandle, pendingRuntimeEvents.removeFirst())
         }
     }
 
-    /** Dispatches one lifecycle event to the worker pool without running JNI under the state lock. */
+    /** Dispatches one host event to the worker pool without running JNI under the state lock. */
     private fun scheduleRuntimeEventLocked(handle: Long, eventJson: String) {
         runtimeExecutor.execute {
             try {

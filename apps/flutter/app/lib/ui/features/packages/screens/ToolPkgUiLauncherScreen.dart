@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import '../../../common/components/PageActivityMixin.dart';
 import '../../../../core/link/CoreLinkProtocol.dart';
 import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/theme/PluginThemeSnapshot.dart';

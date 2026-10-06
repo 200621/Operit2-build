@@ -488,6 +488,8 @@ mod idle_poll_tests {
         fn closePtySession(&self, sessionId: &str) -> HostResult<()> { unimplemented!() }
         fn listSessions(&self) -> HostResult<Vec<TerminalSessionListEntry>> { Ok(Vec::new()) }
         fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> { unimplemented!() }
+        /// Rejects typed session creation in this output-stream-only test host.
+        fn createOrGetTypedSession(&self, _: &str, _: &str) -> HostResult<TerminalSessionInfo> { unimplemented!() }
         fn executeInSession(
         &self,
         sessionId: &str,

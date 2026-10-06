@@ -242,7 +242,7 @@ class _SttConfigDialogState extends State<_SttConfigDialog> {
     );
   }
 
-  /// Builds a catalog-backed or custom STT model selector.
+  /// Builds an editable remote model field or an installed local model selector.
   Widget _buildModelField(bool localModel) {
     if (_loadingModels) {
       return const Padding(
@@ -274,17 +274,37 @@ class _SttConfigDialogState extends State<_SttConfigDialog> {
         ),
       );
     }
+    if (!localModel) {
+      return _field(
+        _modelController,
+        '模型',
+        requiredField: true,
+        helperText: '填写供应商支持的模型 ID，也可从预设中选择',
+        suffixIcon: _availableModels.isEmpty
+            ? null
+            : PopupMenuButton<String>(
+                tooltip: '选择预设模型',
+                icon: const Icon(Icons.arrow_drop_down),
+                onSelected: (model) => _modelController.text = model,
+                itemBuilder: (context) => _availableModels
+                    .map(
+                      (model) => PopupMenuItem<String>(
+                        value: model.model,
+                        child: Text(model.displayName),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+      );
+    }
     if (_availableModels.isEmpty) {
-      if (localModel) {
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: InputDecorator(
-            decoration: const InputDecoration(labelText: '模型'),
-            child: const Text('没有已安装的 STT 本地模型'),
-          ),
-        );
-      }
-      return _field(_modelController, '模型', requiredField: true);
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 10),
+        child: InputDecorator(
+          decoration: InputDecoration(labelText: '模型'),
+          child: Text('没有已安装的 STT 本地模型'),
+        ),
+      );
     }
     String? selectedModel;
     for (final model in _availableModels) {
@@ -329,12 +349,18 @@ class _SttConfigDialogState extends State<_SttConfigDialog> {
     bool obscureText = false,
     bool requiredField = false,
     int minLines = 1,
+    String? helperText,
+    Widget? suffixIcon,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: TextFormField(
         controller: controller,
-        decoration: InputDecoration(labelText: label),
+        decoration: InputDecoration(
+          labelText: label,
+          helperText: helperText,
+          suffixIcon: suffixIcon,
+        ),
         obscureText: obscureText,
         minLines: minLines,
         maxLines: obscureText ? 1 : (minLines == 1 ? 1 : 8),

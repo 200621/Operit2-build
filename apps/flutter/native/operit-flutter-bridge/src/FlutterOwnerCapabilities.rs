@@ -680,6 +680,17 @@ impl operit_host_api::TerminalHost for RuntimeSessionPublishingTerminalHost {
         Ok(session)
     }
 
+    /// Creates or returns an exactly typed session and publishes the updated session list.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> operit_host_api::HostResult<operit_host_api::TerminalSessionInfo> {
+        let session = self.inner.createOrGetTypedSession(sessionName, terminalType)?;
+        self.publish_sessions()?;
+        Ok(session)
+    }
+
     /// Executes a command inside an existing terminal session.
     fn executeInSession(
         &self,

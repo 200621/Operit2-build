@@ -1,5 +1,8 @@
 {
   "@@locale": "zh",
+  "workspaceUnsavedChangesTitle": "有未保存的修改",
+  "workspaceUnsavedChangesMessage": "关闭此文件前，要保存你的修改吗？",
+  "workspaceDiscardChanges": "放弃修改",
   "askOperitHint": "向 Operit 提问",
   "aiChat": "AI聊天",
   "fullscreenInput": "全屏输入",
@@ -2235,5 +2238,9 @@
   "devicePickerManual": "通过地址连接",
   "deviceSpaceMyRequests": "我发出的",
   "deviceSpaceMyReviews": "待我审批",
-  "deviceSpaceNoRequests": "暂无申请"
+  "deviceSpaceNoRequests": "暂无申请",
+  "workspaceUndo": "撤销",
+  "workspaceRedo": "重做",
+  "workspaceInsertSymbol": "插入 {symbol}",
+  "@workspaceInsertSymbol": {"placeholders": {"symbol": {"type": "String"}}}
 }
