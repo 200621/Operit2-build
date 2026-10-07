@@ -532,7 +532,7 @@ provide implicitly:
    ```powershell
    cd plugins\packages\buildin\workflow
    corepack pnpm install --frozen-lockfile
-   cd ..\..\..
+   cd ..\..\..\..
    ```
 
 4. **Android runtime (rootfs) artifacts**. `liboperit_busybox.so`, `liboperit_proot.so`,
