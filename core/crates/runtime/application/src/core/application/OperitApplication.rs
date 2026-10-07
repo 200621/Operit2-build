@@ -472,16 +472,33 @@ impl OperitApplication {
     /// Lists explicit installation scopes, including subpackages that inherit their container scope.
     #[allow(non_snake_case)]
     pub fn getExtensionScopes(&self, kind: String) -> Result<BTreeMap<String, String>, String> {
-        match kind.as_str() {
-            "package" => {}
+        let packageOwners = match kind.as_str() {
+            "package" => {
+                let manager = self.packageManager();
+                let manager = manager.lock().map_err(|error| error.to_string())?;
+                Some(
+                    manager
+                        .getTopLevelAvailablePackages()
+                        .into_keys()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            }
             "skill" => {
                 self.skillRepository().getAvailableSkillPackages();
+                None
             }
-            "mcp" => {}
+            "mcp" => None,
             _ => return Err(format!("Unknown extension kind: {kind}")),
-        }
+        };
         let mut result = BTreeMap::new();
         for record in operit_store::ExtensionStore::ExtensionStore::default().records(&kind)? {
+            // Stale owners and rejected packages must not invalidate the loaded catalog's scopes.
+            if packageOwners
+                .as_ref()
+                .is_some_and(|owners| !owners.contains(&record.id))
+            {
+                continue;
+            }
             let scope = if record
                 .settings
                 .get("builtin")

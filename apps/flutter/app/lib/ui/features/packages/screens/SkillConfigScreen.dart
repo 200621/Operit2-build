@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../common/components/M3LoadingIndicator.dart';
+import '../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../components/EmptyState.dart';
 import '../components/PackageGrid.dart';
@@ -211,6 +212,10 @@ class _SkillConfigScreenState extends State<SkillConfigScreen> {
         return _SkillDetailsDialog(
           skill: skill,
           content: content,
+          splitMarkdownContent: (content) => widget
+              .clients
+              .chatRuntimeHolderMain
+              .splitMarkdownContent(content: content),
           onDelete: () async {
             Navigator.of(context).pop();
             final scaffoldMessenger = ScaffoldMessenger.of(this.context);
@@ -620,11 +625,13 @@ class _SkillDetailsDialog extends StatelessWidget {
   const _SkillDetailsDialog({
     required this.skill,
     required this.content,
+    required this.splitMarkdownContent,
     required this.onDelete,
   });
 
   final core_proxy.SkillPackage skill;
   final String? content;
+  final MarkdownContentSplitter splitMarkdownContent;
   final AsyncCallback onDelete;
 
   @override
@@ -632,8 +639,9 @@ class _SkillDetailsDialog extends StatelessWidget {
     return AlertDialog(
       icon: const Icon(Icons.build_outlined),
       title: Text(skill.name),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 620, maxHeight: 520),
+      content: SizedBox(
+        width: 620,
+        height: 520,
         child: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -645,7 +653,13 @@ class _SkillDetailsDialog extends StatelessWidget {
               Text('入口: ${skill.skillFile}'),
               if (content != null) ...<Widget>[
                 const SizedBox(height: 12),
-                SelectableText(content!),
+                StreamMarkdownRenderer(
+                  content: content!,
+                  isStreaming: false,
+                  textColor: Theme.of(context).colorScheme.onSurface,
+                  backgroundColor: Theme.of(context).colorScheme.surface,
+                  splitMarkdownContent: splitMarkdownContent,
+                ),
               ],
             ],
           ),

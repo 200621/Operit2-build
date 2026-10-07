@@ -224,7 +224,7 @@ fn select_segment<'a>(value: &'a Value, segment: &str) -> Option<&'a Value> {
     let mut current = value;
     let mut rest = segment;
     let name_end = rest.find('[').unwrap_or(rest.len());
-    let name = &rest[..nameEnd];
+    let name = &rest[..name_end];
     if !name.is_empty() {
         current = current.get(name)?;
     }

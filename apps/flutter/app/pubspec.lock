@@ -359,7 +359,7 @@ packages:
     source: path
     version: "2.7.0"
   file_selector_web:
-    dependency: "direct overridden"
+    dependency: "direct dev"
     description:
       path: "../thirdparty/file_selector_web"
       relative: true

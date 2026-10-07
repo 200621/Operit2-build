@@ -462,5 +462,6 @@ fn pluginsSourceRoot(manifest_dir: &Path) -> PathBuf {
         .join("..")
         .join("..")
         .join("..")
+        .join("..")
         .join("plugins")
 }
