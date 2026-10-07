@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:web/web.dart';
 
+import 'blob_xfile.dart';
+
 /// Class to manipulate the DOM with the intention of reading files from it.
 class DomHelper {
   /// Default constructor, initializes the container DOM element.
@@ -70,11 +72,5 @@ class DomHelper {
     return completer.future;
   }
 
-  XFile _convertFileToXFile(File file) => XFile(
-    mimeType: file.type,
-    URL.createObjectURL(file),
-    name: file.name,
-    length: file.size,
-    lastModified: DateTime.fromMillisecondsSinceEpoch(file.lastModified),
-  );
+  XFile _convertFileToXFile(File file) => BlobXFile(file);
 }

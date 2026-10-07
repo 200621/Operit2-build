@@ -95,6 +95,17 @@ void main() {
           );
           await tester.pumpAndSettle();
 
+          final modelLabel = find.textContaining('gpt-6.1-sol · OpenAI');
+          expect(modelLabel, findsOneWidget);
+          final modelText = tester.widget<Text>(modelLabel);
+          expect(modelText.maxLines, isNull);
+          expect(modelText.overflow, isNot(TextOverflow.ellipsis));
+          expect(modelText.softWrap, isTrue);
+          expect(
+            tester.renderObject<RenderParagraph>(modelLabel).didExceedMaxLines,
+            isFalse,
+          );
+
           final metadata = find.byWidgetPredicate(
             (widget) =>
                 widget is Text && (widget.data?.contains('↑29.2k') ?? false),

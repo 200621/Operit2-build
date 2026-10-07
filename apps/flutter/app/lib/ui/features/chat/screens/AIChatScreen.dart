@@ -4,10 +4,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:file_selector/file_selector.dart';
+
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:mime/mime.dart';
 
+import '../../../../core/host/SelectedFileInput.dart';
 import '../../../../core/link/CoreLinkProtocol.dart';
 import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
@@ -328,10 +329,16 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
       final descriptor = await _viewModel.clients.servicesRuntimeHostInfoService
           .runtimeHostDescriptor();
       if (!mounted) return;
-      setState(() => _attachmentHostCapabilities = descriptor.capabilities.toSet());
+      setState(
+        () => _attachmentHostCapabilities = descriptor.capabilities.toSet(),
+      );
     } catch (error, stackTrace) {
-      ClientLogger.e('Unable to read attachment host capabilities',
-        tag: 'AIChatScreen', error: error, stackTrace: stackTrace);
+      ClientLogger.e(
+        'Unable to read attachment host capabilities',
+        tag: 'AIChatScreen',
+        error: error,
+        stackTrace: stackTrace,
+      );
       if (mounted) _showLocalToast('无法读取附件 Host 能力：$error');
     }
   }
@@ -345,8 +352,12 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     try {
       await action();
     } catch (error, stackTrace) {
-      ClientLogger.e('Attachment action failed', tag: 'AIChatScreen',
-        error: error, stackTrace: stackTrace);
+      ClientLogger.e(
+        'Attachment action failed',
+        tag: 'AIChatScreen',
+        error: error,
+        stackTrace: stackTrace,
+      );
       if (mounted) _showLocalToast('添加附件失败：$error');
     }
   }
@@ -1088,38 +1099,61 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _publishChatContentData();
   }
 
-  /// Selects image files through the registered Flutter file selector.
-  Future<void> _handleAttachImage() async {
-    const imageGroup = XTypeGroup(
-      label: 'image',
-      extensions: <String>['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif', 'heic'],
-    );
-    final files = await openFiles(
-      acceptedTypeGroups: const <XTypeGroup>[imageGroup],
-    );
-    await _handleSelectedAttachmentFiles(files);
-  }
+  /// Selects only image metadata and streams content into the receiving Host.
+  Future<void> _handleAttachImage() =>
+      _handleSelectedAttachments(imagesOnly: true);
 
-  /// Selects files through the registered Flutter file selector.
-  Future<void> _handleAttachFile() async {
-    final files = await openFiles();
-    await _handleSelectedAttachmentFiles(files);
-  }
+  /// Selects file metadata without materializing complete files in the picker.
+  Future<void> _handleAttachFile() => _handleSelectedAttachments();
 
-  /// Transfers selected bytes instead of exposing picker paths to the runtime.
-  Future<void> _handleSelectedAttachmentFiles(List<XFile> files) async {
-    for (final file in files) {
-      final bytes = await file.readAsBytes();
-      await _viewModel.attachTransferredFile(
-        TransferredFileAttachmentPayload(fileName: file.name, bytes: bytes),
+  Future<void> _handleSelectedAttachments({bool imagesOnly = false}) async {
+    var files = <SelectedFileInput>[];
+    final chatId = _currentChatId;
+    try {
+      files = await SelectedFileInput.pick(imagesOnly: imagesOnly);
+      for (final file in files) {
+        if (!mounted || _currentChatId != chatId) break;
+        await _viewModel.attachSelectedFile(
+          file,
+          expectedChatId: chatId,
+          isCancelled: () => !mounted || _currentChatId != chatId,
+        );
+      }
+    } catch (error, stackTrace) {
+      ClientLogger.e(
+        'Failed to upload selected attachment',
+        tag: 'AIChatScreen',
+        error: error,
+        stackTrace: stackTrace,
       );
+      if (mounted) _showLocalToast('无法添加附件: $error');
+    } finally {
+      // Also release later selections if an upload fails or the screen is closed.
+      for (final file in files) {
+        try {
+          await file.close();
+        } catch (error) {
+          ClientLogger.e(
+            'Failed to close selected attachment',
+            tag: 'AIChatScreen',
+            error: error,
+          );
+        }
+      }
+      if (mounted) await _refreshAttachments();
     }
-    await _refreshAttachments();
   }
 
   Future<void> _handleAttachmentPaths(List<String> paths) async {
+    final chatId = _currentChatId;
     for (final path in paths) {
-      await _viewModel.handleAttachment(path);
+      if (!mounted || _currentChatId != chatId) break;
+      final input = await SelectedFileInput.fromXFile(XFile(path));
+      await _viewModel.attachSelectedFile(
+        input,
+        expectedChatId: chatId,
+        isCancelled: () => !mounted || _currentChatId != chatId,
+      );
     }
     await _refreshAttachments();
   }
@@ -1181,28 +1215,32 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     );
   }
 
-  /// Transfers photo bytes so browser blobs and local files share one attachment path.
+  /// Streams captured photos after inspecting only a bounded image header.
   Future<void> _handleCapturedPhotos(List<XFile> files) async {
+    final chatId = _currentChatId;
     for (final file in files) {
-      final bytes = await file.readAsBytes();
-      if (!mounted) return;
+      if (!mounted || _currentChatId != chatId) return;
+      final header = await file.openRead(0, 32).first;
       final mimeType =
-          lookupMimeType(file.name, headerBytes: bytes) ??
+          lookupMimeType(file.name, headerBytes: header) ??
           file.mimeType ??
           'image/jpeg';
       if (!mimeType.startsWith('image/')) {
         throw StateError('Camera returned a non-image file');
       }
-      await _viewModel.attachPastedImage(
-        PastedImageAttachmentPayload.fromBytes(
-          fileName:
-              'camera_${DateTime.now().microsecondsSinceEpoch}.${extensionFromMime(mimeType)}',
-          mimeType: mimeType,
-          bytes: bytes,
-        ),
+      final input = await SelectedFileInput.fromXFile(
+        file,
+        name:
+            'camera_${DateTime.now().microsecondsSinceEpoch}.${extensionFromMime(mimeType)}',
+        mimeType: mimeType,
+      );
+      await _viewModel.attachSelectedFile(
+        input,
+        expectedChatId: chatId,
+        isCancelled: () => !mounted || _currentChatId != chatId,
       );
     }
-    await _refreshAttachments();
+    if (mounted) await _refreshAttachments();
   }
 
   Future<void> _handleTakePhoto() async {
@@ -2321,8 +2359,12 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
           onSendPendingQueueMessage: _sendPendingQueueMessage,
           attachments: data.attachments,
           onAttachImage: () => _runAttachmentAction(_handleAttachImage),
-          onTakePhoto: ImagePickerPlatform.instance.supportsImageSource(ImageSource.camera)
-              ? _handleTakePhoto : null,
+          onTakePhoto:
+              ImagePickerPlatform.instance.supportsImageSource(
+                ImageSource.camera,
+              )
+              ? _handleTakePhoto
+              : null,
           onAttachMemory: _handleAttachMemory,
           onAttachFile: () => _runAttachmentAction(_handleAttachFile),
           onAttachFiles: (paths) {
@@ -2343,15 +2385,23 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
               return null;
             });
           },
-          onAttachScreenContent: _hasAttachmentHostCapability('screen.capture') &&
+          onAttachScreenContent:
+              _hasAttachmentHostCapability('screen.capture') &&
                   _hasAttachmentHostCapability('ocr.recognition')
-              ? () => _runAttachmentAction(() => _handleSpecialAttachment('screen_capture'))
+              ? () => _runAttachmentAction(
+                  () => _handleSpecialAttachment('screen_capture'),
+                )
               : null,
-          onAttachNotifications: _hasAttachmentHostCapability('system.notifications.read')
-              ? () => _runAttachmentAction(() => _handleSpecialAttachment('notifications_capture'))
+          onAttachNotifications:
+              _hasAttachmentHostCapability('system.notifications.read')
+              ? () => _runAttachmentAction(
+                  () => _handleSpecialAttachment('notifications_capture'),
+                )
               : null,
           onAttachLocation: _hasAttachmentHostCapability('system.location')
-              ? () => _runAttachmentAction(() => _handleSpecialAttachment('location_capture'))
+              ? () => _runAttachmentAction(
+                  () => _handleSpecialAttachment('location_capture'),
+                )
               : null,
           onAttachPackage: (packageName) {
             _handleAttachPackage(packageName).catchError((

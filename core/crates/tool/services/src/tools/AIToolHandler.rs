@@ -406,6 +406,19 @@ impl AIToolHandler {
             .clone()
     }
 
+    /// Installs the live Core command callback after the local application has been assembled.
+    #[allow(non_snake_case)]
+    pub fn setCoreCommandExecutor(
+        &self,
+        executor: operit_host_api::HostManager::CoreCommandExecutor,
+    ) {
+        self.inner
+            .lock()
+            .expect("AIToolHandler mutex poisoned")
+            .context
+            .coreCommandExecutor = Some(executor);
+    }
+
     /// Returns the dependency set associated with this handler.
     #[allow(non_snake_case)]
     pub fn runtimeDependencies(&self) -> ToolRuntimeDependencies {

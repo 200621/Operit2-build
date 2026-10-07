@@ -18,3 +18,23 @@
 
 这里同步的是聊天中的位置元数据，不是附件字节。需要长期保存并多端共享的文件，应
 实际复制到工作区本体；工作区同步边界见 `workspace-file-sync.md`。
+
+## 文件选择与流式导入
+
+- Android 聊天选择器只返回平台持有的输入 token、文件名、MIME 类型和可选大小；
+  不读取整文件、不返回文件字节，也不把客户端 URI 当成 Runtime 的文件路径。
+- Web 选择器保留浏览器原始 `File/Blob`，只在读取时对最多 1 MiB 的切片调用
+  `arrayBuffer`，不把整个 Blob 转成 Dart 字节数组，也不按块重复获取整个 object URL。
+- OpenHarmony 选择器只返回 URI 和元数据，原协议的 `bytes` 字段已删除；读取时
+  延迟打开原生描述符，以最多 1 MiB 异步读取，结束、取消、失败或插件解绑时关闭。
+  选择文件本身不再复制到缓存目录。
+- iOS、macOS、Windows、Linux 使用文件源的范围读取，不在 Dart 中预读整文件。
+  拍照附件同样进入共享输入链路，仅为识别 MIME 读取最多 32 字节文件头。
+- 聊天和快照共用 `SelectedFileInput` 的有界读取能力。每块最多 1 MiB，
+  上传方等待当前块写入后再读取下一块；Android 元数据查询和读取均在后台线程执行。
+- 普通附件通过 `AttachmentTransferManager` 的 reverse stream 直接写入接收 Host 的
+  `RuntimeStorageWriteSession`。校验长度后提交，再登记 `AttachmentInfo`，不再通过
+  `transferred_file:` 或整文件 Base64/JSON 导入，也不额外复制一份归档。
+- 文件大小未知时按流实际接收的字节数校验；空文件同样提交为零字节文件。
+  失败、取消或聊天切换时关闭输入并清理未附着的上传。只有成功提交的文件才可附着，
+  文件的 `nodeId` 从实际接收 Host 已有身份读取。

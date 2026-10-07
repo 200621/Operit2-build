@@ -99,14 +99,13 @@ class FileSelectorAndroid extends FileSelectorPlatform {
     if (file.fileSelectorNativeException != null) {
       _resolveErrorCodeAndMaybeThrow(file.fileSelectorNativeException!);
     }
-    return XFile.fromData(
-      file.bytes,
-      // Note: The name parameter is not used by XFile. The XFile.name returns
-      // the extracted file name from XFile.path.
+    // Android has already made a bounded file-backed cache copy. Reading is lazy;
+    // selection must not retain an in-memory copy of the entire selected file.
+    return XFile(
+      file.path,
       name: file.name,
       length: file.size,
       mimeType: file.mimeType,
-      path: file.path,
     );
   }
 

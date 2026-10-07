@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'dart:typed_data';
-
 import 'package:file_selector_ohos/src/file_selector_ohos.dart';
 import 'package:file_selector_ohos/src/file_selector_api.g.dart';
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
@@ -52,7 +50,6 @@ void main() {
           FileResponse(
             path: 'some/path.txt',
             size: 30,
-            bytes: Uint8List(0),
             name: 'name',
             mimeType: 'text/plain',
           ),
@@ -77,7 +74,6 @@ void main() {
       expect(file?.path, 'some/path.txt');
       expect(file?.mimeType, 'text/plain');
       expect(await file?.length(), 30);
-      expect(await file?.readAsBytes(), Uint8List(0));
     });
   });
 
@@ -104,14 +100,12 @@ void main() {
             FileResponse(
               path: 'some/path.txt',
               size: 30,
-              bytes: Uint8List(0),
               name: 'name',
               mimeType: 'text/plain',
             ),
             FileResponse(
               path: 'other/dir.jpg',
               size: 40,
-              bytes: Uint8List(0),
               mimeType: 'image/jpg',
             ),
           ],
@@ -136,12 +130,10 @@ void main() {
       expect(files[0].path, 'some/path.txt');
       expect(files[0].mimeType, 'text/plain');
       expect(await files[0].length(), 30);
-      expect(await files[0].readAsBytes(), Uint8List(0));
 
       expect(files[1].path, 'other/dir.jpg');
       expect(files[1].mimeType, 'image/jpg');
       expect(await files[1].length(), 40);
-      expect(await files[1].readAsBytes(), Uint8List(0));
     });
   });
 

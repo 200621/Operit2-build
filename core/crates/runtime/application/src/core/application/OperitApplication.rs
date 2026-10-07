@@ -200,6 +200,25 @@ impl OperitApplication {
         }
     }
 
+    /// Shares live services for a command without creating a second runtime or lifecycle.
+    /// Each invocation owns its dispatch view so nested tool calls need no application lock.
+    #[allow(non_snake_case)]
+    pub fn sharedCoreCommandRuntime(&self) -> Self {
+        Self {
+            appStartupTimeMs: self.appStartupTimeMs,
+            hostManager: self.hostManager.clone(),
+            chatRuntimeHolder: self.chatRuntimeHolder.clone(),
+            toolRuntimeDependencies: self.toolRuntimeDependencies.clone(),
+            toolHandler: self.toolHandler.clone(),
+            toolPkgBridgeRuntime: self.toolPkgBridgeRuntime.clone(),
+            providerRuntimeContext: self.providerRuntimeContext.clone(),
+            initialized: self.initialized,
+            // The original application remains the sole lifecycle/subscription owner.
+            extensionChanges: None,
+            hostRuntimeEventRegistration: None,
+        }
+    }
+
     /// Removes files queued for cleanup through the configured file-system host.
     #[allow(non_snake_case)]
     fn cleanOnExitFiles(&self) -> Result<(), String> {

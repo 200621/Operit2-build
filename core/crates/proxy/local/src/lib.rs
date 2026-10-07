@@ -34,6 +34,9 @@ pub fn pluginSdkSurface() -> operit_plugin_sdk_ipc::PluginSdkSurface {
 pub struct LocalCoreProxy {
     peerServices: Arc<std::sync::OnceLock<operit_node_runtime::NodeServices::NodeServices>>,
     application: Arc<Mutex<OperitApplication>>,
+    // Retains the shared command view; its executor holds only a Weak reference.
+    #[cfg(not(target_arch = "wasm32"))]
+    _coreCommandRuntime: Option<Arc<OperitApplication>>,
     chatRuntimeHolder: Arc<tokio::sync::Mutex<ChatRuntimeHolder>>,
     hostManager: HostManager,
     toolRuntimeSupport: Arc<dyn ToolRuntimeSupport>,
@@ -109,7 +112,9 @@ impl LocalCoreProxy {
         generated_open_reverse_stream(self, request)
     }
     /// Creates a local link client backed by an in-process application.
-    pub fn new(application: OperitApplication) -> Self {
+    pub fn new(#[allow(unused_mut)] mut application: OperitApplication) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let coreCommandRuntime = Self::installCoreCommandExecutor(&mut application);
         let toolRuntimeSupport = application.toolHandler.runtimeSupport();
         let chatRuntimeHolder = application.chatRuntimeHolder.clone();
         Self {
@@ -117,9 +122,69 @@ impl LocalCoreProxy {
             hostManager: application.hostManager.clone(),
             toolRuntimeSupport,
             application: Arc::new(Mutex::new(application)),
+            #[cfg(not(target_arch = "wasm32"))]
+            _coreCommandRuntime: coreCommandRuntime,
             chatRuntimeHolder,
             coreStreamPool: Arc::new(CoreStreamPool::new()),
         }
+    }
+
+    /// Binds plugin CLI calls to this application's live services, including Flutter hosts.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn installCoreCommandExecutor(
+        application: &mut OperitApplication,
+    ) -> Option<Arc<OperitApplication>> {
+        if application.hostManager.coreCommandExecutor.is_some() {
+            return None;
+        }
+        Some(Arc::new_cyclic(
+            |runtime: &std::sync::Weak<OperitApplication>| {
+                let runtime = runtime.clone();
+                let executor: operit_host_api::HostManager::CoreCommandExecutor =
+                    Arc::new(move |args| {
+                        let runtime = runtime.clone();
+                        Box::pin(async move {
+                            let runtime = runtime.upgrade().ok_or_else(|| {
+                                "Core command runtime has been released.".to_string()
+                            })?;
+                            let scheduler = runtime
+                                .hostManager
+                                .hostRuntimeTaskSchedulerHost
+                                .clone()
+                                .ok_or_else(|| {
+                                    "Core command execution requires a task scheduler host."
+                                        .to_string()
+                                })?;
+                            let mut commandApplication = runtime.sharedCoreCommandRuntime();
+                            let (sender, receiver) = tokio::sync::oneshot::channel();
+                            scheduler
+                                .scheduleHostRuntimeAsyncTask(
+                                    "core-tool-command",
+                                    Box::new(move || {
+                                        Box::pin(async move {
+                                            let result = operit_command_core::run_core_command(
+                                                &mut commandApplication,
+                                                &args,
+                                            )
+                                            .await
+                                            .map(|output| {
+                                                format!("{}{}", output.stdout, output.stderr)
+                                            });
+                                            let _ = sender.send(result);
+                                        })
+                                    }),
+                                )
+                                .map_err(|error| error.message)?;
+                            receiver
+                                .await
+                                .map_err(|error| format!("Core command task stopped: {error}"))?
+                        })
+                    });
+                application.hostManager.coreCommandExecutor = Some(executor.clone());
+                application.toolHandler.setCoreCommandExecutor(executor);
+                application.sharedCoreCommandRuntime()
+            },
+        ))
     }
 
     /// Returns mutable access to the hosted local application.

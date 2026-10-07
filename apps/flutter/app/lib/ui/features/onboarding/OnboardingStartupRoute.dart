@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../core/host/SelectedFileInput.dart';
 import '../../../core/logging/ClientLogger.dart';
 import '../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
@@ -1008,7 +1009,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       if (previousSession != null) {
         await previousSession.discard();
       }
-      final file = await SnapshotImportFile.pick();
+      final file = await SelectedFileInput.pickSnapshot();
       if (file == null) {
         return;
       }

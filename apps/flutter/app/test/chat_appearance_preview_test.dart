@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
 import 'package:operit2/core/link/CoreLinkProtocol.dart';
+import 'package:operit2/core/logging/ClientLogger.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
 import 'package:operit2/ui/features/chat/components/style/MessageHeaderMetadata.dart';
@@ -19,6 +20,7 @@ import 'package:operit2/ui/features/settings/appearance/ChatAppearancePreview.da
 import 'package:operit2/ui/theme/OperitTheme.dart';
 
 void main() {
+  setUp(ClientLogger.initialize);
   for (final style in <String>['bubble', 'cursor']) {
     for (final width in <double>[280, 380]) {
       for (final wide in <bool>[false, true]) {

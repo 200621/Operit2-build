@@ -16,8 +16,6 @@ import MethodCall from '@ohos/flutter_ohos/src/main/ets/plugin/common/MethodCall
 import { AbilityPluginBinding } from '@ohos/flutter_ohos/src/main/ets/embedding/engine/plugins/ability/AbilityPluginBinding';
 import common from '@ohos.app.ability.common';
 import { photoPickerSelect, documentPickerSelect, filePicker } from './FIleSelectorUtil'
-import ArrayList from '@ohos.util.ArrayList';
-import List from '@ohos.util.List';
 
 const TAG = "FileSelectorApiImpl";
 const DOCUMENT = "Document";
@@ -29,6 +27,11 @@ export class FileSelectorApiImpl {
 
   binding: AbilityPluginBinding;
   private saveChannel: MethodChannel | null = null;
+  private inputChannel: MethodChannel | null = null;
+  private inputs: Map<string, DocumentInput> = new Map<string, DocumentInput>();
+  private nextInputId: number = 0;
+  private inputOperations: Promise<void> = Promise.resolve();
+  private detached: boolean = false;
 
   constructor(binding: AbilityPluginBinding) {
     this.binding = binding;
@@ -38,7 +41,11 @@ export class FileSelectorApiImpl {
     Log.d(TAG, 'openFile types:' + allowedTypes.extensions + ' dir:' + initialDirectory)
     filePicker(initialDirectory, allowedTypes, 1).then(async (filePickerResult: ESObject) => {
       if (filePickerResult != undefined) {
-        let fileUris = await this.getUrisForPaths(filePickerResult);
+        let fileUris = filePickerResult as Array<string>;
+        if (fileUris.length == 0) {
+          result.success(null);
+          return;
+        }
         let uri: string = fileUris[0];
         Log.i(TAG,'documentPickerSelect select file successfully, documentPicker uri: ' + uri);
         FileSelectorApiImpl.toFileResponse(uri, MIME_TYPE, uri.substring(uri.lastIndexOf("/") + 1))
@@ -233,30 +240,24 @@ export class FileSelectorApiImpl {
     throw new Error('Method not implemented.')
   }
 
-  async getUrisForPaths(paths: List<string>): Promise<Array<string>> {
-    Log.i(TAG, "getUrisForPaths");
-    let uris = new Array<string>();
-    try {
-      paths.forEach(async path => {
-        let folder = this.getContext().cacheDir;
-        if (!fs.accessSync(folder)) {
-          fs.mkdirSync(folder);
-        }
-        let oldFile: fs.File = fs.openSync(path);
-        let newFile = folder + '/' + oldFile.name;
-        fs.copyFileSync(oldFile.fd, newFile);
-        uris.push(newFile);
-      })
-    } catch (err) {
-      Log.e(TAG, 'Failed to getUrisForPaths: ' + JSON.stringify(err));
-    }
-    return uris;
-  }
-
-  /// Releases the file-save channel when its platform registration is detached.
-  closeSaveChannel(): void {
+  /// Releases both channels and every input descriptor when registration is detached.
+  closeChannels(): void {
     this.saveChannel?.setMethodCallHandler(null);
     this.saveChannel = null;
+    this.detached = true;
+    this.inputChannel?.setMethodCallHandler(null);
+    this.inputChannel = null;
+    // Drain any read already in flight before closing its descriptor.
+    this.inputOperations = this.inputOperations.then(async (): Promise<void> => {
+      for (const input of this.inputs.values()) {
+        try {
+          await fs.close(input.file);
+        } catch (error) {
+          Log.e(TAG, 'Failed to close document input: ' + String(error));
+        }
+      }
+      this.inputs.clear();
+    });
   }
 
   /// Performs a native file copy with opened document handles and deterministic resource release.
@@ -287,12 +288,68 @@ export class FileSelectorApiImpl {
     }
   }
 
+  /// Every allocation is bounded before bytes cross the Flutter channel.
+  private async handleInput(call: MethodCall, result: MethodResult): Promise<void> {
+    try {
+      if (this.detached) {
+        throw new Error('Document input has been detached');
+      }
+      const args = call.arguments as Map<string, ESObject>;
+      if (call.method == 'open') {
+        const path = args.get('path') as string;
+        const start = args.get('start') as number;
+        if (typeof path != 'string' || !Number.isSafeInteger(start) || start < 0) {
+          throw new Error('Invalid document input metadata');
+        }
+        const file = await fs.open(path, fs.OpenMode.READ_ONLY);
+        const token = String(++this.nextInputId);
+        this.inputs.set(token, new DocumentInput(file, start));
+        result.success(token);
+        return;
+      }
+      const token = args.get('token') as string;
+      if (call.method == 'close') {
+        const input = this.inputs.get(token);
+        this.inputs.delete(token);
+        if (input != undefined) await fs.close(input.file);
+        result.success(null);
+        return;
+      }
+      if (call.method == 'readChunk') {
+        const input = this.inputs.get(token);
+        const maxBytes = args.get('maxBytes') as number;
+        if (input == undefined || !Number.isSafeInteger(maxBytes) ||
+          maxBytes <= 0 || maxBytes > 1024 * 1024) {
+          throw new Error('Invalid document input read');
+        }
+        const buffer = new ArrayBuffer(maxBytes);
+        const count = await fs.read(input.file.fd, buffer, {
+          offset: input.offset,
+          length: maxBytes,
+        });
+        input.offset += count;
+        result.success(new Uint8Array(buffer, 0, count));
+        return;
+      }
+      result.notImplemented();
+    } catch (error) {
+      result.error('DOCUMENT_INPUT_FAILED', String(error), null);
+    }
+  }
+
   static getCodec(): MessageCodec<ESObject> {
     return FileSelectorApiCodec.INSTANCE;
   }
 
   /// Installs the native file-backed save operation beside the generated file selector channels.
   setup(binaryMessenger: BinaryMessenger, abilityPluginBinding: AbilityPluginBinding): void {
+    this.detached = false;
+    this.inputChannel = new MethodChannel(binaryMessenger, 'dev.flutter.packages.file_selector_ohos/input');
+    this.inputChannel.setMethodCallHandler({
+      onMethodCall: (call: MethodCall, result: MethodResult): void => {
+        this.inputOperations = this.inputOperations.then((): Promise<void> => this.handleInput(call, result));
+      }
+    });
     this.saveChannel = new MethodChannel(binaryMessenger, 'dev.flutter.packages.file_selector_ohos/save');
     this.saveChannel.setMethodCallHandler({
       /// Handles explicit source-file copies into selected document URIs.
@@ -320,7 +377,7 @@ export class FileSelectorApiImpl {
             wrapped.push(result);
             reply.reply(wrapped);
           },(error: Error): void => {
-            const wrappedError: ArrayList<ESObject> = msg.wrapError(error);
+            const wrappedError: Array<ESObject> = wrapError(error);
             reply.reply(wrappedError);
           })
           api.openFileWithExtensions(initialDirectoryArg, allowedTypesArg, resultCallback);
@@ -342,7 +399,7 @@ export class FileSelectorApiImpl {
             wrapped.push(result);
             reply.reply(wrapped);
           },(error: Error): void => {
-            const wrappedError: ArrayList<ESObject> = msg.wrapError(error);
+            const wrappedError: Array<ESObject> = wrapError(error);
             reply.reply(wrappedError);
           })
           api.openFilesWithExtensions(initialDirectoryArg, allowedTypesArg, resultCallback);
@@ -384,42 +441,33 @@ export class FileSelectorApiImpl {
   }
 
   static async toFileResponse(uri: string, type: string, name: string): Promise<FileResponse> {
-    let file = fs.openSync(uri);
-    let stream = fs.fdopenStreamSync(file.fd, "r");
-    let stat = fs.statSync(file.fd);
-    let size = stat.size;
-    let buffer = new ArrayBuffer(size);
-    stream.readSync(buffer, {offset: 0, length: size});
-    let byteArray = new Uint8Array(buffer);
-    let response = new FileResponse(uri, type, name, size, byteArray);
-    fs.closeSync(file.fd);
-    return new Promise((resolve) => {
-      resolve(response);
-    })
+    const file = await fs.open(uri, fs.OpenMode.READ_ONLY);
+    try {
+      const stat = await fs.stat(file.fd);
+      return new FileResponse(uri, type, name, stat.size);
+    } finally {
+      await fs.close(file);
+    }
   }
 
   static async toFileListResponse(uris: string[], type: string): Promise<Array<FileResponse>> {
-    let files = new Array<FileResponse>();
-    for (let i = 0; i < uris.length; i++) {
-      let file = fs.openSync(uris[i]);
-      let stream = fs.fdopenStreamSync(file.fd, "r");
-      let stat = fs.statSync(file.fd);
-      let size = stat.size;
-      let buffer = new ArrayBuffer(size);
-      stream.readSync(buffer, {offset: 0, length: size});
-      let byteArray = new Uint8Array(buffer);
-      let response = new FileResponse(uris[i], type, uris[i].substring(uris[i].lastIndexOf("/") + 1), size, byteArray);
-      fs.closeSync(file.fd);
-      files.push(response)
+    const files = new Array<FileResponse>();
+    for (const uri of uris) {
+      files.push(await FileSelectorApiImpl.toFileResponse(
+        uri, type, uri.substring(uri.lastIndexOf('/') + 1)));
     }
+    return files;
+  }
+}
 
-    return new Promise((resolve, reject) => {
-      if (files.length > 0) {
-        resolve(files);
-      } else {
-        reject(new Error('Read file list failed'))
-      }
-    })
+/// Descriptor and cursor only; never owns a complete file buffer.
+class DocumentInput {
+  file: fs.File;
+  offset: number;
+
+  constructor(file: fs.File, offset: number) {
+    this.file = file;
+    this.offset = offset;
   }
 }
 

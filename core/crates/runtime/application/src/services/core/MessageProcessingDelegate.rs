@@ -1592,17 +1592,16 @@ impl MessageProcessingDelegate {
                 true
             })
             .unwrap_or(false);
-        let initialProviderModel = request
+        let modelIdentity = request
             .enhancedAiService
-            .getLastProviderModel()
-            .unwrap_or_default();
-        let (initialProvider, initialModelName) = split_provider_model(&initialProviderModel);
+            .getLastTurnModelIdentity()
+            .expect("accepted response stream must have a resolved model identity");
         let mut aiMessage = ChatMessage {
             sender: "ai".to_string(),
             timestamp: assistantMessageTimestamp,
             roleName: currentRoleName.clone(),
-            provider: initialProvider,
-            modelName: initialModelName,
+            provider: modelIdentity.providerName,
+            modelName: modelIdentity.modelName,
             inputTokens: 0,
             outputTokens: 0,
             cachedInputTokens: 0,
@@ -1866,9 +1865,6 @@ impl MessageProcessingDelegate {
                             .current_content()
                             .to_owned();
                         let mut workerService = workerService;
-                        let providerModel =
-                            workerService.getLastProviderModel().unwrap_or_default();
-                        let (provider, modelName) = split_provider_model(&providerModel);
                         let tokenSnapshot = workerService.getLastTurnTokenSnapshot().unwrap_or(
                             operit_providers::chat::EnhancedAIService::TurnTokenSnapshot {
                                 inputTokens: 0,
@@ -1892,8 +1888,6 @@ impl MessageProcessingDelegate {
                             let mut workerAiMessage = completionAiMessage
                                 .lock()
                                 .expect("worker AI message mutex poisoned");
-                            workerAiMessage.provider = provider;
-                            workerAiMessage.modelName = modelName;
                             workerAiMessage.inputTokens += tokenSnapshot.inputTokens;
                             workerAiMessage.outputTokens += tokenSnapshot.outputTokens;
                             workerAiMessage.cachedInputTokens += tokenSnapshot.cachedInputTokens;
@@ -2327,15 +2321,4 @@ impl Default for MessageProcessingDelegate {
             ModelConfigManager::new(rootDir),
         )
     }
-}
-
-/// Splits a provider/model identifier into its provider and model parts.
-fn split_provider_model(providerModel: &str) -> (String, String) {
-    let Some(index) = providerModel.find(':') else {
-        return (providerModel.to_string(), String::new());
-    };
-    (
-        providerModel[..index].to_string(),
-        providerModel[index + 1..].to_string(),
-    )
 }

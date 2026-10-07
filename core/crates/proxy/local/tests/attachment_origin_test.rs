@@ -6,13 +6,15 @@ use operit_host_native_common::{
     NativeHostJavaScriptRuntimeHost, NativeHostRuntimeTaskSchedulerHost, NativeRuntimeStorageHost,
     PosixFileSystemHost,
 };
-use operit_link::{fromCoreValue, toCoreValue, CoreCallRequest, CoreLinkSharedClient};
+use operit_link::{
+    CoreCallRequest, CoreLinkSharedClient, CorePushRequest, fromCoreValue, toCoreValue,
+};
 use operit_model::AttachmentInfo::AttachmentInfo;
 use operit_proxy_local::LocalCoreProxy;
 use operit_runtime::core::application::OperitApplication::OperitApplication;
 use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
-use operit_util::RuntimeStorageLayout::{runtimeStorageOwnership, RuntimeStorageOwnership};
-use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeStoreRootConfig};
+use operit_util::RuntimeStorageLayout::{RuntimeStorageOwnership, runtimeStorageOwnership};
+use operit_util::RuntimeStoreRoot::{RuntimeStoreRootConfig, setDefaultRuntimeStoreRootConfig};
 use serde_json::json;
 
 /// Exercise the same generated import boundary that Flutter uses, before chat-send routing.
@@ -46,6 +48,7 @@ async fn imported_attachment_keeps_its_actual_node_and_ephemeral_storage() {
             let host_manager = HostManager {
                 fileSystemHost: Some(Arc::new(PosixFileSystemHost::new())),
                 runtimeStorageHost: Some(storage.clone()),
+                runtimeStorageWriteHost: Some(storage.clone()),
                 runtimeSqliteHost: Some(storage),
                 hostJavaScriptRuntimeHost: Some(Arc::new(NativeHostJavaScriptRuntimeHost::new())),
                 hostRuntimeTaskSchedulerHost: Some(Arc::new(
@@ -55,24 +58,35 @@ async fn imported_attachment_keeps_its_actual_node_and_ephemeral_storage() {
             };
             let proxy = LocalCoreProxy::new(OperitApplication::newWithContext(host_manager));
             let target = LocalCoreProxy::generatedTargetForSchema("chatRuntimeHolderMain").unwrap();
-            let payload = format!(
-                "transferred_file:{}",
-                json!({
-                    "fileName": "文档.pdf", "fileSize": 3, "base64Content": "AAH/",
-                })
-            );
+            let expected_chat_id = {
+                let holder = proxy.chatRuntimeHolder();
+                let mut holder = holder.lock().await;
+                holder.coreForTarget(target).unwrap().chatHistoryDelegate.currentChatIdFlow.value()
+            };
+            let transfer_target = LocalCoreProxy::generatedTargetForSchema("services.attachmentTransferManager").unwrap();
+            let upload_id: String = fromCoreValue(CoreLinkSharedClient::call(
+                &proxy,
+                CoreCallRequest::new("begin-file", transfer_target, "beginAttachmentUpload",
+                    toCoreValue(json!({"fileName": "文档.pdf", "expectedByteLength": 3})).unwrap()),
+            ).await.result.unwrap()).unwrap();
+            let mut stream = proxy.openPushLocal(CorePushRequest::new(
+                "write-file", transfer_target, "writeAttachmentUpload",
+            ).withArgs(toCoreValue(json!({
+                "uploadId": upload_id, "fileName": "文档.pdf", "expectedByteLength": 3,
+            })).unwrap())).unwrap();
+            stream.send(toCoreValue(vec![0u8]).unwrap()).await.unwrap();
+            stream.send(toCoreValue(vec![1u8, 255]).unwrap()).await.unwrap();
+            stream.close().await.unwrap();
+            let imported: AttachmentInfo = fromCoreValue(CoreLinkSharedClient::call(
+                &proxy,
+                CoreCallRequest::new("complete-file", transfer_target, "completeAttachmentUpload",
+                    toCoreValue(json!({"uploadId": upload_id, "fileName": "文档.pdf", "expectedByteLength": 3})).unwrap()),
+            ).await.result.unwrap()).unwrap();
             CoreLinkSharedClient::call(
                 &proxy,
-                CoreCallRequest::new(
-                    "import-file",
-                    target,
-                    "handleAttachment",
-                    toCoreValue(json!({"_filePath": payload})).unwrap(),
-                ),
-            )
-            .await
-            .result
-            .expect("file import through the generated proxy must succeed");
+                CoreCallRequest::new("attach-file", target, "attachUploadedFile",
+                    toCoreValue(json!({"attachment": imported, "expectedChatId": expected_chat_id})).unwrap()),
+            ).await.result.expect("committed upload must register through the generated chat boundary");
             let attachments = {
                 let holder = proxy.chatRuntimeHolder();
                 let mut holder = holder.lock().await;
@@ -91,6 +105,22 @@ async fn imported_attachment_keeps_its_actual_node_and_ephemeral_storage() {
                 runtimeStorageOwnership("runtime/temp/clean_on_exit/file.pdf").unwrap(),
                 RuntimeStorageOwnership::Ephemeral
             );
+
+            let stale_chat = CoreLinkSharedClient::call(
+                &proxy,
+                CoreCallRequest::new("stale-chat", target, "attachUploadedFile", toCoreValue(json!({
+                    "attachment": attachment, "expectedChatId": "changed-chat",
+                })).unwrap()),
+            ).await;
+            assert!(stale_chat.result.is_err(), "an upload must not attach to a changed chat");
+            let mut wrong_source = attachment.clone();
+            wrong_source.nodeId = Some("different-node".into());
+            assert!(CoreLinkSharedClient::call(
+                &proxy,
+                CoreCallRequest::new("wrong-source", target, "attachUploadedFile", toCoreValue(json!({
+                    "attachment": wrong_source, "expectedChatId": expected_chat_id,
+                })).unwrap()),
+            ).await.result.is_err(), "source metadata must belong to the receiving runtime");
 
             // A later identity/send context must not rewrite B's attachment to the receiving node.
             CoreNodeIdentityStore::native()

@@ -16,7 +16,18 @@ ToolPkg API `2.0.0` 面向多平台开发，基本所有公共接口都通过统
 
 包管理中的“快速创作你的插件”会安装 PackageBuilder、将它设为 AI 可见，并启用 operit_editor。准备完成后，需求会作为聊天草稿填入输入框，用户发送后才开始与 AI 协作开发。这个入口不自动生成源码、不自动配置编译器，也不自动安装或发布成品。
 
-operit_editor 只提供操作手册。管理动作由系统工具 `execute_cli_command` 执行；脚本内对应接口为 `Tools.SoftwareSettings.exec(args)`。传入 CLI 字符串数组，不含 `operit2` 可执行文件名。Core command 与终端 shell 是不同的执行入口，不要假定终端已安装 `operit2` 命令。
+operit_editor 的 `operit_editor` 工具实际调用 `Tools.SoftwareSettings.exec(args)`，与系统工具 `execute_cli_command` 使用同一 core command 执行入口，返回真实命令结果并传播执行错误。传入 `args` CLI 字符串数组（也接受数组的 JSON 字符串），不含 `operit2` 可执行文件名。自然语言 `query` 已移除，不会被转换成编辑动作。Core command 与终端 shell 是不同的执行入口，不要假定终端已安装 `operit2` 命令。
+
+调用 `operit_editor:operit_editor` 的参数示例：
+
+```json
+{"args": []}
+{"args": ["package", "list"]}
+{"args": ["skill", "show", "PackageBuilder"]}
+{"args": ["package", "exec", "<runtime_package_name>:<tool_name>", "{}"]}
+```
+
+空数组从实际执行入口读取帮助；需要包命令帮助时传入 `["package", "help"]`。先读取真实状态，修改用户配置、启停包或 MCP、删除资源前取得用户确认，执行后重新读取状态核验；不能把命令已调用当作修改成功。
 
 ### 已安装的 Skill 如何更新资料
 
@@ -68,7 +79,7 @@ operit_editor 只提供操作手册。管理动作由系统工具 `execute_cli_c
 
 ## 4. 首次安装与测试
 
-以下每行都是一次 `execute_cli_command` 的参数数组：
+以下每行都是一次 operit_editor 工具的 `args` 参数数组，也可用于系统工具 `execute_cli_command`：
 
 ```json
 ["package", "list"]

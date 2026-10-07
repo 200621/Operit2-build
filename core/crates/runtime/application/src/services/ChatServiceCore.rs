@@ -85,7 +85,6 @@ use url::Url;
 const PACKAGE_ATTACHMENT_PREFIX: &str = "package_attach:";
 const PASTED_TEXT_ATTACHMENT_PREFIX: &str = "pasted_text:";
 const PASTED_IMAGE_ATTACHMENT_PREFIX: &str = "pasted_image:";
-const TRANSFERRED_FILE_ATTACHMENT_PREFIX: &str = "transferred_file:";
 const WORKSPACE_MENTION_ATTACHMENT_PREFIX: &str = "workspace_mention:";
 const OCR_INLINE_INSTRUCTION: &str = "Do not read the file, answer the user's question directly based on the attachment content and the user's question.";
 pub trait ChatServiceUiBridge {}
@@ -101,33 +100,6 @@ struct PastedImageAttachmentPayload {
     mime_type: String,
     file_size: i64,
     base64_content: String,
-}
-
-/// Carries selected file bytes across the client-to-runtime boundary.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TransferredFileAttachmentPayload {
-    file_name: String,
-    file_size: i64,
-    base64_content: String,
-}
-
-/// Decodes a selected file without interpreting a client path as a host path.
-fn decodeTransferredFileAttachment(payload_json: &str) -> Result<(String, Vec<u8>), String> {
-    let payload: TransferredFileAttachmentPayload = serde_json::from_str(payload_json)
-        .map_err(|error| format!("无法导入附件: {error}"))?;
-    if payload.file_name.trim().is_empty()
-        || matches!(payload.file_name.as_str(), "." | "..")
-        || payload.file_name.chars().any(|value| matches!(value, '/' | '\\' | '\0'))
-    {
-        return Err("无法导入附件: 文件名必须是单个文件名".to_string());
-    }
-    let bytes = STANDARD.decode(payload.base64_content.as_bytes())
-        .map_err(|error| format!("无法导入附件: {error}"))?;
-    if payload.file_size < 0 || payload.file_size != bytes.len() as i64 {
-        return Err("无法导入附件: 文件大小不一致".to_string());
-    }
-    Ok((payload.file_name, bytes))
 }
 
 /// Serializes a ToolPkg chat input result into the proxy-facing JSON shape.
@@ -1636,11 +1608,6 @@ impl ChatServiceCore {
             return;
         }
 
-        if let Some(payloadJson) = _filePath.strip_prefix(TRANSFERRED_FILE_ATTACHMENT_PREFIX) {
-            self.attachTransferredFile(payloadJson);
-            return;
-        }
-
         let filePath = _filePath.trim();
         if filePath.is_empty() {
             self.messageProcessingDelegate
@@ -1782,42 +1749,6 @@ impl ChatServiceCore {
         self.attachments.push(attachmentInfo);
         self.messageProcessingDelegate
             .showToast("已添加粘贴图片附件".to_string());
-    }
-
-    /// Stores transferred file bytes using the runtime's uniform file-system host.
-    fn attachTransferredFile(&mut self, payloadJson: &str) {
-        let result = (|| -> Result<AttachmentInfo, String> {
-            let (fileName, bytes) = decodeTransferredFileAttachment(payloadJson)?;
-            let directory = OperitPaths::cleanOnExitDir()?;
-            self.fileSystemHost.makeDirectory(&directory.to_string_lossy(), true)
-                .map_err(|error| format!("无法创建附件目录: {}", error.message))?;
-            let path = directory.join(format!(
-                "attachment_{}_{}_{}", currentTimeMillis(), self.attachments.len(), fileName
-            ));
-            self.fileSystemHost.writeFileBytes(&path.to_string_lossy(), &bytes)
-                .map_err(|error| format!("无法保存附件: {}", error.message))?;
-            let stored = self.fileSystemHost.fileExists(&path.to_string_lossy())
-                .map_err(|error| format!("无法读取附件: {}", error.message))?;
-            if !stored.exists || stored.isDirectory || stored.size != bytes.len() as i64 {
-                return Err("无法导入附件: 存储结果与文件内容不一致".to_string());
-            }
-            Ok(AttachmentInfo {
-                nodeId: localAttachmentNodeId(),
-                mimeType: getMimeTypeFromPath(Path::new(&fileName)).to_string(),
-                fileName,
-                filePath: path.to_string_lossy().into_owned(),
-                fileSize: bytes.len() as i64,
-                content: String::new(),
-            })
-        })();
-        match result {
-            Ok(attachment) => {
-                let message = format!("已添加附件: {}", attachment.fileName);
-                self.attachments.push(attachment);
-                self.messageProcessingDelegate.showToast(message);
-            }
-            Err(message) => self.messageProcessingDelegate.showToast(message),
-        }
     }
 
     /// Captures and recognizes screen text through the configured system host.
@@ -2149,6 +2080,48 @@ impl ChatServiceCore {
             fileSize,
             content: String::new(),
         })
+    }
+
+    /// Registers a committed Host upload without reading or copying the file again.
+    pub fn attachUploadedFile(
+        &mut self,
+        attachment: AttachmentInfo,
+        expectedChatId: Option<String>,
+    ) -> Result<(), String> {
+        if self.chatHistoryDelegate.currentChatIdFlow.value() != expectedChatId {
+            return Err("Chat changed while uploading the attachment".to_string());
+        }
+        super::AttachmentTransferManager::validateAttachmentFileName(&attachment.fileName)?;
+        let directory = OperitPaths::cleanOnExitDir()?;
+        let path = Path::new(&attachment.filePath);
+        if !path.starts_with(&directory)
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || attachment.nodeId != localAttachmentNodeId()
+            || !attachment.content.is_empty()
+        {
+            return Err("Uploaded attachment does not belong to this runtime".to_string());
+        }
+        let stored = self
+            .fileSystemHost
+            .fileExists(&attachment.filePath)
+            .map_err(|error| error.to_string())?;
+        if !stored.exists || stored.isDirectory || stored.size != attachment.fileSize {
+            return Err(
+                "Uploaded attachment is missing or has an unexpected byte length".to_string(),
+            );
+        }
+        if !self
+            .attachments
+            .iter()
+            .any(|item| item.filePath == attachment.filePath)
+        {
+            let message = format!("已添加附件: {}", attachment.fileName);
+            self.attachments.push(attachment);
+            self.messageProcessingDelegate.showToast(message);
+        }
+        Ok(())
     }
 
     /// Removes one attachment by its stored file path.
@@ -3167,7 +3140,7 @@ fn createTempFileFromBytes(
 }
 
 #[allow(non_snake_case)]
-fn getMimeTypeFromPath(path: &Path) -> &'static str {
+pub(crate) fn getMimeTypeFromPath(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -3310,42 +3283,5 @@ mod image_access_tests {
         assert!(authorizeChatImage(&[], "image-1").is_err());
         assert!(authorizeChatImage(&messages, "image-2").is_err());
         assert!(authorizeChatImage(&messages, "").is_err());
-    }
-}
-
-#[cfg(test)]
-mod transferred_file_attachment_tests {
-    use super::decodeTransferredFileAttachment;
-
-    /// Verifies that binary content and original filenames survive transfer.
-    #[test]
-    fn decodes_binary_file_bytes() {
-        let (name, bytes) = decodeTransferredFileAttachment(
-            r#"{"fileName":"文档.pdf","fileSize":3,"base64Content":"AAH/"}"#,
-        ).expect("valid transferred file");
-        assert_eq!(name, "文档.pdf");
-        assert_eq!(bytes, vec![0, 1, 255]);
-    }
-
-    /// Allows empty files while still enforcing their declared exact size.
-    #[test]
-    fn accepts_empty_files() {
-        assert!(decodeTransferredFileAttachment(
-            r#"{"fileName":"empty","fileSize":0,"base64Content":""}"#,
-        ).is_ok());
-    }
-
-    /// Rejects malformed encodings, size mismatches, and client path injection.
-    #[test]
-    fn rejects_invalid_payloads() {
-        for payload in [
-            r#"{"fileName":"../file.txt","fileSize":0,"base64Content":""}"#,
-            r#"{"fileName":"..\\file.txt","fileSize":0,"base64Content":""}"#,
-            r#"{"fileName":"file.txt","fileSize":1,"base64Content":""}"#,
-            r#"{"fileName":"file.txt","fileSize":-1,"base64Content":""}"#,
-            r#"{"fileName":"file.txt","fileSize":1,"base64Content":"!"}"#,
-        ] {
-            assert!(decodeTransferredFileAttachment(payload).is_err(), "{payload}");
-        }
     }
 }

@@ -1,170 +1,10 @@
 // ignore_for_file: file_names
 
-import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:file_selector/file_selector.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-
+import '../host/SelectedFileInput.dart';
 import '../proxy/generated/CoreProxyClients.g.dart';
 import '../proxy/generated/CoreProxyModels.g.dart' as core_proxy;
-
-const int _snapshotImportChunkSize = 1024 * 1024;
-const MethodChannel _snapshotImportInputChannel = MethodChannel(
-  'operit/snapshot_import_input',
-);
-
-/// Holds one platform-owned selected file that can be read in bounded chunks.
-class SnapshotImportFile {
-  /// Creates a bounded-read input owned by the platform document channel.
-  SnapshotImportFile._native({
-    required this.token,
-    required this.name,
-    required this.byteLength,
-  }) : _streamInput = null;
-
-  /// Creates a bounded-read input from a caller-owned file stream.
-  SnapshotImportFile.fromStream({
-    required this.name,
-    required this.byteLength,
-    required Stream<Uint8List> stream,
-  }) : token = null,
-       _streamInput = StreamIterator<Uint8List>(stream);
-
-  final String? token;
-  final String name;
-  final int byteLength;
-  final StreamIterator<Uint8List>? _streamInput;
-  Uint8List? _pendingStreamChunk;
-
-  /// Reports whether this Flutter host owns a native document-stream channel.
-  static bool get _usesNativeDocumentStream {
-    return !kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS);
-  }
-
-  /// Opens the platform document picker and returns a bounded-read file handle.
-  static Future<SnapshotImportFile?> pick() async {
-    if (_usesNativeDocumentStream) {
-      return _pickNativeDocumentStream();
-    }
-    return _pickFileSelectorStream();
-  }
-
-  /// Opens Android or iOS system document input without materializing its full contents.
-  static Future<SnapshotImportFile?> _pickNativeDocumentStream() async {
-    final value = await _snapshotImportInputChannel
-        .invokeMapMethod<String, Object?>('pick');
-    if (value == null) {
-      return null;
-    }
-    final token = value['token'];
-    final name = value['name'];
-    final byteLength = value['byteLength'];
-    if (token is! String || name is! String || byteLength is! int) {
-      throw StateError('Snapshot input channel returned invalid metadata');
-    }
-    return SnapshotImportFile._native(
-      token: token,
-      name: name,
-      byteLength: byteLength,
-    );
-  }
-
-  /// Opens a browser or desktop file-selector stream for bounded archive reads.
-  static Future<SnapshotImportFile?> _pickFileSelectorStream() async {
-    final file = await openFile(
-      acceptedTypeGroups: const <XTypeGroup>[
-        XTypeGroup(
-          label: 'Operit snapshot',
-          extensions: <String>['opsnapshot', 'zip'],
-        ),
-      ],
-    );
-    if (file == null) {
-      return null;
-    }
-    return SnapshotImportFile.fromStream(
-      name: file.name,
-      byteLength: await file.length(),
-      stream: file.openRead(),
-    );
-  }
-
-  /// Reads one bounded chunk from the platform-owned input stream.
-  Future<Uint8List> readChunk() async {
-    if (token == null) {
-      return _readStreamChunk();
-    }
-    final bytes = await _snapshotImportInputChannel.invokeMethod<Uint8List>(
-      'readChunk',
-      <String, Object?>{'token': token!, 'maxBytes': _snapshotImportChunkSize},
-    );
-    if (bytes == null) {
-      throw StateError('Snapshot input channel returned no chunk');
-    }
-    return bytes;
-  }
-
-  /// Closes this platform-owned input stream once uploading has finished.
-  Future<void> close() {
-    if (token == null) {
-      return _streamInput!.cancel();
-    }
-    return _snapshotImportInputChannel.invokeMethod<void>(
-      'close',
-      <String, Object?>{'token': token!},
-    );
-  }
-
-  /// Emits bounded file chunks until the selected input reaches end of stream.
-  Stream<Uint8List> chunks() async* {
-    while (true) {
-      final chunk = await readChunk();
-      if (chunk.isEmpty) {
-        return;
-      }
-      yield chunk;
-    }
-  }
-
-  /// Coalesces file-stream events into bounded upload chunks without loading the archive.
-  Future<Uint8List> _readStreamChunk() async {
-    final bytes = BytesBuilder(copy: false);
-    final input = _streamInput!;
-    while (bytes.length < _snapshotImportChunkSize) {
-      final pending = _pendingStreamChunk;
-      if (pending != null) {
-        bytes.add(
-          _takeStreamChunk(pending, _snapshotImportChunkSize - bytes.length),
-        );
-        continue;
-      }
-      if (!await input.moveNext()) {
-        return bytes.takeBytes();
-      }
-      bytes.add(
-        _takeStreamChunk(
-          input.current,
-          _snapshotImportChunkSize - bytes.length,
-        ),
-      );
-    }
-    return bytes.takeBytes();
-  }
-
-  /// Takes the requested bytes and retains the remainder of the current stream event.
-  Uint8List _takeStreamChunk(Uint8List bytes, int maxBytes) {
-    if (bytes.length <= maxBytes) {
-      _pendingStreamChunk = null;
-      return bytes;
-    }
-    _pendingStreamChunk = Uint8List.sublistView(bytes, maxBytes);
-    return Uint8List.sublistView(bytes, 0, maxBytes);
-  }
-}
 
 /// Refers to one fully uploaded archive used by snapshot import operations.
 class SnapshotImportSession {
@@ -225,23 +65,29 @@ class SnapshotImportUploader {
   /// uploader boundary lets settings show progress before the archive is
   /// available for inspection.
   Future<SnapshotImportSession> stage(
-    SnapshotImportFile file, {
+    SelectedFileInput file, {
     void Function(int uploadedBytes, int totalBytes)? onProgress,
   }) async {
-    final archiveId = await clients.servicesArchiveTransferManager
-        .beginArchiveUpload(expectedByteLength: file.byteLength);
+    final byteLength = file.byteLength;
+    if (byteLength == null) {
+      await file.close();
+      throw StateError('Snapshot imports require a known byte length');
+    }
+    String? archiveId;
     try {
+      archiveId = await clients.servicesArchiveTransferManager
+          .beginArchiveUpload(expectedByteLength: byteLength);
       var uploadedBytes = 0;
 
       Stream<Uint8List> trackedChunks() async* {
         await for (final chunk in file.chunks()) {
           uploadedBytes += chunk.length;
-          onProgress?.call(uploadedBytes, file.byteLength);
+          onProgress?.call(uploadedBytes, byteLength);
           yield chunk;
         }
       }
 
-      onProgress?.call(0, file.byteLength);
+      onProgress?.call(0, byteLength);
       await clients.servicesArchiveTransferManager.writeArchiveUpload(
         archiveId: archiveId,
         bytes: trackedChunks(),
@@ -249,13 +95,19 @@ class SnapshotImportUploader {
       final archive = await clients.servicesArchiveTransferManager
           .completeArchiveUpload(
             archiveId: archiveId,
-            expectedByteLength: file.byteLength,
+            expectedByteLength: byteLength,
           );
       return SnapshotImportSession(clients: clients, archive: archive);
     } catch (error, stackTrace) {
-      await clients.servicesArchiveTransferManager.discardArchiveUpload(
-        archiveId: archiveId,
-      );
+      if (archiveId != null) {
+        try {
+          await clients.servicesArchiveTransferManager.discardArchiveUpload(
+            archiveId: archiveId,
+          );
+        } catch (_) {
+          /* Preserve the original upload error. */
+        }
+      }
       Error.throwWithStackTrace(error, stackTrace);
     } finally {
       await file.close();

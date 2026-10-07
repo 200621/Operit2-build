@@ -27,7 +27,7 @@ void main() {
     'Operit2 新建 ToolPkg 显式声明 api_version 为 2.0.0；其对 1.0.0 和 1.0.1 的加载支持并不完整。Operit1 完整支持 1.0.0 和 1.0.1，这两个版本主要面向 Android，是旧版 API 形式。',
     '2.0.0 作者须注重跨平台兼容性。基本所有公共接口都兼容多平台，常规功能使用统一接口即可；遇到平台特异接口时，明确适用范围，并考虑、验证其他平台的安装、界面和核心功能。',
     '先阅读 PackageBuilder/references/PLUGIN_CREATION_WORKFLOW.md，使用随 Skill 携带的当前版本类型和示例。',
-    '需要操作包、Skill、MCP、日志或模型时，读取 operit_editor 包说明后调用 execute_cli_command。',
+    '需要操作包、Skill、MCP、日志或模型时，调用 operit_editor 包的 operit_editor 工具，传入 args 字符串数组实际执行命令；args: [] 获取命令帮助，不使用自然语言 query。',
     '出现错误停止并定位。交付源码路径、成品路径、安装状态与已验证结果；未测试或未发布的部分明确说明。',
   };
   for (final draft in drafts) {

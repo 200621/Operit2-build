@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../../core/bridge/OperitRuntimeBridge.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../../core/host/SelectedFileInput.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import 'WorkspaceFileModels.dart';
@@ -27,27 +28,6 @@ enum ChatToolPermissionResult {
   const ChatToolPermissionResult(this.wireName);
 
   final String wireName;
-}
-
-/// Transfers selected files without assuming their paths belong to the runtime.
-class TransferredFileAttachmentPayload {
-  /// Creates an exact byte payload for a selected file.
-  TransferredFileAttachmentPayload({
-    required this.fileName,
-    required List<int> bytes,
-  }) : fileSize = bytes.length,
-       base64Content = base64Encode(bytes);
-
-  final String fileName;
-  final int fileSize;
-  final String base64Content;
-
-  /// Encodes the selected file for the runtime's host-owned attachment storage.
-  String toAttachmentPath() => 'transferred_file:${jsonEncode(<String, Object>{
-    'fileName': fileName,
-    'fileSize': fileSize,
-    'base64Content': base64Content,
-  })}';
 }
 
 class PastedImageAttachmentPayload {
@@ -323,9 +303,77 @@ class ChatViewModel {
     return _chat.handleAttachment(filePath: filePath);
   }
 
-  /// Imports a selected file into the runtime through its file-system host.
-  Future<void> attachTransferredFile(TransferredFileAttachmentPayload payload) {
-    return handleAttachment(payload.toAttachmentPath());
+  /// Streams a selection to the receiving Host, then registers only committed metadata.
+  Future<void> attachSelectedFile(
+    SelectedFileInput file, {
+    required String? expectedChatId,
+    bool Function()? isCancelled,
+  }) async {
+    final transfer = clients.servicesAttachmentTransferManager;
+    String? uploadId;
+    void checkCancellation() {
+      if (isCancelled?.call() ?? false) {
+        throw StateError('Attachment upload was cancelled');
+      }
+    }
+
+    try {
+      checkCancellation();
+      uploadId = await transfer.beginAttachmentUpload(
+        fileName: file.name,
+        expectedByteLength: file.byteLength,
+      );
+      var uploaded = 0;
+      Stream<Uint8List> checkedChunks() async* {
+        await for (final chunk in file.chunks()) {
+          checkCancellation();
+          uploaded += chunk.length;
+          if (file.byteLength != null && uploaded > file.byteLength!) {
+            throw StateError('Selected file exceeds its declared byte length');
+          }
+          yield chunk;
+        }
+        if (file.byteLength != null && uploaded != file.byteLength) {
+          throw StateError('Selected file byte length changed during upload');
+        }
+      }
+
+      await transfer.writeAttachmentUpload(
+        uploadId: uploadId,
+        fileName: file.name,
+        expectedByteLength: file.byteLength,
+        bytes: checkedChunks(),
+      );
+      checkCancellation();
+      final attachment = await transfer.completeAttachmentUpload(
+        uploadId: uploadId,
+        fileName: file.name,
+        expectedByteLength: uploaded,
+      );
+      checkCancellation();
+      await _chat.attachUploadedFile(
+        attachment: attachment,
+        expectedChatId: expectedChatId,
+      );
+    } catch (error, stackTrace) {
+      if (uploadId != null) {
+        try {
+          await transfer.discardAttachmentUpload(
+            uploadId: uploadId,
+            fileName: file.name,
+          );
+        } catch (cleanup) {
+          debugPrint('Failed to discard attachment upload: $cleanup');
+        }
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      try {
+        await file.close();
+      } catch (cleanup) {
+        debugPrint('Failed to close selected file input: $cleanup');
+      }
+    }
   }
 
   /// Adds pasted text through the runtime's virtual plain-text attachment path.

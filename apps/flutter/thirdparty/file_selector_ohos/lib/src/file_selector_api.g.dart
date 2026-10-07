@@ -11,7 +11,6 @@ class FileResponse {
     this.mimeType,
     this.name,
     required this.size,
-    required this.bytes,
   });
 
   String path;
@@ -22,10 +21,8 @@ class FileResponse {
 
   int size;
 
-  Uint8List bytes;
-
   Object encode() {
-    return <Object?>[path, mimeType, name, size, bytes];
+    return <Object?>[path, mimeType, name, size];
   }
 
   static FileResponse decode(Object result) {
@@ -35,7 +32,6 @@ class FileResponse {
       mimeType: result[1] as String?,
       name: result[2] as String?,
       size: result[3]! as int,
-      bytes: result[4]! as Uint8List,
     );
   }
 }

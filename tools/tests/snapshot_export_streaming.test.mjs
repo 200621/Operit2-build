@@ -183,11 +183,11 @@ test('snapshot upload remains unsealed when the sealing flush fails', () => {
 
 /** Checks that every selected-file input and the runtime upload accept the same bounded chunks. */
 test('snapshot upload uses 1 MiB chunks while exports keep their existing bound', () => {
-  const dart = source('apps/flutter/app/lib/core/snapshot/SnapshotImportUploader.dart');
+  const dart = source('apps/flutter/app/lib/core/host/SelectedFileInput.dart');
   const runtime = source('core/crates/runtime/application/src/services/ArchiveTransferManager.rs');
-  const android = source('apps/flutter/app/android/app/src/main/kotlin/app/operit/SnapshotImportInputChannel.kt');
+  const android = source('apps/flutter/app/android/app/src/main/kotlin/app/operit/DocumentInputChannel.kt');
   const apple = source('apps/flutter/app/ios/Runner/AppleSnapshotImportInputChannel.swift');
-  assert.match(dart, /_snapshotImportChunkSize = 1024 \* 1024/);
+  assert.match(dart, /selectedFileChunkBytes = 1024 \* 1024/);
   assert.match(runtime, /ARCHIVE_UPLOAD_MAX_CHUNK_BYTES: usize = 1024 \* 1024/);
   assert.match(runtime, /ARCHIVE_TRANSFER_MAX_CHUNK_BYTES: usize = 64 \* 1024/);
   assert.match(android, /MAX_CHUNK_SIZE = 1024 \* 1024/);

@@ -17,6 +17,7 @@ import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart';
 import '../../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../../core/snapshot/SnapshotImportUploader.dart';
+import '../../../../core/host/SelectedFileInput.dart';
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/StorageDirectorySelectionError.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
@@ -336,7 +337,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
 
   Future<void> _importRawSnapshot() async {
     final l10n = AppLocalizations.of(context)!;
-    final file = await SnapshotImportFile.pick();
+    final file = await SelectedFileInput.pickSnapshot();
     if (file == null) {
       return;
     }
@@ -427,7 +428,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
   /// Selects, previews, confirms, and imports a complete Operit1 snapshot.
   Future<void> _importOperit1Snapshot() async {
     final l10n = AppLocalizations.of(context)!;
-    final file = await SnapshotImportFile.pick();
+    final file = await SelectedFileInput.pickSnapshot();
     if (file == null) {
       return;
     }

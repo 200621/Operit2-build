@@ -544,7 +544,7 @@ exports.hello_world = hello_world;
 示例由当前版本软件随 PackageBuilder 提供，位于 Skill 的 `examples/packages/`。下列文件实际来自当前源码；构建产物并不代表它们已安装到当前 runtime。
 
 - `examples/packages/buildin/time.ts`：单文件工具包的 `METADATA`、参数与导出函数。
-- `examples/packages/buildin/operit_editor.ts`：只返回操作手册的包；实际修改通过 `execute_cli_command` 或 `Tools.SoftwareSettings.exec(args)` 执行。
+- `examples/packages/buildin/operit_editor.ts`：实际执行平台编辑命令的包；`operit_editor` 工具将 `args` 字符串数组传给 `Tools.SoftwareSettings.exec(args)`，与 `execute_cli_command` 使用同一执行入口，返回真实结果与错误，不接受自然语言 `query`。
 - `examples/packages/external/template_try/`：ToolPkg 清单、工作流模板、工作区模板和资源注册。
 - `examples/packages/buildin/workflow/`：较完整的 ToolPkg 项目，包含 UI、公共接口和构建说明。
 
@@ -598,7 +598,7 @@ if (loginButton) {
 ## 7. 调试
 
 - 将不确定的逻辑缩为有 `METADATA` 和导出函数的独立测试包，通过 `package import/enable/list/show/exec` 验证真实行为。
-- operit_editor 仅返回操作手册，不提供脚本直跑工具；不要编造其工具名。
+- operit_editor 的 `operit_editor` 工具实际执行 `args` 指定的 core command，`args: []` 读取实际命令帮助。它不提供任意脚本片段直跑功能；不要编造其工具名。
 - 查看 `["log", "package"]`、`["log", "show"]` 的实际日志，保存原始失败信息。工具调用失败后停止并定位，不切换另一套执行链路。
 - UI、hook、provider 注册需要安装并在应用对应场景测试，不能仅执行一个导出函数就宣称这些能力已经通过测试。
 - 构建、安装、启用、执行与发布分别核验，交付时明确说明哪些环节已验证。

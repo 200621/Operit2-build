@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:operit2/core/snapshot/SnapshotImportUploader.dart';
+import 'package:operit2/core/host/SelectedFileInput.dart';
 
 const _uploadChunkBytes = 1024 * 1024;
 
@@ -30,7 +30,7 @@ void main() {
     final original = Uint8List.fromList(
       List<int>.generate(2 * _uploadChunkBytes + 17, (index) => index % 251),
     );
-    final file = SnapshotImportFile.fromStream(
+    final file = SelectedFileInput.fromStream(
       name: 'snapshot.zip',
       byteLength: original.length,
       stream: _fileEvents(original, 64 * 1024),
@@ -51,7 +51,7 @@ void main() {
     final original = Uint8List.fromList(
       List<int>.generate(_uploadChunkBytes + 19, (index) => index % 251),
     );
-    final file = SnapshotImportFile.fromStream(
+    final file = SelectedFileInput.fromStream(
       name: 'snapshot.zip',
       byteLength: original.length,
       stream: Stream<Uint8List>.fromIterable(<Uint8List>[
@@ -68,7 +68,7 @@ void main() {
   });
 
   test('an empty input emits no upload chunks', () async {
-    final file = SnapshotImportFile.fromStream(
+    final file = SelectedFileInput.fromStream(
       name: 'empty.zip',
       byteLength: 0,
       stream: const Stream<Uint8List>.empty(),
@@ -80,7 +80,7 @@ void main() {
   test(
     'a source read failure propagates without emitting a partial chunk',
     () async {
-      final file = SnapshotImportFile.fromStream(
+      final file = SelectedFileInput.fromStream(
         name: 'failed.zip',
         byteLength: 10,
         stream: _failingFileEvents(),
@@ -97,7 +97,7 @@ void main() {
         cancelled = true;
       },
     );
-    final file = SnapshotImportFile.fromStream(
+    final file = SelectedFileInput.fromStream(
       name: 'snapshot.zip',
       byteLength: _uploadChunkBytes,
       stream: input.stream,
@@ -135,7 +135,7 @@ void main() {
           }
         });
     try {
-      final file = (await SnapshotImportFile.pick())!;
+      final file = (await SelectedFileInput.pickSnapshot())!;
       expect((await file.readChunk()).length, _uploadChunkBytes);
       await file.close();
       expect(methods, <String>['pick', 'readChunk', 'close']);

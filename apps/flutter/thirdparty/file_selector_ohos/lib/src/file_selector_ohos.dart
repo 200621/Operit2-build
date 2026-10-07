@@ -9,6 +9,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
 import 'file_selector_api.g.dart';
+import 'uri_xfile.dart';
 
 /// An implementation of [FileSelectorPlatform] for OpenHarmony.
 class FileSelectorOhos extends FileSelectorPlatform {
@@ -97,14 +98,11 @@ class FileSelectorOhos extends FileSelectorPlatform {
   }
 
   XFile _xFileFromFileResponse(FileResponse file) {
-    return XFile.fromData(
-      file.bytes,
-      // Note: The name parameter is not used by XFile. The XFile.name returns
-      // the extracted file name from XFile.path.
+    return UriXFile(
+      file.path,
       name: file.name,
       length: file.size,
       mimeType: file.mimeType,
-      path: file.path,
     );
   }
 

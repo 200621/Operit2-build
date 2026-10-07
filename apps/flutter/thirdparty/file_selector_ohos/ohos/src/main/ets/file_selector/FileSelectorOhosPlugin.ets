@@ -32,9 +32,9 @@ export default class FileSelectorOhosPlugin implements FlutterPlugin, AbilityAwa
     }
   }
 
-  /// Releases document-save registration when the owning ability is detached.
+  /// Releases document input handles and channel registrations when the owning ability is detached.
   onDetachedFromAbility(): void {
-    this.fileSelectorApi?.closeSaveChannel();
+    this.fileSelectorApi?.closeChannels();
     this.fileSelectorApi = null;
   }
 
@@ -43,9 +43,9 @@ export default class FileSelectorOhosPlugin implements FlutterPlugin, AbilityAwa
     this.pluginBinding = binding;
   }
 
-  /// Releases document-save registration when the Flutter engine is detached.
+  /// Releases document input handles and channel registrations when the Flutter engine is detached.
   onDetachedFromEngine(binding: FlutterPluginBinding): void {
-    this.fileSelectorApi?.closeSaveChannel();
+    this.fileSelectorApi?.closeChannels();
     this.pluginBinding = null;
   }
 }

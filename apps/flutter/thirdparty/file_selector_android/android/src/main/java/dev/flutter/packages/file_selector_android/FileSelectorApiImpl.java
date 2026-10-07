@@ -23,9 +23,7 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
 import io.flutter.plugin.common.PluginRegistry;
-import java.io.DataInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -60,11 +58,6 @@ public class FileSelectorApiImpl implements FileSelectorApi {
     @NonNull
     Intent newIntent(@NonNull String action) {
       return new Intent(action);
-    }
-
-    @NonNull
-    DataInputStream newDataInputStream(InputStream inputStream) {
-      return new DataInputStream(inputStream);
     }
   }
 
@@ -325,7 +318,6 @@ public class FileSelectorApiImpl implements FileSelectorApi {
         activityPluginBinding.getActivity().getContentResolver();
 
     String name = null;
-    Integer size = null;
     try (Cursor cursor = contentResolver.query(uri, null, null, null, null, null)) {
       if (cursor != null && cursor.moveToFirst()) {
         // Note it's called "Display Name". This is
@@ -334,28 +326,7 @@ public class FileSelectorApiImpl implements FileSelectorApi {
         if (nameIndex >= 0) {
           name = cursor.getString(nameIndex);
         }
-
-        final int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
-        // If the size is unknown, the value stored is null. This will
-        // happen often: The storage API allows for remote files, whose
-        // size might not be locally known.
-        if (!cursor.isNull(sizeIndex)) {
-          size = cursor.getInt(sizeIndex);
-        }
       }
-    }
-
-    if (size == null) {
-      return null;
-    }
-
-    final byte[] bytes = new byte[size];
-    try (InputStream inputStream = contentResolver.openInputStream(uri)) {
-      final DataInputStream dataInputStream = objectFactory.newDataInputStream(inputStream);
-      dataInputStream.readFully(bytes);
-    } catch (IOException exception) {
-      Log.w(TAG, exception.getMessage());
-      return null;
     }
 
     String uriPath;
@@ -383,6 +354,13 @@ public class FileSelectorApiImpl implements FileSelectorApi {
               e.getMessage() == null ? "" : e.getMessage());
     }
 
-    return new FileResponse(uriPath, contentResolver.getType(uri), name, size, bytes, nativeError);
+    if (uriPath == null) {
+      return null;
+    }
+    // The cache copy is already file-backed and bounded. Never also materialize its bytes
+    // in Java or serialize the complete file through Pigeon. Use the actual copied length
+    // so unknown/provider-stale metadata does not prevent selecting a file.
+    final long copiedSize = nativeError == null ? new java.io.File(uriPath).length() : 0;
+    return new FileResponse(uriPath, contentResolver.getType(uri), name, copiedSize, nativeError);
   }
 }

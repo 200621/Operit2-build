@@ -81,7 +81,7 @@ pub struct EnhancedAIService {
     pub shared_state: Arc<Mutex<EnhancedAISharedState>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EnhancedAISharedState {
     pub per_request_token_counts: Option<(i64, i64)>,
     pub request_window_estimate: Option<i64>,
@@ -98,8 +98,29 @@ pub struct EnhancedAISharedState {
     pub current_complete_callback_registered: bool,
     pub last_reply_content: Option<String>,
     pub last_provider_model: Option<String>,
+    pub last_turn_model_identity: Option<TurnModelIdentity>,
     pub last_turn_token_snapshot: Option<TurnTokenSnapshot>,
     pub pendingRouteChange: Option<RouteChangeIntent>,
+}
+
+/// Display metadata captured from the resolved model configuration for one turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnModelIdentity {
+    pub providerName: String,
+    pub modelName: String,
+}
+
+impl EnhancedAISharedState {
+    /// Publishes the selected model before the background response task starts.
+    fn beginTurn(&mut self, config: &ResolvedModelConfig, providerModel: String) {
+        self.last_provider_model = Some(providerModel);
+        self.last_turn_model_identity = Some(TurnModelIdentity {
+            providerName: config.providerName.clone(),
+            modelName: config.modelId.clone(),
+        });
+        self.last_reply_content = None;
+        self.last_turn_token_snapshot = None;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -562,25 +583,7 @@ impl EnhancedAIService {
             tool_processing_scope: ToolProcessingScopeMirror,
             package_manager: PackageManagerMirror,
             provider_runtime_context,
-            shared_state: Arc::new(Mutex::new(EnhancedAISharedState {
-                per_request_token_counts: None,
-                request_window_estimate: None,
-                active_execution_contexts: BTreeMap::new(),
-                next_execution_context_id: 0,
-                tool_execution_jobs: BTreeMap::new(),
-                accumulated_input_token_count: 0,
-                accumulated_output_token_count: 0,
-                accumulated_cached_input_token_count: 0,
-                current_request_input_token_count: 0,
-                current_request_output_token_count: 0,
-                current_request_cached_input_token_count: 0,
-                current_response_callback_registered: false,
-                current_complete_callback_registered: false,
-                last_reply_content: None,
-                last_provider_model: None,
-                last_turn_token_snapshot: None,
-                pendingRouteChange: None,
-            })),
+            shared_state: Arc::new(Mutex::new(EnhancedAISharedState::default())),
         }
     }
 
@@ -1140,7 +1143,11 @@ impl EnhancedAIService {
             introPrompt,
             waifuRulesText: String::new(),
             avatarMoodRulesText: String::new(),
-            disableUserPreferenceDescription: self.provider_runtime_context.support().disableUserPreferenceDescription().map_err(AiServiceError::RequestFailed)?,
+            disableUserPreferenceDescription: self
+                .provider_runtime_context
+                .support()
+                .disableUserPreferenceDescription()
+                .map_err(AiServiceError::RequestFailed)?,
             aiName,
             hasImageRecognition: modelConfig.capabilities.directImage,
             hasAudioRecognition: modelConfig.capabilities.directAudio,
@@ -1167,6 +1174,9 @@ impl EnhancedAIService {
         options: SendMessageOptions,
         runtime: SendMessageRuntime,
     ) -> Result<SharedAiResponseStream, AiServiceError> {
+        let providerModel = runtime.aiService.lock().await.provider_model();
+        self.shared_state()
+            .beginTurn(&runtime.modelConfig, providerModel);
         operit_util::AppLogger::AppLogger::v_with_level(
             "CoreSend",
             "provider response task schedule start",
@@ -2864,6 +2874,12 @@ impl EnhancedAIService {
         self.shared_state().last_provider_model.clone()
     }
 
+    /// Returns the configured display names, not the protocol provider type id.
+    #[allow(non_snake_case)]
+    pub fn getLastTurnModelIdentity(&self) -> Option<TurnModelIdentity> {
+        self.shared_state().last_turn_model_identity.clone()
+    }
+
     #[allow(non_snake_case)]
     pub fn getLastTurnTokenSnapshot(&self) -> Option<TurnTokenSnapshot> {
         self.shared_state().last_turn_token_snapshot.clone()
@@ -3424,5 +3440,99 @@ mod workspace_path_tests {
         assert!(
             resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/main"), &[]).is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod model_identity_tests {
+    use super::{EnhancedAISharedState, TurnModelIdentity, TurnTokenSnapshot};
+    use operit_model::ModelConfigData::{ApiProviderType, ResolvedModelConfig};
+
+    fn model_config(provider_name: &str, model_id: &str) -> ResolvedModelConfig {
+        ResolvedModelConfig {
+            providerId: "custom-provider".into(),
+            providerName: provider_name.into(),
+            modelId: model_id.into(),
+            apiKey: String::new(),
+            apiEndpoint: "https://example.test/v1/responses".into(),
+            apiProviderType: ApiProviderType::OPENAI_CODEX,
+            apiProviderTypeId: "OPENAI_CODEX".into(),
+            useMultipleApiKeys: false,
+            apiKeyPool: Vec::new(),
+            currentKeyIndex: 0,
+            keyRotationMode: "ROUND_ROBIN".into(),
+            customHeaders: "{}".into(),
+            requestLimitPerMinute: 0,
+            maxConcurrentRequests: 0,
+            pricing: None,
+            context: Default::default(),
+            capabilities: Default::default(),
+            builtinTools: Vec::new(),
+            request: Default::default(),
+            parameters: Vec::new(),
+            thinkingConfigurations: "[]".into(),
+            thinkingOptionId: String::new(),
+            summary: Default::default(),
+            localRuntime: Default::default(),
+        }
+    }
+
+    #[test]
+    fn selected_model_names_are_available_before_response_task_runs() {
+        let config = model_config("我的 Codex 供应商", "gpt-6.1-sol");
+        let mut state = EnhancedAISharedState::default();
+        state.beginTurn(&config, config.providerModelLabel());
+        assert_eq!(
+            state.last_turn_model_identity,
+            Some(TurnModelIdentity {
+                providerName: "我的 Codex 供应商".into(),
+                modelName: "gpt-6.1-sol".into(),
+            })
+        );
+        assert_eq!(
+            state.last_provider_model.as_deref(),
+            Some("OPENAI_CODEX:gpt-6.1-sol")
+        );
+    }
+
+    #[test]
+    fn display_names_preserve_colons_and_model_path_separators() {
+        let config = model_config("代理: OpenAI", "org/model:latest");
+        let mut state = EnhancedAISharedState::default();
+        state.beginTurn(&config, "OPENAI_GENERIC:org/model:latest".into());
+        let identity = state.last_turn_model_identity.unwrap();
+        assert_eq!(identity.providerName, "代理: OpenAI");
+        assert_eq!(identity.modelName, "org/model:latest");
+    }
+
+    #[test]
+    fn switching_models_replaces_names_and_clears_previous_turn_results() {
+        let mut state = EnhancedAISharedState::default();
+        let first = model_config("供应商 A", "model-a");
+        state.beginTurn(&first, first.providerModelLabel());
+        let previous_identity = state.last_turn_model_identity.clone();
+        state.last_reply_content = Some("previous reply".into());
+        state.last_turn_token_snapshot = Some(TurnTokenSnapshot {
+            inputTokens: 100,
+            outputTokens: 50,
+            cachedInputTokens: 20,
+        });
+        let second = model_config("供应商 B", "model-b");
+        state.beginTurn(&second, second.providerModelLabel());
+        assert_eq!(
+            state
+                .last_turn_model_identity
+                .as_ref()
+                .unwrap()
+                .providerName,
+            "供应商 B"
+        );
+        assert_eq!(
+            state.last_turn_model_identity.as_ref().unwrap().modelName,
+            "model-b"
+        );
+        assert_eq!(previous_identity.unwrap().modelName, "model-a");
+        assert!(state.last_reply_content.is_none());
+        assert!(state.last_turn_token_snapshot.is_none());
     }
 }

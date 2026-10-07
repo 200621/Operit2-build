@@ -87,26 +87,11 @@ export class FileResponse {
     this.size = setterArg;
   }
 
-  private bytes: Uint8Array;
-
-  public getBytes(): Uint8Array {
-    return this.bytes;
-  }
-
-  public setBytes(setterArg: Uint8Array): void {
-    if (setterArg == null) {
-      throw new Error("Nonnull field \"bytes\" is null.");
-    }
-    this.bytes = setterArg;
-  }
-
-
-  constructor(path: string, mimeType: string, name: string, size: number, bytes: Uint8Array) {
+  constructor(path: string, mimeType: string, name: string, size: number) {
     this.path = path;
     this.mimeType = mimeType;
     this.name = name;
     this.size = size;
-    this.bytes = bytes;
   }
 
   toList(): Array<ESObject> {
@@ -115,7 +100,6 @@ export class FileResponse {
     toListResult.push(this.mimeType);
     toListResult.push(this.name);
     toListResult.push(this.size);
-    toListResult.push(this.bytes);
     return toListResult;
   }
 
@@ -124,8 +108,7 @@ export class FileResponse {
     let mimeType: ESObject = list[1];
     let name: ESObject = list[2];
     let size: ESObject = list[3];
-    let bytes: ESObject = list[4];
-    let response = new FileResponse(path, mimeType, name, size, bytes);
+    let response = new FileResponse(path, mimeType, name, size);
     return response;
   }
 }
