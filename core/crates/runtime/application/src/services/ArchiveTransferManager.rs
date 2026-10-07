@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::data::archive::ArchiveSource::ArchiveSource;
 
 const ARCHIVE_TRANSFER_MAX_CHUNK_BYTES: usize = 64 * 1024;
+const ARCHIVE_UPLOAD_MAX_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Identifies one immutable archive staged by the runtime-owning host.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -67,9 +68,9 @@ impl ArchiveTransferManager {
                 if writeError.is_some() {
                     return;
                 }
-                if chunk.len() > ARCHIVE_TRANSFER_MAX_CHUNK_BYTES {
+                if chunk.len() > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES {
                     writeError = Some(format!(
-                        "Archive upload chunk exceeds the {ARCHIVE_TRANSFER_MAX_CHUNK_BYTES}-byte limit"
+                        "Archive upload chunk exceeds the {ARCHIVE_UPLOAD_MAX_CHUNK_BYTES}-byte limit"
                     ));
                     return;
                 }

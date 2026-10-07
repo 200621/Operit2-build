@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
@@ -9,20 +10,22 @@ import 'package:flutter/services.dart';
 import '../proxy/generated/CoreProxyClients.g.dart';
 import '../proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 
-const int _snapshotImportChunkSize = 64 * 1024;
+const int _snapshotImportChunkSize = 1024 * 1024;
 const MethodChannel _snapshotImportInputChannel = MethodChannel(
   'operit/snapshot_import_input',
 );
 
 /// Holds one platform-owned selected file that can be read in bounded chunks.
 class SnapshotImportFile {
+  /// Creates a bounded-read input owned by the platform document channel.
   SnapshotImportFile._native({
     required this.token,
     required this.name,
     required this.byteLength,
   }) : _streamInput = null;
 
-  SnapshotImportFile._stream({
+  /// Creates a bounded-read input from a caller-owned file stream.
+  SnapshotImportFile.fromStream({
     required this.name,
     required this.byteLength,
     required Stream<Uint8List> stream,
@@ -83,7 +86,7 @@ class SnapshotImportFile {
     if (file == null) {
       return null;
     }
-    return SnapshotImportFile._stream(
+    return SnapshotImportFile.fromStream(
       name: file.name,
       byteLength: await file.length(),
       stream: file.openRead(),
@@ -127,31 +130,39 @@ class SnapshotImportFile {
     }
   }
 
-  /// Splits browser or desktop file-stream events into bounded upload chunks.
+  /// Coalesces file-stream events into bounded upload chunks without loading the archive.
   Future<Uint8List> _readStreamChunk() async {
-    final pending = _pendingStreamChunk;
-    if (pending != null) {
-      return _takeStreamChunk(pending);
-    }
+    final bytes = BytesBuilder(copy: false);
     final input = _streamInput!;
-    final hasNext = await input.moveNext();
-    if (!hasNext) {
-      return Uint8List(0);
+    while (bytes.length < _snapshotImportChunkSize) {
+      final pending = _pendingStreamChunk;
+      if (pending != null) {
+        bytes.add(
+          _takeStreamChunk(pending, _snapshotImportChunkSize - bytes.length),
+        );
+        continue;
+      }
+      if (!await input.moveNext()) {
+        return bytes.takeBytes();
+      }
+      bytes.add(
+        _takeStreamChunk(
+          input.current,
+          _snapshotImportChunkSize - bytes.length,
+        ),
+      );
     }
-    return _takeStreamChunk(input.current);
+    return bytes.takeBytes();
   }
 
-  /// Takes one bounded upload chunk and retains any remaining input-stream bytes.
-  Uint8List _takeStreamChunk(Uint8List bytes) {
-    if (bytes.length <= _snapshotImportChunkSize) {
+  /// Takes the requested bytes and retains the remainder of the current stream event.
+  Uint8List _takeStreamChunk(Uint8List bytes, int maxBytes) {
+    if (bytes.length <= maxBytes) {
       _pendingStreamChunk = null;
       return bytes;
     }
-    _pendingStreamChunk = Uint8List.sublistView(
-      bytes,
-      _snapshotImportChunkSize,
-    );
-    return Uint8List.sublistView(bytes, 0, _snapshotImportChunkSize);
+    _pendingStreamChunk = Uint8List.sublistView(bytes, maxBytes);
+    return Uint8List.sublistView(bytes, 0, maxBytes);
   }
 }
 

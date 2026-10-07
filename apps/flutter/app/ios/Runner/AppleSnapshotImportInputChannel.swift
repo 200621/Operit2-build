@@ -148,7 +148,7 @@ final class AppleSnapshotImportInputChannel: NSObject, UIDocumentPickerDelegate 
       return
     }
     do {
-      let data = try input.handle.read(upToCount: min(maxBytes, 64 * 1024)) ?? Data()
+      let data = try input.handle.read(upToCount: min(maxBytes, 1024 * 1024)) ?? Data()
       result(FlutterStandardTypedData(bytes: data))
     } catch {
       result(FlutterError(code: "READ_FAILED", message: error.localizedDescription, details: nil))

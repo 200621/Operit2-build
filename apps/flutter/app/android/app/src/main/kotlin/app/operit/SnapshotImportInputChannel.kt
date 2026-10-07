@@ -16,7 +16,7 @@ class SnapshotImportInputChannel(private val activity: MainActivity) {
     companion object {
         private const val CHANNEL_NAME = "operit/snapshot_import_input"
         private const val PICK_SNAPSHOT_REQUEST_CODE = 46091
-        private const val DEFAULT_CHUNK_SIZE = 64 * 1024
+        private const val MAX_CHUNK_SIZE = 1024 * 1024
     }
 
     private data class OpenSnapshotInput(
@@ -125,7 +125,7 @@ class SnapshotImportInputChannel(private val activity: MainActivity) {
             result.error("UNKNOWN_INPUT", "Snapshot input token is not open", null)
             return
         }
-        val buffer = ByteArray(requestedLength.coerceAtMost(DEFAULT_CHUNK_SIZE))
+        val buffer = ByteArray(requestedLength.coerceAtMost(MAX_CHUNK_SIZE))
         try {
             val count = input.stream.read(buffer)
             result.success(if (count <= 0) ByteArray(0) else buffer.copyOf(count))

@@ -60,6 +60,54 @@ function runtime() {
   return { context, load, channels };
 }
 
+/** Boots the public list tool with explicitly supplied persisted workflow data. */
+function persistedWorkflowRuntime(database) {
+  const value = runtime();
+  const reads = [];
+  const writes = [];
+  const calls = [];
+  value.context.PluginConfig = {
+    /** Returns the persisted database rather than a new database. */
+    async use(key, initial) {
+      reads.push({ key, initial: structuredClone(initial) });
+      return database;
+    },
+    /** Records explicit migrations without touching application storage. */
+    async flush(data) {
+      assert.equal(data, database);
+      writes.push(structuredClone(data));
+    },
+  };
+  /** Records routing metadata before delivering the production tool request. */
+  value.context.ToolPkg.ipc.call = async (name, request, options) => {
+    calls.push({ name, request: structuredClone(request), options: structuredClone(options) });
+    assert.ok(value.channels.has(name), 'Missing IPC channel: ' + name);
+    return value.channels.get(name)(request, {});
+  };
+  return { ...value, database, reads, writes, calls, tools: value.load(new URL('tools.js', base)) };
+}
+
+/** Creates retained workflow state with completed runs and a manifest template. */
+function persistedWorkflowDatabase() {
+  const { load } = runtime();
+  const { newWorkflow } = load(new URL('model.js', base));
+  const workflows = [newWorkflow('Retained A'), newWorkflow('Retained B')];
+  return {
+    version: 2,
+    workflows,
+    runs: [{
+      id: 'retained-run', workflowId: workflows[0].id, workflowName: workflows[0].name,
+      triggerId: null, status: 'SUCCESS', startedAt: 10, finishedAt: 20, nodes: {}, logs: [],
+    }],
+    fired: { 'retained-schedule': 30 },
+    manifestTemplates: [{
+      sourceToolPkgId: 'test.template', sourceVersion: '1.0.0', templateId: 'retained-template',
+      displayName: 'Retained template', description: 'Persisted template', resourceKey: 'template',
+      workflow: newWorkflow('Template'),
+    }],
+  };
+}
+
 /** Collects ordinary children and named slots from a serialized UI tree. */
 function descendants(node) {
   return [node, ...(node.children ?? []).flatMap(descendants),
@@ -95,6 +143,63 @@ test('cold main module registers workflow IPC without metadata registration', as
   const state = await service({ action: 'create', name: 'Blank', description: 'Description' }, {});
   assert.equal(state.workflows[0].description, 'Description');
   assert.equal(state.workflows[0].nodes.length, 0);
+});
+
+/** Verifies the exact workflow:list entry point accepts existing version-two state. */
+test('workflow:list reads persisted version 2 through cold main IPC without rewriting data', async () => {
+  const database = persistedWorkflowDatabase();
+  const before = structuredClone(database);
+  const { tools, reads, writes, calls } = persistedWorkflowRuntime(database);
+  const result = await tools.list();
+  assert.deepEqual(structuredClone(result), {
+    workflows: before.workflows, runs: before.runs, manifestTemplates: before.manifestTemplates,
+  });
+  assert.deepEqual(structuredClone(database), before);
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].key, 'workflows');
+  assert.equal(reads[0].initial.version, 2);
+  assert.equal(writes.length, 0);
+  assert.deepEqual(calls, [{
+    name: 'workflow.service', request: { action: 'list' }, options: { targetRuntime: 'main' },
+  }]);
+  result.workflows[0].name = 'Unsaved edit';
+  result.runs[0].logs.push({ time: 40, nodeId: '', level: 'info', message: 'Unsaved log' });
+  result.manifestTemplates.length = 0;
+  assert.deepEqual(structuredClone(await tools.list()), {
+    workflows: before.workflows, runs: before.runs, manifestTemplates: before.manifestTemplates,
+  });
+  assert.equal(reads.length, 1);
+  assert.equal(writes.length, 0);
+  assert.deepEqual(structuredClone(database), before);
+});
+
+/** Verifies the supported migration preserves workflows, run history and schedule state. */
+test('workflow:list migrates persisted version 1 exactly once without losing retained state', async () => {
+  const database = persistedWorkflowDatabase();
+  database.version = 1;
+  delete database.manifestTemplates;
+  const before = structuredClone(database);
+  const { tools, reads, writes } = persistedWorkflowRuntime(database);
+  const result = await tools.list();
+  assert.deepEqual(structuredClone(database), { ...before, version: 2, manifestTemplates: [] });
+  assert.deepEqual(structuredClone(result), {
+    workflows: before.workflows, runs: before.runs, manifestTemplates: [],
+  });
+  assert.deepEqual(writes, [structuredClone(database)]);
+  await tools.list();
+  assert.equal(reads.length, 1);
+  assert.equal(writes.length, 1);
+});
+
+/** Verifies unsupported schemas remain explicit errors rather than replacing stored data. */
+test('workflow:list rejects unsupported persisted versions without rewriting data', async () => {
+  const database = persistedWorkflowDatabase();
+  database.version = 3;
+  const before = structuredClone(database);
+  const { tools, writes } = persistedWorkflowRuntime(database);
+  await assert.rejects(tools.list(), { message: '不支持的数据版本：3' });
+  assert.equal(writes.length, 0);
+  assert.deepEqual(structuredClone(database), before);
 });
 
 test('tool catalog request preserves runtime schemas for the web editor', async () => {

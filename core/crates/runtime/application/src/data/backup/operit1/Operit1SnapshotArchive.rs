@@ -46,9 +46,9 @@ pub(crate) struct Operit1SnapshotModelConfigJson {
     pub(crate) value: Value,
 }
 
-/// Stores decoded Operit1 archive metadata and a source for later entry reads.
+/// Stores decoded Operit1 metadata and a reusable validated ZIP directory.
 pub(crate) struct Operit1SnapshotArchive {
-    source: Arc<dyn ArchiveSource>,
+    archive: ZipArchive<ArchiveSourceReader>,
     pub(crate) manifest: Operit1SnapshotManifest,
     pub(crate) entries: BTreeMap<String, Operit1SnapshotEntry>,
     pub(crate) datastorePreferences: BTreeMap<String, HashMap<String, Operit1PreferenceValue>>,
@@ -59,7 +59,7 @@ pub(crate) struct Operit1SnapshotArchive {
 impl Operit1SnapshotArchive {
     /// Parses and validates an Operit1 snapshot from one range-readable source.
     pub(crate) fn fromSource(source: Arc<dyn ArchiveSource>) -> Result<Self, String> {
-        let mut archive = Self::openZip(source.clone())?;
+        let mut archive = Self::openZip(source)?;
         if archive.len() > MAX_ARCHIVE_ENTRY_COUNT {
             return Err(format!(
                 "Operit1 snapshot contains more than {MAX_ARCHIVE_ENTRY_COUNT} entries"
@@ -144,7 +144,7 @@ impl Operit1SnapshotArchive {
             .cloned()
             .ok_or_else(|| "Operit1 function model mappings are missing CHAT".to_string())?;
         Ok(Self {
-            source,
+            archive,
             manifest,
             entries,
             datastorePreferences,
@@ -192,7 +192,7 @@ impl Operit1SnapshotArchive {
                 "Operit1 snapshot is missing required entry: {name}"
             ));
         }
-        let mut archive = Self::openZip(self.source.clone())?;
+        let mut archive = self.archive.clone();
         let mut entry = archive.by_name(name).map_err(|error| error.to_string())?;
         copyArchiveReaderToWriter(&mut entry, writer)?;
         Ok(())
@@ -203,7 +203,7 @@ impl Operit1SnapshotArchive {
     where
         F: FnMut(usize, &str, &mut dyn Read) -> Result<(), String>,
     {
-        let mut archive = Self::openZip(self.source.clone())?;
+        let mut archive = self.archive.clone();
         for (index, name) in names.iter().enumerate() {
             if !self.hasEntry(name) {
                 return Err(format!(
@@ -239,3 +239,124 @@ fn copyArchiveReaderToWriter<R: Read, W: Write>(
 /// Represents one value decoded from the legacy DataStore protobuf payload.
 
 include!("Operit1DataStorePreferences.rs");
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts range reads over an immutable snapshot used to verify ZIP directory reuse.
+    struct CountingSnapshotSource {
+        bytes: Vec<u8>,
+        reads: AtomicUsize,
+    }
+
+    impl ArchiveSource for CountingSnapshotSource {
+        /// Returns the fixture snapshot's immutable length.
+        fn len(&self) -> Result<u64, String> {
+            Ok(self.bytes.len() as u64)
+        }
+
+        /// Reads the requested range and records each host-boundary call.
+        fn readAt(&self, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let start = offset as usize;
+            Ok(self.bytes[start..(start + length).min(self.bytes.len())].to_vec())
+        }
+    }
+
+    /// Encodes one length-delimited protobuf field for independent AndroidX fixtures.
+    fn appendField(bytes: &mut Vec<u8>, tag: u8, value: &[u8]) {
+        bytes.push(tag);
+        let mut length = value.len();
+        while length >= 128 {
+            bytes.push((length as u8 & 127) | 128);
+            length >>= 7;
+        }
+        bytes.push(length as u8);
+        bytes.extend_from_slice(value);
+    }
+
+    /// Encodes string preferences using the actual AndroidX PreferenceMap field numbers.
+    fn stringPreferences(values: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (key, value) in values {
+            let mut encodedValue = Vec::new();
+            appendField(&mut encodedValue, 0x2a, value.as_bytes());
+            let mut entry = Vec::new();
+            appendField(&mut entry, 0x0a, key.as_bytes());
+            appendField(&mut entry, 0x12, &encodedValue);
+            appendField(&mut bytes, 0x0a, &entry);
+        }
+        bytes
+    }
+
+    /// Builds a valid small snapshot containing one caller-specified resource path.
+    fn snapshotFixture(resourcePath: &str) -> Arc<CountingSnapshotSource> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in [
+            (
+                ENTRY_MANIFEST,
+                br#"{"formatVersion":1,"packageName":"test.operit","createdAt":1}"#.to_vec(),
+            ),
+            (
+                ENTRY_MODEL_CONFIGS,
+                stringPreferences(&[("config_list", "[\"test\"]"), ("config_test", "{}")]),
+            ),
+            (
+                ENTRY_FUNCTIONAL_CONFIGS,
+                stringPreferences(&[("function_config_mapping", "{\"CHAT\":{}}")]),
+            ),
+            (resourcePath, b"test resource".to_vec()),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        Arc::new(CountingSnapshotSource {
+            bytes: writer.finish().unwrap().into_inner(),
+            reads: AtomicUsize::new(0),
+        })
+    }
+
+    /// Reuses the parsed ZIP directory and cached bytes for repeated validated entry reads.
+    #[test]
+    fn entry_copies_reuse_the_validated_zip_directory() {
+        let entryName = "payload/files/resource.txt";
+        let source = snapshotFixture(entryName);
+        let archive = Operit1SnapshotArchive::fromSource(source.clone()).unwrap();
+        let initialReads = source.reads.load(Ordering::Relaxed);
+        for _ in 0..10 {
+            let mut bytes = Vec::new();
+            archive.copyEntryTo(entryName, &mut bytes).unwrap();
+            assert_eq!(bytes, b"test resource");
+        }
+        let mut copied = 0;
+        archive
+            .copyEntriesTo(&[entryName.to_string()], |index, name, reader| {
+                assert_eq!(index, 0);
+                assert_eq!(name, entryName);
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).unwrap();
+                assert_eq!(bytes, b"test resource");
+                copied += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(copied, 1);
+        assert_eq!(source.reads.load(Ordering::Relaxed), initialReads);
+        assert!(archive
+            .copyEntryTo("payload/files/missing.txt", &mut Vec::new())
+            .is_err());
+    }
+
+    /// Preserves path traversal rejection while scanning through cached source blocks.
+    #[test]
+    fn cached_snapshot_scan_still_rejects_invalid_paths() {
+        let source = snapshotFixture("payload/files/../invalid.txt");
+        assert!(Operit1SnapshotArchive::fromSource(source).is_err());
+    }
+}

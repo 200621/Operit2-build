@@ -1008,17 +1008,19 @@ class RuntimeWorkerArchiveStaging {
     }
     writeExact(this.data, content, archive.offset + archive.byteLength);
     archive.byteLength += content.byteLength;
-    this.data.flush();
   }
 
   /** Seals an archive and returns its immutable persisted byte length. */
   seal(archiveId: string): number {
     const archive = this.requiredArchive(archiveId);
+    if (archive.sealed) {
+      return archive.byteLength;
+    }
     if (archive.expectedByteLength !== null && archive.byteLength !== archive.expectedByteLength) {
       throw new Error("archive staging upload does not match its declared byte length");
     }
-    archive.sealed = true;
     this.data.flush();
+    archive.sealed = true;
     return archive.byteLength;
   }
 
