@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -29,8 +29,9 @@ use operit_model::InputProcessingState::InputProcessingState;
 use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::AssistantMarkupStreamState;
 use operit_model::PromptFunctionType::PromptFunctionType;
+use operit_node_runtime::NodeServices::PairingPrompt;
 use operit_node_runtime::RuntimeRemoteLinkService::{
-    RuntimeDeviceSpaceTopology, RuntimeRemoteLinkService,
+    RuntimeDeviceSpaceTopology, RuntimeRemoteLinkService, SpaceJoinRequest,
 };
 use operit_runtime::data::preferences::ModelConfigManager::ModelConfigManager;
 use operit_runtime::services::ChatServiceCore::ChatState;
@@ -65,6 +66,7 @@ use crate::cli::network_control_ui::{
     network_role_summary, new_network_control_id,
 };
 use crate::cli::CliInstallProgress;
+use crate::tui::NetworkUiEvent;
 use crate::{build_attachment_info, parse_shell_args, ChatSendArgs, ShellArgs};
 use operit_store::NetworkControlStore::{NetworkControlIdentityAssignment, NetworkControlRole};
 
@@ -120,6 +122,12 @@ pub(super) struct OperitTui {
     pub(super) status_message_expires_at: Option<Instant>,
     pub(super) transient_status_message: Option<String>,
     toast_receiver: mpsc::Receiver<String>,
+    network_event_receiver: mpsc::Receiver<NetworkUiEvent>,
+    seen_pairing_prompt_ids: BTreeSet<String>,
+    seen_join_request_ids: BTreeSet<String>,
+    /// Seeds the seen-id snapshots from the first fetch so a TUI start does
+    /// not replay requests that predate the session.
+    network_snapshots_seeded: bool,
     pub(super) context_usage_label: String,
     pub(super) transcript_scroll: u16,
     pub(super) transcript_viewport_height: u16,
@@ -151,6 +159,7 @@ pub(super) struct OperitTui {
     pub(super) startup_install_prompt: Option<StartupInstallPrompt>,
     pub(super) startup_update_prompt: Option<StartupUpdatePrompt>,
     pub(super) startup_workspace_prompt: Option<StartupWorkspacePrompt>,
+    pub(super) join_decision: Option<JoinDecisionModal>,
     pub(super) show_config_popup: bool,
     pub(super) config_ui: ConfigUi,
     pub(super) should_quit: bool,
@@ -273,6 +282,14 @@ pub(super) struct StartupWorkspacePrompt {
     pub(super) accept_selected: bool,
 }
 
+/// Interactive decision popup for incoming Space join requests. Requests are
+/// decided in place with Y/N; Esc defers them and the command path stays
+/// available as the fallback.
+pub(super) struct JoinDecisionModal {
+    pub(super) requests: Vec<SpaceJoinRequest>,
+    pub(super) selected: usize,
+}
+
 #[derive(Debug)]
 pub(super) struct StartupInstallPrompt {
     pub(super) install_selected: bool,
@@ -362,6 +379,7 @@ impl OperitTui {
         startup_update_prompt: Option<StartupUpdatePrompt>,
         startup_workspace_prompt_path: Option<String>,
         toast_receiver: mpsc::Receiver<String>,
+        network_event_receiver: mpsc::Receiver<NetworkUiEvent>,
     ) -> Result<Self, String> {
         let chat_histories = core
             .chat_runtime_holder_main()
@@ -505,6 +523,10 @@ impl OperitTui {
             status_message_expires_at: None,
             transient_status_message: None,
             toast_receiver,
+            network_event_receiver,
+            seen_pairing_prompt_ids: BTreeSet::new(),
+            seen_join_request_ids: BTreeSet::new(),
+            network_snapshots_seeded: false,
             context_usage_label: String::new(),
             transcript_scroll: 0,
             transcript_viewport_height: 1,
@@ -540,6 +562,7 @@ impl OperitTui {
             }),
             show_config_popup: false,
             config_ui: ConfigUi::new(),
+            join_decision: None,
             should_quit: false,
         })
     }
@@ -636,6 +659,7 @@ impl OperitTui {
                 }
             }
             self.apply_toast_messages();
+            self.apply_network_events().await;
             if let Err(error) = self.sync_compose_surfaces().await {
                 if Self::is_route_permission_error_message(&error) {
                     self.apply_route_permission_error(error);
@@ -678,6 +702,102 @@ impl OperitTui {
     fn apply_toast_messages(&mut self) {
         while let Ok(message) = self.toast_receiver.try_recv() {
             self.set_transient_status_message(message);
+        }
+    }
+
+    /// Applies peer-change watcher signals: fetches fresh pairing prompt and
+    /// join request snapshots and opens the popups when ids beyond the
+    /// previous snapshot appear. The first fetch only seeds the snapshots so
+    /// a TUI start does not replay requests that predate the session.
+    async fn apply_network_events(&mut self) {
+        while self
+            .network_event_receiver
+            .try_recv()
+            .map(|event| matches!(event, NetworkUiEvent::PeerChanges))
+            .unwrap_or(false)
+        {
+            self.refresh_network_snapshots().await;
+        }
+    }
+
+    async fn refresh_network_snapshots(&mut self) {
+        let prompts = self.networkControl.pairingPrompts().unwrap_or_default();
+        let has_new_prompts = prompts
+            .iter()
+            .any(|prompt| !self.seen_pairing_prompt_ids.contains(&prompt.pairingId));
+        if self.network_snapshots_seeded && has_new_prompts {
+            self.open_pairing_prompts_popup(&prompts);
+        }
+        self.seen_pairing_prompt_ids = prompts
+            .iter()
+            .map(|prompt| prompt.pairingId.clone())
+            .collect();
+
+        let Ok(requests) = self.networkControl.incomingDeviceSpaceJoins().await else {
+            self.network_snapshots_seeded = true;
+            return;
+        };
+        let has_new_requests = requests
+            .iter()
+            .any(|request| !self.seen_join_request_ids.contains(&request.requestId));
+        if self.network_snapshots_seeded && has_new_requests {
+            self.open_join_decision_modal(requests.clone());
+        }
+        self.seen_join_request_ids = requests
+            .iter()
+            .map(|request| request.requestId.clone())
+            .collect();
+        self.network_snapshots_seeded = true;
+    }
+
+    /// Opens the pairing popup listing every pending prompt, one block per
+    /// prompt with the confirmation code on its own line, plus a trailing
+    /// hint line. Esc or Enter closes it.
+    fn open_pairing_prompts_popup(&mut self, prompts: &[PairingPrompt]) {
+        let text = self.text();
+        let mut items = Vec::new();
+        for prompt in prompts {
+            items.push(prompt.displayName.clone());
+            items.push(format!(
+                "{}: {}",
+                text.network_pairing_popup_code(),
+                prompt.confirmationCode
+            ));
+        }
+        items.push(text.network_pairing_popup_hint().to_string());
+        self.open_list_popup(text.network_pairing_popup_title().to_string(), items);
+    }
+
+    /// Opens the Space join decision popup for the given pending requests.
+    /// Requests this node cannot approve are filtered out. When the popup is
+    /// already open, fresh requests merge into the queue and the current
+    /// selection is preserved.
+    fn open_join_decision_modal(&mut self, requests: Vec<SpaceJoinRequest>) {
+        let decidable: Vec<SpaceJoinRequest> = requests
+            .into_iter()
+            .filter(|request| request.canApprove)
+            .collect();
+        if decidable.is_empty() {
+            return;
+        }
+        match self.join_decision.as_mut() {
+            Some(modal) => {
+                for request in decidable {
+                    if !modal
+                        .requests
+                        .iter()
+                        .any(|existing| existing.requestId == request.requestId)
+                    {
+                        modal.requests.push(request);
+                    }
+                }
+            }
+            None => {
+                self.join_decision = Some(JoinDecisionModal {
+                    requests: decidable,
+                    selected: 0,
+                });
+            }
         }
     }
 
@@ -1103,6 +1223,11 @@ impl OperitTui {
 
         if self.approval_bridge.current().is_some() {
             self.handle_approval_key(key);
+            return Ok(());
+        }
+
+        if self.join_decision.is_some() {
+            self.handle_join_decision_key(key).await?;
             return Ok(());
         }
 
@@ -1864,7 +1989,7 @@ impl OperitTui {
 
     /// Executes a Space control command through the runtime-owned authorization service.
     async fn handle_network_command(&mut self, args: &[String]) -> Result<(), String> {
-        const USAGE: &str = "network <show|bootstrap|audit|devices|identities|identity|admit|remove|disconnect|policy>";
+        const USAGE: &str = "network <show|bootstrap|audit|devices|identities|identity|admit|remove|disconnect|policy|token|prompts|requests|approve|reject>";
         match args.first().map(String::as_str) {
             None | Some("show") if args.len() <= 1 => {
                 let state = self.networkControl.deviceSpaceControl()?;
@@ -2022,11 +2147,77 @@ impl OperitTui {
                     .updateDeviceSpacePolicy(args[2].clone(), args[3].clone())?;
                 self.status_message = format!("network policy updated: {}", args[2]);
             }
+            Some("token") if args.len() == 1 => {
+                // The pairing token must stay on screen for transfer to the
+                // other device, so it goes to the popup instead of the status line.
+                let token = self.networkControl.localPairingToken()?;
+                self.open_list_popup("Network token".to_string(), vec![token]);
+            }
+            Some("prompts") if args.len() == 1 => {
+                let prompts = self.networkControl.pairingPrompts()?;
+                if prompts.is_empty() {
+                    self.status_message = self.text().network_prompts_none().to_string();
+                } else {
+                    self.open_pairing_prompts_popup(&prompts);
+                }
+            }
+            Some("requests") if args.len() == 1 => {
+                let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+                if requests.is_empty() {
+                    self.status_message = self.text().network_requests_none().to_string();
+                } else {
+                    self.open_join_decision_modal(requests);
+                    if self.join_decision.is_none() {
+                        self.status_message = self.text().network_requests_none().to_string();
+                    }
+                }
+            }
+            Some("approve" | "reject") if args.len() == 3 => {
+                let assignment_version = args[2]
+                    .parse::<u64>()
+                    .map_err(|_| "assignment-version must be a non-negative integer".to_string())?;
+                let request_id = self.resolve_join_request_argument(&args[1]).await?;
+                let request = self
+                    .networkControl
+                    .decideDeviceSpaceJoin(request_id, assignment_version, args[0] == "approve")
+                    .await?;
+                self.status_message = format!(
+                    "network join request {} {}: {:?}",
+                    args[1],
+                    if args[0] == "approve" { "approved" } else { "rejected" },
+                    request.status,
+                );
+            }
             _ => {
                 self.status_message = USAGE.to_string();
             }
         }
         Ok(())
+    }
+
+    /// Resolves a `/network approve|reject` argument into the pending join
+    /// request id. Accepts the exact request id, device id, or applicant name;
+    /// ambiguous names are rejected so a decision never hits the wrong request.
+    async fn resolve_join_request_argument(&self, value: &str) -> Result<String, String> {
+        let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+        if requests.iter().any(|request| request.requestId == value) {
+            return Ok(value.to_string());
+        }
+        let matches = requests
+            .iter()
+            .filter(|request| {
+                request.applicantDeviceId == value || request.applicantName == value
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [request] => Ok(request.requestId.clone()),
+            [] => Err(format!(
+                "no pending join request matches \"{value}\"; list them with /network requests"
+            )),
+            _ => Err(format!(
+                "join request name is ambiguous: {value}; use the request id from /network requests"
+            )),
+        }
     }
 
     fn handle_language_command(&mut self, args: &[String]) -> Result<(), String> {
@@ -2067,6 +2258,80 @@ impl OperitTui {
                 self.status_message = self.text().tool_approved_remembered().to_string();
             }
             _ => {}
+        }
+    }
+
+    /// Handles keys for the Space join decision popup. Y/N decide the
+    /// selected request in place, Up/Down move between queued requests, and
+    /// Esc defers everything - rejection has side effects for the applicant,
+    /// so only an explicit N rejects.
+    async fn handle_join_decision_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.join_decision.as_mut() {
+                    modal.selected = modal.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.join_decision.as_mut() {
+                    if modal.selected + 1 < modal.requests.len() {
+                        modal.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                self.decide_selected_join(true).await;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') => {
+                self.decide_selected_join(false).await;
+            }
+            KeyCode::Esc => {
+                self.join_decision = None;
+                self.status_message = self.text().network_join_decision_deferred().to_string();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Decides the selected join request through the runtime link service.
+    /// Decision failures keep the popup open so the request can be retried;
+    /// success drops the request from the queue and closes the popup when
+    /// nothing remains.
+    async fn decide_selected_join(&mut self, approve: bool) {
+        let Some(modal) = self.join_decision.as_ref() else {
+            return;
+        };
+        let Some(request) = modal.requests.get(modal.selected) else {
+            self.join_decision = None;
+            return;
+        };
+        let decision = self
+            .networkControl
+            .decideDeviceSpaceJoin(
+                request.requestId.clone(),
+                request.assignmentVersion,
+                approve,
+            )
+            .await;
+        let modal = self.join_decision.as_mut().expect("join modal checked above");
+        match decision {
+            Ok(updated) => {
+                self.status_message = format!(
+                    "network join request {}: {:?}",
+                    updated.applicantName, updated.status
+                );
+                modal.requests.remove(modal.selected);
+                if modal.selected >= modal.requests.len() {
+                    modal.selected = modal.requests.len().saturating_sub(1);
+                }
+                if modal.requests.is_empty() {
+                    self.join_decision = None;
+                }
+            }
+            Err(error) => {
+                self.status_message = error;
+            }
         }
     }
 

@@ -47,6 +47,7 @@ use approval::TuiApprovalBridge;
 use i18n::TuiLanguage;
 use link_proxy_rs::tui_core;
 use operit_node_runtime::NodeServices::PeerTransport;
+use operit_node_runtime::RuntimePeerService::RuntimePeerService;
 use operit_core_application::CoreApplication;
 use operit_providers::chat::enhance::ConversationService::ConversationService;
 use operit_providers::chat::EnhancedAIService::EnhancedAIService;
@@ -83,6 +84,7 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     let language_cell = Arc::new(StdMutex::new(None::<TuiLanguage>));
     let (toast_sender, toast_receiver) = mpsc::channel::<String>();
     let toast_host = tui_toast_host(toast_sender);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkUiEvent>();
     let shell_args_for_core = shell_args.clone();
     let approval_bridge_for_core = approval_bridge.clone();
     let initial_chat_id_for_core = initial_chat_id_cell.clone();
@@ -118,6 +120,10 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         .expect("TUI language cell lock must not be poisoned")
         .take()
         .expect("TUI language must be initialized by CoreApplication startup");
+    let network_event_task = spawn_network_ui_events(
+        core_application.nodeServices()?.peers(),
+        network_event_sender,
+    );
     let initial_chat_id = initial_chat_id_cell
         .lock()
         .expect("TUI initial chat cell lock must not be poisoned")
@@ -147,12 +153,46 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         startup_update_prompt,
         startup_workspace_prompt_path,
         toast_receiver,
+        network_event_receiver,
     )
     .await?;
     let result = tui.run().await;
     drop(tui);
+    network_event_task.abort();
     core_application.shutdown().await;
     result
+}
+
+/// Structured network events the watcher pushes to the TUI event loop.
+pub(crate) enum NetworkUiEvent {
+    /// The peer service signaled a change. Carries no data on purpose: the
+    /// link proxy futures are not `Send`, so the TUI event loop fetches the
+    /// pairing prompt and join request snapshots itself.
+    PeerChanges,
+}
+
+/// Forwards peer-service change signals to the TUI event loop. The signal
+/// carries no payload; the TUI diffs fresh snapshots against what it has
+/// shown, so nothing polls on a timer.
+fn spawn_network_ui_events(
+    peers: Arc<dyn RuntimePeerService>,
+    events: mpsc::Sender<NetworkUiEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut changes = peers.subscribePeerChanges();
+        loop {
+            match changes.recv().await {
+                Ok(()) => {}
+                // A lagged receiver recovers on the next recv; only a stopped
+                // peer service ends the watcher.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+            if events.send(NetworkUiEvent::PeerChanges).is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Creates the toast host that feeds the active TUI event loop.

@@ -53,7 +53,7 @@ impl TuiCommandSuggestion {
     }
 }
 
-const COMMAND_SPECS: [TuiCommandSpec; 59] = [
+const COMMAND_SPECS: [TuiCommandSpec; 64] = [
     TuiCommandSpec {
         name: "help",
         usage: "/help",
@@ -204,6 +204,36 @@ const COMMAND_SPECS: [TuiCommandSpec; 59] = [
         name: "network policy set",
         usage: "/network policy set <key> <value>",
         description_key: TuiTextKey::CommandNetworkPolicySetDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network token",
+        usage: "/network token",
+        description_key: TuiTextKey::CommandNetworkTokenDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network prompts",
+        usage: "/network prompts",
+        description_key: TuiTextKey::CommandNetworkPromptsDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network requests",
+        usage: "/network requests",
+        description_key: TuiTextKey::CommandNetworkRequestsDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network approve",
+        usage: "/network approve <device|request-id> <assignment-version>",
+        description_key: TuiTextKey::CommandNetworkApproveDescription,
+        options: &[],
+    },
+    TuiCommandSpec {
+        name: "network reject",
+        usage: "/network reject <device|request-id> <assignment-version>",
+        description_key: TuiTextKey::CommandNetworkRejectDescription,
         options: &[],
     },
     TuiCommandSpec {
@@ -728,6 +758,48 @@ mod tests {
         assert_eq!(
             builtin_names("/language ZH"),
             vec!["language zh-cn".to_string()]
+        );
+    }
+
+    #[test]
+    fn network_linking_subcommands_are_suggested() {
+        assert_eq!(
+            builtin_names("/network token"),
+            vec!["network token".to_string()]
+        );
+        assert_eq!(
+            builtin_names("/network prompts"),
+            vec!["network prompts".to_string()]
+        );
+        assert_eq!(
+            builtin_names("/network requests"),
+            vec!["network requests".to_string()]
+        );
+        assert_eq!(
+            builtin_names("/network approve"),
+            vec!["network approve".to_string()]
+        );
+        assert_eq!(
+            builtin_names("/network reject"),
+            vec!["network reject".to_string()]
+        );
+    }
+
+    #[test]
+    fn network_linking_value_positions_stay_clear_of_suggestions() {
+        assert_eq!(
+            builtin_names("/network pro"),
+            vec!["network prompts".to_string()]
+        );
+        // Request ids and assignment versions are free-form values, not path
+        // segments, so completing past them must not suggest more commands.
+        assert_eq!(
+            builtin_names("/network approve req-1 "),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            builtin_names("/network reject req-1 3"),
+            Vec::<String>::new()
         );
     }
 }
