@@ -226,13 +226,13 @@ const COMMAND_SPECS: [TuiCommandSpec; 64] = [
     },
     TuiCommandSpec {
         name: "network approve",
-        usage: "/network approve <request-id> <assignment-version>",
+        usage: "/network approve <device|request-id> <assignment-version>",
         description_key: TuiTextKey::CommandNetworkApproveDescription,
         options: &[],
     },
     TuiCommandSpec {
         name: "network reject",
-        usage: "/network reject <request-id> <assignment-version>",
+        usage: "/network reject <device|request-id> <assignment-version>",
         description_key: TuiTextKey::CommandNetworkRejectDescription,
         options: &[],
     },
