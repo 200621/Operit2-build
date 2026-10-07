@@ -234,15 +234,22 @@ def _rustup_proxy_environment_from_cargo(cargo: Path) -> dict[str, str]:
         return {}
     cargo_home = bin_dir.parent
     root = cargo_home.parent
-    derived = {"CARGO_HOME": str(cargo_home)}
+    # Distro rustup shims (for example /usr/bin/cargo next to /usr/bin/rustup)
+    # resolve to system directories; deriving CARGO_HOME from them poisons the
+    # environment with paths like /usr. Only trust a full rustup-managed
+    # layout where the sibling rustup home also exists.
     for rustup_home in (root / "rustup", root / ".rustup"):
-        if rustup_home.is_dir():
-            derived["RUSTUP_HOME"] = str(rustup_home)
-            toolchain = _rustup_default_toolchain(rustup_home)
-            if toolchain:
-                derived["RUSTUP_TOOLCHAIN"] = toolchain
-            break
-    return derived
+        if not rustup_home.is_dir():
+            continue
+        derived = {
+            "CARGO_HOME": str(cargo_home),
+            "RUSTUP_HOME": str(rustup_home),
+        }
+        toolchain = _rustup_default_toolchain(rustup_home)
+        if toolchain:
+            derived["RUSTUP_TOOLCHAIN"] = toolchain
+        return derived
+    return {}
 
 
 # Reads the default toolchain pinned by a rustup home.
