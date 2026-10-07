@@ -1619,6 +1619,10 @@ impl ChatHistoryManager {
     }
 
     /// Adds a folder to an existing workspace.
+    ///
+    /// Mounting stays idempotent: a path that is already mounted under another
+    /// name leaves the workspace untouched, and a known folder name whose path
+    /// changed is rebound instead of failing validation with a duplicate name.
     pub fn addWorkspaceFolder(
         &self,
         workspaceId: String,
@@ -1629,7 +1633,9 @@ impl ChatHistoryManager {
                 "workspace does not exist: {workspaceId}"
             ))
         })?;
-        workspace.folders.push(folder);
+        if !workspace.mountFolder(folder) {
+            return Ok(workspace);
+        }
         workspace.updatedAt = currentTimeMillis();
         workspace
             .validate()
