@@ -52,14 +52,35 @@ class ModelSettingsPanelState extends State<ModelSettingsPanel> {
     final chatBinding = await functionManager.getModelBindingForFunction(
       functionType: core_proxy.FunctionType.chat,
     );
+    final providers = await modelManager.getProviderProfiles();
+    final summaries = await modelManager.getAllModelSummaries();
+    core_proxy.ResolvedModelConfig? currentConfig;
+    if (summaries.any(
+      (model) =>
+          model.providerId == chatBinding.providerId &&
+          model.modelId == chatBinding.modelId,
+    )) {
+      try {
+        currentConfig = await modelManager.getResolvedModelConfig(
+          providerId: chatBinding.providerId,
+          modelId: chatBinding.modelId,
+        );
+      } on CoreLinkError catch (error) {
+        // A sync batch may change provider profiles after the summaries call.
+        // Keep the configuration page accessible so a dangling binding can
+        // be repaired. Unrelated runtime errors must still be reported.
+        if (error.code != 'COMMAND_ERROR' ||
+            !(error.message.startsWith('model not found: ') ||
+                error.message.startsWith('provider not found: '))) {
+          rethrow;
+        }
+      }
+    }
     final data = ModelSettingsData(
-      providers: await modelManager.getProviderProfiles(),
-      summaries: await modelManager.getAllModelSummaries(),
+      providers: providers,
+      summaries: summaries,
       chatBinding: chatBinding,
-      currentConfig: await modelManager.getResolvedModelConfig(
-        providerId: chatBinding.providerId,
-        modelId: chatBinding.modelId,
-      ),
+      currentConfig: currentConfig,
       functionBindings: await functionManager.functionModelBindingFlow().first,
       maxImageHistoryUserTurns: await apiPreferences
           .maxImageHistoryUserTurnsFlow()
@@ -341,7 +362,11 @@ class ModelSettingsPanelState extends State<ModelSettingsPanel> {
       context: context,
       providerId: provider.id,
       initialData: data,
-      reload: load,
+      reload: () {
+        // Keep function mappings in sync with edits saved inside the detail dialog.
+        _reload();
+        return loadFuture;
+      },
       onSelectModel: _selectChatModel,
       onAddModel: _addProviderModel,
       onEditProvider: _editOpenedProvider,
@@ -657,6 +682,15 @@ class ModelSettingsPanelState extends State<ModelSettingsPanel> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
           children: <Widget>[
+            if (data.currentConfig == null) ...<Widget>[
+              CommonNetworkErrorView(
+                errorText: l10n.settingsModelFunctionMappingsMissing(
+                  data.chatBinding.providerId,
+                  data.chatBinding.modelId,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             _SectionCard(
               title: l10n.settingsModelProvidersSection,
               icon: Icons.dns_outlined,
@@ -716,7 +750,7 @@ class ModelSettingsData {
   final List<core_proxy.ProviderProfile> providers;
   final List<core_proxy.ProviderModelSummary> summaries;
   final core_proxy.FunctionModelBinding chatBinding;
-  final core_proxy.ResolvedModelConfig currentConfig;
+  final core_proxy.ResolvedModelConfig? currentConfig;
   final Map<core_proxy.FunctionType, core_proxy.FunctionModelBinding>
   functionBindings;
   final int maxImageHistoryUserTurns;
@@ -921,6 +955,8 @@ class _ProviderEditorDialogState extends State<_ProviderEditorDialog> {
 
   bool get _isCodexProvider => _selectedProviderTypeId == 'OPENAI_CODEX';
 
+  bool get _isLocalProvider => _selectedProviderTypeId == 'LOCAL_MODEL';
+
   Future<void> _refreshCodexStatus() async {
     try {
       final status = await widget.clients.servicesCodexOAuthService
@@ -1121,7 +1157,7 @@ class _ProviderEditorDialogState extends State<_ProviderEditorDialog> {
                 _DialogTextField(
                   controller: _endpointController,
                   label: l10n.settingsModelApiEndpoint,
-                  requiredField: true,
+                  requiredField: !_isLocalProvider,
                   readOnly: _isCodexProvider,
                   keyboardType: TextInputType.url,
                   inputFormatters: <TextInputFormatter>[
@@ -4869,6 +4905,7 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
   late bool _directImage;
   late bool _directAudio;
   late bool _directVideo;
+  late bool _claude1hPromptCache;
   late List<core_proxy.ModelBuiltinTool> _builtinTools;
   late bool _enableSummary;
   late final TextEditingController _maxContextLengthController;
@@ -4885,6 +4922,8 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
     _directImage = caps.directImage;
     _directAudio = caps.directAudio;
     _directVideo = caps.directVideo;
+    _claude1hPromptCache =
+        widget.initialConfig.request.enableClaude1HPromptCache;
     _builtinTools = widget.initialConfig.builtinTools;
     final summary = widget.initialConfig.summary;
     _enableSummary = summary.enableSummary;
@@ -4912,6 +4951,11 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
     _summaryThresholdController.dispose();
     super.dispose();
   }
+
+  bool get _supportsClaudePromptCache => <String>{
+    'ANTHROPIC',
+    'ANTHROPIC_GENERIC',
+  }.contains(widget.provider.providerTypeId.trim().toUpperCase());
 
   core_proxy.ModelCapabilities _currentCapabilities() {
     return core_proxy.ModelCapabilities(
@@ -4971,6 +5015,20 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
     }
     setState(() => _saving = true);
     try {
+      if (_supportsClaudePromptCache &&
+          _claude1hPromptCache !=
+              widget.initialConfig.request.enableClaude1HPromptCache) {
+        await widget.clients.preferencesModelConfigManager
+            .updateRequestForModel(
+              providerId: widget.provider.id,
+              modelId: widget.model.id,
+              request: core_proxy.ModelRequestSpec(
+                supportsStructuredTools:
+                    widget.initialConfig.request.supportsStructuredTools,
+                enableClaude1HPromptCache: _claude1hPromptCache,
+              ),
+            );
+      }
       final newCaps = _currentCapabilities();
       await widget.clients.preferencesModelConfigManager
           .updateCapabilitiesForModel(
@@ -5094,6 +5152,18 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
                     iconTint: _CapsuleTint.primary,
                     onChanged: (v) => setState(() => _directVideo = v),
                   ),
+                  if (_supportsClaudePromptCache)
+                    _CheckableCapabilityChip(
+                      title: isZh ? 'Claude 1小时缓存' : 'Claude 1h cache',
+                      tooltip: isZh
+                          ? '为显式缓存断点设置 1h TTL；关闭时使用默认 TTL。'
+                          : 'Set a 1h TTL on explicit cache breakpoints; otherwise use the default TTL.',
+                      checked: _claude1hPromptCache,
+                      icon: Icons.cached_outlined,
+                      iconTint: _CapsuleTint.neutral,
+                      onChanged: (value) =>
+                          setState(() => _claude1hPromptCache = value),
+                    ),
                 ],
               ),
             ),

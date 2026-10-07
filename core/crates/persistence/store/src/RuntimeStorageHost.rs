@@ -49,6 +49,12 @@ pub fn defaultRuntimeStorageHost() -> Arc<dyn RuntimeStorageHost> {
     }
 }
 
+/// Returns the registered runtime storage host without requiring runtime initialization.
+#[allow(non_snake_case)]
+pub fn defaultRuntimeStorageHostOption() -> Option<Arc<dyn RuntimeStorageHost>> {
+    DEFAULT_RUNTIME_STORAGE_HOST.get()?.lock().ok()?.as_ref().map(Arc::clone)
+}
+
 /// Returns the registered runtime SQLite host.
 #[allow(non_snake_case)]
 pub fn defaultRuntimeSqliteHost() -> Arc<dyn RuntimeSqliteHost> {

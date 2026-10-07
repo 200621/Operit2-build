@@ -438,9 +438,7 @@ export async function onChatViewEvent(
     if (
       !isPlanModeRuntime(runtime) ||
       !isNonEmptyString(viewId) ||
-      !isNonEmptyString(chatId) ||
-      !isNonEmptyString(workspacePath) ||
-      typeof title !== "string"
+      !isNonEmptyString(chatId)
     ) {
       logPlanModeDebug("onChatViewEvent.ignore_invalid_workspace", {
         eventName,
@@ -455,6 +453,22 @@ export async function onChatViewEvent(
       return;
     }
 
+    // Closing or unbinding a view is valid even when its workspace path is empty.
+    if (eventName === "view_closed") {
+      await PlanModeShared.removeTrackedChatView(runtime, viewId);
+      return;
+    }
+    if (!isNonEmptyString(workspacePath)) {
+      await PlanModeShared.removeTrackedChatView(runtime, viewId);
+      await PlanModeShared.disable(chatId);
+      logPlanModeDebug("onChatViewEvent.workspace_unbound", { eventName, runtime, viewId, chatId });
+      return;
+    }
+    if (typeof title !== "string") {
+      logPlanModeDebug("onChatViewEvent.ignore_invalid_title", { eventName, runtime, viewId, chatId });
+      return;
+    }
+
     logPlanModeDebug("onChatViewEvent", {
       eventName,
       runtime,
@@ -464,11 +478,6 @@ export async function onChatViewEvent(
       workspaceEnv,
       title,
     });
-
-    if (eventName === "view_closed") {
-      await PlanModeShared.removeTrackedChatView(runtime, viewId);
-      return;
-    }
 
     await PlanModeShared.upsertTrackedChatView({
       viewId,

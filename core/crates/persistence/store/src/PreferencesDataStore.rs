@@ -2116,25 +2116,102 @@ impl PreferencesDataStore {
         storageHost: Arc<dyn RuntimeStorageHost>,
         entries: &[PreferencesSyncedEntry],
     ) -> Result<(), PreferencesDataStoreError> {
-        let Some(first) = entries.first() else {
-            return Ok(());
-        };
-        if entries.iter().any(|entry| {
-            entry.storagePath != first.storagePath || entry.encrypted != first.encrypted
-        }) {
-            return Err(PreferencesDataStoreError::Message(
-                "batched preference sync entries must share one storage path and encryption mode"
-                    .to_string(),
-            ));
-        }
-        let store =
-            Self::newNodeLocalWithStorage(storageHost, first.storagePath.clone(), first.encrypted);
-        store.try_edit_result(|preferences| {
-            for entry in entries {
-                entry.apply(preferences)?;
+        if let Some(first) = entries.first() {
+            if entries.iter().any(|entry| {
+                entry.storagePath != first.storagePath || entry.encrypted != first.encrypted
+            }) {
+                return Err(PreferencesDataStoreError::Message(
+                    "batched preference sync entries must share one storage path and encryption mode"
+                        .to_string(),
+                ));
             }
-            Ok(())
-        })
+        }
+        Self::applySyncedPreferencesWithStorage(storageHost, entries)
+    }
+
+    /// Validates every preferences file in one sync batch before writing any of
+    /// them, then publishes their cached snapshots before notifying observers.
+    /// Validation errors cannot leave a new model binding without its profiles.
+    /// Storage hosts do not provide a cross-file durable transaction, so I/O
+    /// failures during the write phase may still require a synchronization retry.
+    #[allow(non_snake_case)]
+    pub fn applySyncedPreferencesWithStorage(
+        storageHost: Arc<dyn RuntimeStorageHost>,
+        entries: &[PreferencesSyncedEntry],
+    ) -> Result<(), PreferencesDataStoreError> {
+        let batchesByPath = preferencesSyncBatchesByPath(entries)?;
+        // Stable path order prevents deadlocks between concurrent sync batches.
+        let stores = batchesByPath
+            .values()
+            .map(|entries| {
+                let first = &entries[0];
+                Self::newNodeLocalWithStorage(
+                    storageHost.clone(),
+                    first.storagePath.clone(),
+                    first.encrypted,
+                )
+            })
+            .collect::<Vec<_>>();
+        let transactions = stores
+            .iter()
+            .map(|store| {
+                store
+                    .sharedState
+                    .transaction
+                    .lock()
+                    .expect("PreferencesDataStore transaction mutex must not be poisoned")
+            })
+            .collect::<Vec<_>>();
+        // Preparation is side-effect free: a malformed delta aborts the whole
+        // preferences batch before bindings or provider profiles are written.
+        let snapshots = stores
+            .iter()
+            .zip(batchesByPath.values())
+            .map(|(store, entries)| store.prepareSyncedSnapshotUnlocked(entries))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (store, snapshot) in stores.iter().zip(&snapshots) {
+            if let Some(preferences) = snapshot {
+                store.commitSyncedSnapshotUnlocked(preferences)?;
+            }
+        }
+        drop(transactions);
+        for (store, snapshot) in stores.iter().zip(&snapshots) {
+            if snapshot.is_some() {
+                store.notifyChanged();
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds a changed snapshot while the caller holds this file's transaction lock.
+    fn prepareSyncedSnapshotUnlocked(
+        &self,
+        entries: &[&PreferencesSyncedEntry],
+    ) -> Result<Option<Preferences>, PreferencesDataStoreError> {
+        self.loadUnlocked()?;
+        let previous = self
+            .loadedPreferences()
+            .expect("PreferencesDataStore must be loaded before sync validation");
+        let mut next = previous.clone();
+        for entry in entries {
+            entry.apply(&mut next)?;
+        }
+        Ok((next != previous).then_some(next))
+    }
+
+    /// Persists and caches one prepared snapshot, without notifying observers yet.
+    fn commitSyncedSnapshotUnlocked(
+        &self,
+        preferences: &Preferences,
+    ) -> Result<(), PreferencesDataStoreError> {
+        self.writeStoredPreferencesUnlocked(preferences)?;
+        let mut loaded = self
+            .sharedState
+            .preferences
+            .lock()
+            .expect("PreferencesDataStore shared state mutex must not be poisoned");
+        loaded.preferences = preferences.clone();
+        Ok(())
     }
 
     /// Reads the current preferences snapshot.
@@ -2714,6 +2791,44 @@ fn preferenceMutationEntityId(
         return preferenceEntryEntityId(storagePath, key);
     }
     serde_json::to_string(&(storagePath, key, jsonPath)).map_err(PreferencesDataStoreError::from)
+}
+
+/// Groups incoming mutations by file while preserving their replay order.
+/// The resulting path order is also the transaction-lock acquisition order.
+#[allow(non_snake_case)]
+fn preferencesSyncBatchesByPath(
+    entries: &[PreferencesSyncedEntry],
+) -> Result<BTreeMap<&str, Vec<&PreferencesSyncedEntry>>, PreferencesDataStoreError> {
+    let mut batchesByPath: BTreeMap<&str, Vec<&PreferencesSyncedEntry>> = BTreeMap::new();
+    for entry in entries {
+        let batch = batchesByPath.entry(entry.storagePath.as_str()).or_default();
+        if batch
+            .first()
+            .is_some_and(|first| first.encrypted != entry.encrypted)
+        {
+            return Err(PreferencesDataStoreError::Message(
+                "synchronized preferences file has inconsistent encryption modes".to_string(),
+            ));
+        }
+        batch.push(entry);
+    }
+    Ok(batchesByPath)
+}
+
+/// Returns the whole-entry and JSON-parent identities that replace this location.
+/// Reading the canonical entity id also works before encrypted payload decoding.
+#[allow(non_snake_case)]
+pub(crate) fn preferenceMutationAncestorEntityIds(
+    operation: &SyncOperation,
+) -> Option<Vec<String>> {
+    if operation.domain != "preferences" {
+        return None;
+    }
+    let (storagePath, key, path): (String, String, Vec<PreferencesSyncJsonPathSegment>) =
+        serde_json::from_str(&operation.entityId).ok()?;
+    (0..path.len())
+        .map(|length| preferenceMutationEntityId(&storagePath, &key, &path[..length]).ok())
+        .collect()
 }
 
 /// Produces independently mergeable mutations for every changed JSON location.

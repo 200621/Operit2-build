@@ -186,6 +186,7 @@ fn parseModelRow(line: &str) -> Result<ModelCatalogEntry, String> {
         builtinTools: parseCatalogBuiltinTools(parts[0], parts[12], line)?,
         request: Some(ModelRequestSpec {
             supportsStructuredTools: parseBool(parts[14], "structured tools", line)?,
+            ..ModelRequestSpec::default()
         }),
     })
 }

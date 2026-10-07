@@ -41,7 +41,8 @@ String formatModelProviderLabel(
   return '';
 }
 
-/// Formats token (with cache, cache rate, and speed), timing, and timestamp metrics into a compact single-line summary.
+/// Formats token, cache, speed, timing, and timestamp metrics into a compact
+/// summary that can wrap when displayed.
 String formatMessageStatsText(
   ChatUiMessage message,
   ThemePreferenceSnapshot snapshot, {

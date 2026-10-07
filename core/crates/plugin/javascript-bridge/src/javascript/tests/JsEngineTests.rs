@@ -102,8 +102,11 @@ struct TestPluginConfigExecutionHost {
     toolPkgTextResourceReads: AtomicUsize,
     registrationConfigReads: AtomicUsize,
     packageManagerLock: Mutex<()>,
+    environment: Mutex<BTreeMap<String, String>>,
     #[cfg(not(target_arch = "wasm32"))]
     toolPkgIpcThreadName: Arc<Mutex<Option<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    toolPkgIpcTarget: Mutex<Option<(super::JsEngine, String)>>,
 }
 
 /// Resolves ToolPkg modules from a fixed test resource map.
@@ -173,14 +176,18 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         Ok("zh-CN".to_string())
     }
 
-    /// Rejects unexpected environment access.
-    fn read_environment_variable(&self, _key: &str) -> Result<Option<String>, String> {
-        panic!("Environment access is not part of the plugin config test")
+    /// Keeps environment state isolated from the application's actual preferences.
+    fn read_environment_variable(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.environment.lock().unwrap().get(key).cloned())
     }
 
-    /// Rejects unexpected environment writes.
-    fn write_environment_variable(&self, _key: &str, _value: &str) -> Result<(), String> {
-        panic!("Environment writes are not part of the plugin config test")
+    /// Supports call-context tests without writing application configuration.
+    fn write_environment_variable(&self, key: &str, value: &str) -> Result<(), String> {
+        self.environment
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+        Ok(())
     }
 
     /// Resolves plugin configuration through the real runtime path contract.
@@ -292,6 +299,11 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         completion: JsToolPkgIpcCompletion,
     ) -> Result<(), String> {
         let threadName = self.toolPkgIpcThreadName.clone();
+        let target = self
+            .toolPkgIpcTarget
+            .lock()
+            .expect("test IPC target lock")
+            .clone();
         std::thread::Builder::new()
             .name("OperitToolPkgIpc".to_string())
             .spawn(move || {
@@ -299,6 +311,38 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
                     .lock()
                     .expect("ToolPkg IPC thread-name mutex poisoned") =
                     std::thread::current().name().map(str::to_string);
+                if let Some((engine, mainScript)) = target {
+                    let mut params = testParams();
+                    for (name, value) in [
+                        ("__operit_ui_package_name", request.package_target.clone()),
+                        ("__operit_execution_context_key", format!("toolpkg_main:{}", request.package_target)),
+                        ("__operit_toolpkg_runtime_kind", "main".to_string()),
+                        ("__operit_script_screen", "dist/main.js".to_string()),
+                        ("__operit_inline_function_name", "__test_ipc_dispatch__".to_string()),
+                        ("__operit_inline_function_source", r#"async function(params) {
+                            return await globalThis.__operitInvokeToolPkgIpcLocal(params.channel, params.payload, {
+                                callerContextKey: params.callerContextKey,
+                                currentContextKey: params.__operit_execution_context_key,
+                                currentRuntime: 'main'
+                            });
+                        }"#.to_string()),
+                    ] { params.insert(name.to_string(), Value::String(value)); }
+                    params.insert("channel".to_string(), Value::String(request.channel));
+                    params.insert("payload".to_string(), request.payload);
+                    params.insert("callerContextKey".to_string(), Value::String(request.caller_context_key));
+                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                        .expect("test target runtime must start");
+                    let output = runtime.block_on(engine.execute_script_function_async(
+                        mainScript, "__test_ipc_dispatch__".to_string(), params,
+                        BTreeMap::new(), None, true, 2_000, None,
+                    ));
+                    let result = output.map_err(|error| error.to_string()).and_then(|output| {
+                        operit_plugin_sdk::execution_result::decode_js_execution_result_value(output.as_deref())
+                            .map_err(|error| error.to_string())
+                    });
+                    completion(result);
+                    return;
+                }
                 let valueSource = if request.channel == "operit.context.run" {
                     request.payload.get("envs")
                 } else {
@@ -1072,6 +1116,267 @@ fn toolpkg_ipc_cross_runtime_dispatch_is_asynchronous() {
             .as_deref(),
         Some("OperitToolPkgIpc")
     );
+    engine.destroy();
+}
+
+/// Loads the real packaged workflow; only persistence is replaced with an isolated memory DB.
+#[cfg(not(target_arch = "wasm32"))]
+fn workflowIpcFixture() -> (
+    super::JsEngine,
+    Arc<TestPluginConfigExecutionHost>,
+    String,
+    BTreeMap<String, Value>,
+) {
+    let root = testRepositoryRoot().join("plugins/packages/buildin/workflow/dist");
+    fn collect(root: &Path, directory: &Path, resources: &mut BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(directory).expect("workflow modules directory") {
+            let path = entry.expect("workflow module entry").path();
+            if path.is_dir() {
+                collect(root, &path, resources);
+            } else if path.extension().is_some_and(|ext| ext == "js") {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("relative workflow module")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                resources.insert(
+                    format!("dist/{relative}"),
+                    std::fs::read_to_string(path).expect("workflow module source"),
+                );
+            }
+        }
+    }
+    let mut resources = BTreeMap::new();
+    collect(&root, &root, &mut resources);
+    let tools = resources["dist/tools.js"].clone();
+    let main = format!(
+        r#"
+        globalThis.PluginConfig = {{
+            use: async function(_key, initial) {{ return initial; }},
+            flush: async function() {{}}
+        }};
+        {}
+    "#,
+        resources["dist/main.js"]
+    );
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let package = "workflow.ipc.regression";
+    testJavaScriptRuntimeHost();
+    register_test_runtime_storage("js-engine-tests");
+    let engine = super::JsEngine::new_toolpkg_execution_engine(
+        host.clone(),
+        ToolPkgExecutionContext {
+            context_key: format!("toolpkg_main:{package}"),
+            container_package_name: package.to_string(),
+            api_version: "2.0.0".to_string(),
+            text_resource_host: Arc::new(StaticToolPkgTextResourceHost { resources }),
+        },
+    );
+    *host.toolPkgIpcTarget.lock().unwrap() = Some((engine.clone(), main));
+    let mut params = testParams();
+    for (key, value) in [
+        ("__operit_ui_package_name", package.to_string()),
+        (
+            "__operit_execution_context_key",
+            format!("toolpkg_main:{package}"),
+        ),
+        ("__operit_toolpkg_runtime_kind", "sandbox".to_string()),
+        ("__operit_toolpkg_subpackage_id", "workflow".to_string()),
+        ("__operit_script_screen", "dist/tools.js".to_string()),
+    ] {
+        params.insert(key.to_string(), Value::String(value));
+    }
+    (engine, host, tools, params)
+}
+
+/// AI tools share the main engine, but their awaited IPC must still load a cold main service.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn workflow_list_cold_main_same_engine_ipc_completes() {
+    let (engine, host, tools, params) = workflowIpcFixture();
+    let started = Instant::now();
+    let result = engine.execute_script_function_with_timeout_millis(
+        &tools,
+        "list",
+        &params,
+        &BTreeMap::new(),
+        None,
+        true,
+        2_000,
+        None,
+    );
+    let output = expect_js_output(result, "cold workflow:list same-engine IPC");
+    let snapshot: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(snapshot["workflows"], serde_json::json!([]));
+    assert_eq!(snapshot["runs"], serde_json::json!([]));
+    // A warmed main module must remain usable on subsequent calls as well.
+    let again = engine.execute_script_function_with_timeout_millis(
+        &tools, "list", &params, &BTreeMap::new(), None, true, 2_000, None,
+    );
+    host.toolPkgIpcTarget.lock().unwrap().take();
+    let again: Value = serde_json::from_str(&expect_js_output(again, "repeated workflow:list")).unwrap();
+    assert_eq!(again, snapshot);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    engine.destroy();
+}
+
+/// Async callers must also release the state between polls, not hold it across await.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn workflow_list_async_same_engine_ipc_completes() {
+    let (engine, host, tools, params) = workflowIpcFixture();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(engine.execute_script_function_async(
+        tools,
+        "list".to_string(),
+        params,
+        BTreeMap::new(),
+        None,
+        true,
+        2_000,
+        None,
+    ));
+    host.toolPkgIpcTarget.lock().unwrap().take();
+    let output = expect_js_output(result, "async workflow:list same-engine IPC");
+    let snapshot: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(snapshot["workflows"], serde_json::json!([]));
+    engine.destroy();
+}
+
+/// Another call can finish while the first awaits a host tool, without borrowing its env/progress.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn pending_call_releases_state_and_preserves_call_context() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let waiting = engine.clone();
+    let (sent, received) = std::sync::mpsc::channel();
+    let callback = Arc::new(move |value: String| {
+        sent.send(value).unwrap();
+    });
+    let first = std::thread::spawn(move || {
+        waiting.execute_script_function(
+        r#"exports.first = async function() {
+            globalThis.firstFinished = false;
+            NativeInterface.sendCallIntermediateResult(globalThis.__operitCurrentCallId, 'waiting');
+            await Tools.System.sleep(200);
+            NativeInterface.sendCallIntermediateResult(globalThis.__operitCurrentCallId, getEnv('CALL_OWNER'));
+            globalThis.firstFinished = true;
+            return getEnv('CALL_OWNER');
+        };"#,
+        "first", &testParams(),
+        &BTreeMap::from([("CALL_OWNER".to_string(), "first".to_string())]),
+        Some(callback), true, 2, None,
+    )
+    });
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(1)).unwrap(),
+        "waiting"
+    );
+    let output = engine.execute_script_function(
+        r#"exports.second = function() { return { owner: getEnv('CALL_OWNER'), firstFinished: globalThis.firstFinished }; };"#,
+        "second", &testParams(),
+        &BTreeMap::from([("CALL_OWNER".to_string(), "second".to_string())]),
+        None, true, 2, None,
+    );
+    assert_eq!(
+        expect_js_output(output, "interleaved second call"),
+        r#"{"owner":"second","firstFinished":false}"#
+    );
+    assert_eq!(
+        expect_js_output(first.join().unwrap(), "interleaved first call"),
+        "\"first\""
+    );
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(1)).unwrap(),
+        "first"
+    );
+    engine.destroy();
+}
+
+/// Per-call overrides must keep writes made before an await, rather than restoring an old snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn call_environment_updates_survive_state_turns() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let output = engine.execute_script_function(
+        r#"exports.update = async function() {
+            NativeInterface.setEnv('CALL_OWNER', 'updated');
+            NativeInterface.setEnvs(JSON.stringify({ SECOND: 'second' }));
+            await Tools.System.sleep(5);
+            return { owner: getEnv('CALL_OWNER'), second: getEnv('SECOND') };
+        };"#,
+        "update",
+        &testParams(),
+        &BTreeMap::from([("CALL_OWNER".to_string(), "original".to_string())]),
+        None,
+        true,
+        2,
+        None,
+    );
+    assert_eq!(
+        expect_js_output(output, "environment across state turns"),
+        r#"{"owner":"updated","second":"second"}"#
+    );
+    engine.destroy();
+}
+
+/// Abandoning an async request must cancel its session on the owning affine thread.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn abandoned_async_request_cancels_affine_session() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let caller = engine.clone();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = started.clone();
+    let callback = Arc::new(move |_: String| {
+        signal.store(true, Ordering::Release);
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async move {
+        let task = tokio::task::spawn_local(async move {
+            caller.execute_script_function_async(
+                r#"exports.wait = async function() {
+                    NativeInterface.sendCallIntermediateResult(globalThis.__operitCurrentCallId, 'started');
+                    return await new Promise(function() {});
+                };"#.to_string(),
+                "wait".to_string(), testParams(), BTreeMap::new(), Some(callback), true, 2_000, None,
+            ).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !started.load(Ordering::Acquire) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(started.load(Ordering::Acquire), "aborted request must have started");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let output = engine
+            .worker
+            .runtimeHost
+            .executeHostJavaScriptRuntimeStateTask(
+                engine.worker.stateHandle,
+                1_000,
+                Box::new(|state, _| {
+                    let state = state.downcast_mut::<JsEngineState>().unwrap();
+                    Ok(Box::new(state.pendingScriptExecutions.len()))
+                }),
+            )
+            .unwrap();
+        if *output.downcast::<usize>().unwrap() == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "abandoned affine session leaked");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     engine.destroy();
 }
 

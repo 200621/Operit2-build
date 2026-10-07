@@ -674,7 +674,6 @@ impl Operit1SnapshotImportManager {
                 "contextLength".to_string(),
                 "summaryCustomRules".to_string(),
                 "enableGoogleSearch".to_string(),
-                "enableClaude1hPromptCache".to_string(),
             ],
         })
     }

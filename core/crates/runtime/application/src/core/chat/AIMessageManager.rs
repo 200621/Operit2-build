@@ -23,6 +23,7 @@ use operit_providers::chat::EnhancedAIService::{
     EnhancedAIService, ResumeRequest, SendMessageCallbacks, SendMessageOptions, SendMessageRuntime,
 };
 use operit_store::PreferencesDataStore::FlowLike;
+use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
 use operit_util::stream::RevisableTextStream::with_event_channel_shared;
 use operit_util::stream::Stream::Stream;
 use operit_util::AppLogger::AppLogger;
@@ -779,6 +780,16 @@ impl AIMessageManager {
         enableDirectAudioProcessing: bool,
         enableDirectVideoProcessing: bool,
     ) -> Result<String, String> {
+        let currentNodeId = CoreNodeIdentityStore::localNodeId();
+        if !attachment.isLocalToNode(currentNodeId.as_deref()) {
+            // File hosts and media pools are node-local. Preserve the source locator instead
+            // of attempting to open a remote path (especially fatal for audio/video).
+            return Ok(format!(
+                "<attachment {}>{}</attachment>",
+                Self::buildAttachmentAttributes(attachment),
+                attachment.content
+            ));
+        }
         if enableDirectImageProcessing
             && attachment
                 .mimeType
@@ -876,11 +887,15 @@ impl AIMessageManager {
         mediaType: &str,
     ) -> Result<String, String> {
         let mediaId = Self::registerDirectMediaAttachment(attachment, fileSystemHost, mediaType)?;
-        Ok(match mediaType {
+        let mediaLink = match mediaType {
             "audio" => MediaLinkBuilder::audio(&mediaId),
             "video" => MediaLinkBuilder::video(&mediaId),
             _ => return Err(format!("Unsupported direct media type: {mediaType}")),
-        })
+        };
+        Ok(format!(
+            "{mediaLink} <attachment {}>{mediaType} content has been attached as multimodal input with this message. Do not call file reading tools to read this path.</attachment>",
+            Self::buildAttachmentAttributes(attachment)
+        ))
     }
 
     /// Registers an audio or video attachment in the process media pool.
@@ -915,10 +930,26 @@ impl AIMessageManager {
 
     /// Builds the XML attributes for an attachment notice.
     fn buildAttachmentAttributes(attachment: &AttachmentInfo) -> String {
+        let escape = |value: &str| {
+            value.replace('&', "&amp;")
+                .replace('"', "&quot;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\'', "&#39;")
+        };
         let mut attributes = format!(
             "id=\"{}\" filename=\"{}\" type=\"{}\"",
-            attachment.filePath, attachment.fileName, attachment.mimeType
+            escape(&attachment.filePath),
+            escape(&attachment.fileName),
+            escape(&attachment.mimeType)
         );
+        if let Some(nodeId) = attachment.nodeId.as_deref().filter(|nodeId| !nodeId.is_empty()) {
+            attributes.push_str(&format!(" node_id=\"{}\"", escape(nodeId)));
+            let toolPath = attachment.fileToolPath();
+            if toolPath.starts_with("/app/data/temp/clean_on_exit/") {
+                attributes.push_str(&format!(" path=\"{}\"", escape(&toolPath)));
+            }
+        }
         if attachment.fileSize > 0 {
             attributes.push_str(&format!(" size=\"{}\"", attachment.fileSize));
         }
@@ -1390,6 +1421,51 @@ fn strip_tag_blocks(text: &str, tag_name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn attachment_markup_keeps_the_source_node_and_portable_tool_path() {
+        let mut attachment = AttachmentInfo::new(
+            "/device-b/runtime/temp/clean_on_exit/report.pdf".into(),
+            "报价单\".pdf".into(), "application/pdf".into(), 3,
+        );
+        attachment.nodeId = Some("core-b".into());
+        let tag = AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
+        assert!(tag.contains("node_id=\"core-b\""));
+        assert!(tag.contains("path=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("filename=\"报价单&quot;.pdf\""));
+        assert!(tag.contains("id=\"/device-b/runtime/temp/clean_on_exit/report.pdf\""));
+    }
+
+    #[test]
+    fn remote_media_never_reads_the_current_file_host() {
+        for mimeType in ["image/png", "audio/mpeg", "video/mp4"] {
+            let mut attachment = AttachmentInfo::new(
+                "/device-b/runtime/temp/clean_on_exit/media".into(), "media".into(), mimeType.into(), 3,
+            );
+            attachment.nodeId = Some("test-remote-attachment-node".into());
+            // No host: attempting direct audio/video registration would fail the send.
+            let tag = AIMessageManager::buildAttachmentTag(&attachment, None, true, true, true).unwrap();
+            assert!(tag.starts_with("<attachment "));
+            assert!(tag.contains("node_id=\"test-remote-attachment-node\""));
+            assert!(!tag.contains("_link"));
+        }
+    }
+
+    #[test]
+    fn external_host_paths_are_not_mislabeled_as_vfs_paths() {
+        let mut attachment = AttachmentInfo::new("/Users/source/report.pdf".into(), "report.pdf".into(), "application/pdf".into(), 3);
+        attachment.nodeId = Some("core-b".into());
+        let tag = AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
+        assert!(tag.contains("node_id=\"core-b\""));
+        assert!(!tag.contains(" path="));
+    }
+
+    #[test]
+    fn legacy_attachment_markup_does_not_claim_a_current_node() {
+        let attachment = AttachmentInfo::new("/old/report.pdf".into(), "report.pdf".into(), "application/pdf".into(), 3);
+        let tag = AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
+        assert!(!tag.contains("node_id="));
+    }
 
     /// Verifies persisted assistant messages keep tool protocol roles in provider history.
     #[test]

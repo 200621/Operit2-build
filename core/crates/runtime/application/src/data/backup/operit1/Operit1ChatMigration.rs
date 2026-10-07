@@ -279,12 +279,7 @@ where
         let timestamp = sqliteRowI64(row, 2, "messages.timestamp")?;
         let sender = sqliteRowString(row, 0, "messages.sender")?;
         let content = sqliteRowString(row, 1, "messages.content")?;
-        let parts = if sender == "ai" {
-            MessagePartCodec::parseAssistantMarkup(&content)
-                .map_err(|error| format!("Operit1 assistant message markup is invalid: {error}"))?
-        } else {
-            vec![MessagePart::markdown("part-0".to_string(), 0, content)]
-        };
+        let parts = parseOperit1MessageParts(&sender, content);
         messages.push(OperitArchivedMessage {
             baseMessage: ChatMessage {
                 sender,
@@ -348,7 +343,7 @@ where
                 parts: parseOperit1MessageParts(
                     &sender,
                     sqliteRowString(row, 1, "messages.content")?,
-                )?,
+                ),
                 timestamp,
                 roleName: sqliteRowString(row, 3, "messages.roleName")?,
                 selectedVariantIndex: sqliteRowI32(row, 4, "messages.selectedVariantIndex")?,
@@ -408,7 +403,7 @@ fn readOperit1RoomV20MessageVariants(
                 parts: parseOperit1MessageParts(
                     sender,
                     sqliteRowString(row, 1, "message_variants.content")?,
-                )?,
+                ),
                 roleName: sqliteRowString(row, 2, "message_variants.roleName")?,
                 provider: sqliteRowString(row, 3, "message_variants.provider")?,
                 modelName: sqliteRowString(row, 4, "message_variants.modelName")?,
@@ -425,16 +420,11 @@ fn readOperit1RoomV20MessageVariants(
 }
 
 /// Converts one legacy text payload into the runtime's canonical message parts.
-fn parseOperit1MessageParts(sender: &str, content: String) -> Result<Vec<MessagePart>, String> {
+fn parseOperit1MessageParts(sender: &str, content: String) -> Vec<MessagePart> {
     if sender == "ai" {
-        MessagePartCodec::parseAssistantMarkup(&content)
-            .map_err(|error| format!("Operit1 assistant message markup is invalid: {error}"))
+        MessagePartCodec::parseAssistantMarkupForImport(&content)
     } else {
-        Ok(vec![MessagePart::markdown(
-            "part-0".to_string(),
-            0,
-            content,
-        )])
+        vec![MessagePart::markdown("part-0".to_string(), 0, content)]
     }
 }
 
@@ -443,7 +433,9 @@ fn parseOperit1ChatMessageDisplayMode(value: &str) -> Result<ChatMessageDisplayM
     match value {
         "NORMAL" => Ok(ChatMessageDisplayMode::NORMAL),
         "HIDDEN_PLACEHOLDER" => Ok(ChatMessageDisplayMode::HIDDEN_PLACEHOLDER),
-        other => Err(format!("Operit1 message display mode is unknown: {other}")),
+        // Operit1's MessageEntity.toChatMessage also defaults unknown values to
+        // NORMAL. This presentation hint must not prevent history migration.
+        _ => Ok(ChatMessageDisplayMode::NORMAL),
     }
 }
 
@@ -650,5 +642,202 @@ mod chat_timestamp_tests {
         assert!(migrateOperit1MessageTimestampIdentities(&mut messages)
             .unwrap_err()
             .starts_with("Operit1 message timestamp identity overflowed:"));
+    }
+}
+
+#[cfg(test)]
+mod chat_markup_import_tests {
+    use super::*;
+    use operit_host_api::{HostError, HostResult, RuntimeSqliteTransaction};
+    use operit_model::MessagePart::MessagePartKind;
+
+    const ASSISTANT_TEXT: &str = "旧回复<tool_NtfY/>继续正文";
+    const USER_TEXT: &str = "用户原文<think>不是思考块</think><tool_NtfY/>";
+
+    /// Supplies the selected message and revision rows through the real reader contract.
+    struct MessageRowsConnection {
+        messages: Vec<SqliteRow>,
+        variants: Vec<SqliteRow>,
+    }
+
+    impl RuntimeSqliteConnection for MessageRowsConnection {
+        fn executeBatch(&mut self, _: &str) -> HostResult<()> {
+            Err(HostError::new("unexpected write during history read"))
+        }
+
+        fn execute(&mut self, _: &str, _: Vec<SqliteValue>) -> HostResult<usize> {
+            Err(HostError::new("unexpected write during history read"))
+        }
+
+        fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>> {
+            assert_eq!(params[0], SqliteValue::Text("chat-1".to_string()));
+            if sql.contains("FROM message_variants") {
+                assert_eq!(params.len(), 2);
+                return Ok(if params[1] == SqliteValue::Integer(20) {
+                    self.variants.clone()
+                } else {
+                    Vec::new()
+                });
+            }
+            assert!(sql.contains("FROM messages"));
+            Ok(self.messages.clone())
+        }
+
+        fn lastInsertRowId(&self) -> HostResult<i64> {
+            Err(HostError::new("unexpected insert during history read"))
+        }
+
+        fn beginTransaction(&mut self) -> HostResult<Box<dyn RuntimeSqliteTransaction + '_>> {
+            Err(HostError::new("unexpected transaction during history read"))
+        }
+    }
+
+    fn text(value: &str) -> SqliteValue {
+        SqliteValue::Text(value.to_string())
+    }
+
+    fn row(values: Vec<SqliteValue>) -> SqliteRow {
+        SqliteRow {
+            columns: Vec::new(),
+            values,
+        }
+    }
+
+    fn legacy_message(sender: &str, content: &str, timestamp: i64) -> SqliteRow {
+        row(vec![
+            text(sender),
+            text(content),
+            SqliteValue::Integer(timestamp),
+            SqliteValue::Integer(timestamp),
+            text("role"),
+            text("provider"),
+            text("model"),
+        ])
+    }
+
+    fn modern_message(sender: &str, content: &str, timestamp: i64) -> SqliteRow {
+        row(vec![
+            text(sender),
+            text(content),
+            SqliteValue::Integer(timestamp),
+            text("role"),
+            SqliteValue::Integer(if sender == "ai" { 1 } else { 0 }),
+            text("provider"),
+            text("model"),
+            SqliteValue::Integer(11),
+            SqliteValue::Integer(12),
+            SqliteValue::Integer(13),
+            SqliteValue::Integer(14),
+            SqliteValue::Integer(15),
+            SqliteValue::Integer(16),
+            SqliteValue::Integer(17),
+            text("LEGACY_UNKNOWN_MODE"),
+            SqliteValue::Integer(1),
+        ])
+    }
+
+    /// A bad assistant fragment must not prevent either adjacent user message importing.
+    #[test]
+    fn room_v10_import_preserves_all_messages_with_self_closing_markup() {
+        let mut connection = MessageRowsConnection {
+            messages: vec![
+                legacy_message("user", USER_TEXT, 10),
+                legacy_message("ai", ASSISTANT_TEXT, 20),
+                legacy_message("user", "后续用户消息", 30),
+            ],
+            variants: Vec::new(),
+        };
+        let mut parsed = 0;
+        let messages = readOperit1RoomV10Messages(&mut connection, "chat-1", &mut || parsed += 1)
+            .expect("legacy assistant markup must not block user history");
+        assert_eq!(parsed, 3);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].baseMessage.sender, "user");
+        assert_eq!(
+            messages[0].baseMessage.parts[0].kind,
+            MessagePartKind::Markdown
+        );
+        assert_eq!(messages[0].baseMessage.parts[0].content, USER_TEXT);
+        assert_eq!(
+            MessagePartCodec::assistantMarkup(&messages[1].baseMessage.parts),
+            ASSISTANT_TEXT
+        );
+        assert_eq!(messages[1].baseMessage.timestamp, 20);
+        assert_eq!(messages[2].baseMessage.parts[0].content, "后续用户消息");
+    }
+
+    /// Room 20/21 revisions use the same lenient path as base messages.
+    #[test]
+    fn room_v20_v21_import_preserves_base_messages_and_variants() {
+        let revision = "历史版本<tool_result_NtfY/><status type=\"completion\"/>";
+        let mut connection = MessageRowsConnection {
+            messages: vec![
+                modern_message("user", USER_TEXT, 10),
+                modern_message("ai", ASSISTANT_TEXT, 20),
+                modern_message("user", "后续用户消息", 30),
+            ],
+            variants: vec![row(vec![
+                SqliteValue::Integer(1),
+                text(revision),
+                text("variant-role"),
+                text("variant-provider"),
+                text("variant-model"),
+                SqliteValue::Integer(21),
+                SqliteValue::Integer(22),
+                SqliteValue::Integer(23),
+                SqliteValue::Integer(24),
+                SqliteValue::Integer(25),
+                SqliteValue::Integer(26),
+                SqliteValue::Integer(27),
+            ])],
+        };
+        let mut parsed = 0;
+        let messages = readOperit1RoomV20Messages(&mut connection, "chat-1", &mut || parsed += 1)
+            .expect("legacy message/revision markup must not block migration");
+        assert_eq!(parsed, 3);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].baseMessage.parts[0].content, USER_TEXT);
+        let message = &messages[1];
+        assert_eq!(
+            MessagePartCodec::assistantMarkup(&message.baseMessage.parts),
+            ASSISTANT_TEXT
+        );
+        assert_eq!(message.baseMessage.selectedVariantIndex, 1);
+        assert_eq!(message.baseMessage.variantCount, 2);
+        assert_eq!(message.baseMessage.inputTokens, 11);
+        assert_eq!(message.baseMessage.outputTokens, 12);
+        assert!(message.baseMessage.isFavorite);
+        assert_eq!(
+            message.baseMessage.displayMode,
+            ChatMessageDisplayMode::NORMAL
+        );
+        assert_eq!(message.variants.len(), 1);
+        let variant = &message.variants[0];
+        assert_eq!(variant.variantIndex, 1);
+        assert_eq!(MessagePartCodec::assistantMarkup(&variant.parts), revision);
+        assert_eq!(variant.roleName, "variant-role");
+        assert_eq!(variant.provider, "variant-provider");
+        assert_eq!(variant.inputTokens, 21);
+        assert_eq!(variant.completedAt, 27);
+        assert_eq!(messages[2].baseMessage.parts[0].content, "后续用户消息");
+    }
+
+    /// Preserve known presentation modes and mirror Kotlin's default for unknown ones.
+    #[test]
+    fn import_defaults_unknown_display_modes_to_normal() {
+        assert_eq!(
+            parseOperit1ChatMessageDisplayMode("NORMAL").unwrap(),
+            ChatMessageDisplayMode::NORMAL
+        );
+        assert_eq!(
+            parseOperit1ChatMessageDisplayMode("HIDDEN_PLACEHOLDER").unwrap(),
+            ChatMessageDisplayMode::HIDDEN_PLACEHOLDER
+        );
+        for mode in ["", "OTHER_MODE"] {
+            assert_eq!(
+                parseOperit1ChatMessageDisplayMode(mode).unwrap(),
+                ChatMessageDisplayMode::NORMAL
+            );
+        }
     }
 }

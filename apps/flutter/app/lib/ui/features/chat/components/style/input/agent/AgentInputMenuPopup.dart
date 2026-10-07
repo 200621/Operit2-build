@@ -127,6 +127,50 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
     }
   }
 
+  void _showMemoryInfo(String title, String description) {
+    final dialog = showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(description),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+    // This menu is a root OverlayEntry, not a route. Remove it before the
+    // dialog is painted or it will remain above the navigator's modal barrier.
+    widget.onDismiss();
+    unawaited(dialog);
+  }
+
+  void _openMemorySettings() {
+    final chatId = widget.currentChatId;
+    if (chatId == null) return;
+    final dialog = MemoryOwnerControlsDialog.open(
+      context,
+      widget.viewModel.clients,
+      '',
+      chatCore: widget.viewModel.chatCore,
+      chatId: chatId,
+    );
+    widget.onDismiss();
+    unawaited(dialog);
+  }
+
+  String get _memoryQueueDescription {
+    final queue = _queue;
+    if (queue == null) return '暂无队列状态。自动提取会定期检查当前记忆库。';
+    return '待处理 ${queue.pendingCandidates} 条 · ${queue.pendingChats} 个聊天\n'
+        '处理中 ${queue.processingCandidates} · 失败 ${queue.failedCandidates}\n'
+        '下次检查：约 ${queue.minutesUntilNextRun} 分钟后\n\n'
+        '自动检查需要至少 5 个候选；不足时继续等待。手动更新不受此门槛限制。'
+        '${queue.lastError.isEmpty ? '' : '\n\n${queue.lastError}'}';
+  }
+
   void _startPluginChangeObserver() {
     _pluginChangeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _checkPluginChangeVersion();
@@ -297,6 +341,8 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                           _memoryExpanded = !_memoryExpanded;
                         });
                       },
+                      onInfoTap: () =>
+                          _showMemoryInfo('记忆状态', _memoryQueueDescription),
                       children: <Widget>[
                         _SwitchRow(
                           icon: Icons.assignment_ind_outlined,
@@ -319,41 +365,17 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                           checked: data.enableMemoryAutoUpdate,
                           onTap: () => _toggleMemoryAutoUpdate(data),
                         ),
-                        if (_queue != null)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            child: Text(
-                              '待处理 ${_queue!.pendingCandidates} 条 · ${_queue!.pendingChats} 个聊天\n约 ${_queue!.minutesUntilNextRun} 分钟后检查 · 失败 ${_queue!.failedCandidates}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ),
-                        ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.psychology_outlined),
-                          title: Text(_memoryBusy ? '正在提取记忆…' : '立即提取当前聊天记忆'),
+                        _ActionRow(
+                          icon: Icons.save_outlined,
+                          title: _memoryBusy ? '正在更新记忆…' : '手动更新记忆',
                           enabled: !_memoryBusy && widget.currentChatId != null,
                           onTap: _manualMemory,
                         ),
-                        ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.tune),
-                          title: const Text('沉淀、检索与历史重建'),
+                        _ActionRow(
+                          icon: Icons.tune,
+                          title: '记忆设置',
                           enabled: widget.currentChatId != null,
-                          onTap: () async {
-                            final chatId = widget.currentChatId;
-                            if (chatId == null) return;
-                            await MemoryOwnerControlsDialog.open(
-                              context,
-                              widget.viewModel.clients,
-                              '',
-                              chatCore: widget.viewModel.chatCore,
-                              chatId: chatId,
-                            );
-                            await _pollMemory();
-                          },
+                          onTap: _openMemorySettings,
                         ),
                       ],
                     ),
@@ -1123,6 +1145,7 @@ class _MenuSection extends StatelessWidget {
     required this.value,
     required this.expanded,
     required this.onTap,
+    this.onInfoTap,
     required this.children,
   });
 
@@ -1131,9 +1154,10 @@ class _MenuSection extends StatelessWidget {
   final String value;
   final bool expanded;
   final VoidCallback onTap;
+  final VoidCallback? onInfoTap;
   final List<Widget> children;
 
-  /// Builds a menu section with a softly grouped expanded content area.
+  /// Builds a compact group without nesting another card inside the menu.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -1169,6 +1193,8 @@ class _MenuSection extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (onInfoTap != null)
+                    _MenuInfoButton(title: '记忆状态', onTap: onInfoTap!),
                   const SizedBox(width: 6),
                   Icon(
                     expanded
@@ -1185,16 +1211,7 @@ class _MenuSection extends StatelessWidget {
         if (expanded)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 8, 4),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: ColoredBox(
-                color: colorScheme.surface.withValues(alpha: 0.42),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: children,
-                ),
-              ),
-            ),
+            child: Column(mainAxisSize: MainAxisSize.min, children: children),
           ),
       ],
     );
@@ -1281,6 +1298,79 @@ class _SwitchRow extends StatelessWidget {
                     value: checked,
                     onChanged: enabled ? (_) => onTap() : null,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MenuInfoButton extends StatelessWidget {
+  const _MenuInfoButton({required this.title, required this.onTap});
+
+  final String title;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    tooltip: '$title说明',
+    onPressed: onTap,
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints.tightFor(width: 24, height: 28),
+    style: IconButton.styleFrom(
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+    icon: Icon(
+      Icons.info_outline,
+      size: 16,
+      color: Theme.of(
+        context,
+      ).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+    ),
+  );
+}
+
+class _ActionRow extends StatelessWidget {
+  const _ActionRow({
+    required this.icon,
+    required this.title,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: enabled ? onTap : null,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 32),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: enabled
+                        ? theme.colorScheme.onSurface
+                        : theme.colorScheme.onSurfaceVariant.withValues(
+                            alpha: 0.45,
+                          ),
                   ),
                 ),
               ),

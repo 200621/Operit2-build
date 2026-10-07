@@ -351,7 +351,7 @@ class _OperitMaterialApp extends StatelessWidget {
         final appContent = ThemeCircularRevealHost(
           child: AnnotatedRegion<SystemUiOverlayStyle>(
             value: _systemUiOverlayStyle(Theme.of(context).colorScheme),
-            child: _OperitThemeBackground(
+            child: OperitThemeBackground(
               themePreferenceSnapshot: themePreferenceSnapshot,
               child: materialChild!,
             ),
@@ -1214,8 +1214,12 @@ InputDecorationTheme _inputDecorationTheme(
   );
 }
 
-class _OperitThemeBackground extends StatelessWidget {
-  const _OperitThemeBackground({
+/// The shared image/video background used by the app and appearance preview.
+class OperitThemeBackground extends StatelessWidget {
+  const OperitThemeBackground({
+    super.key,
+    this.fit = StackFit.expand,
+    this.muteVideo = false,
     required this.themePreferenceSnapshot,
     required this.child,
   });
@@ -1226,6 +1230,10 @@ class _OperitThemeBackground extends StatelessWidget {
 
   final ThemePreferenceSnapshot themePreferenceSnapshot;
   final Widget child;
+  final StackFit fit;
+
+  /// Keeps embedded previews from playing a second copy of background audio.
+  final bool muteVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -1237,7 +1245,7 @@ class _OperitThemeBackground extends StatelessWidget {
         mediaPath.isNotEmpty;
     return LiquidGlassScope(
       child: Stack(
-        fit: StackFit.expand,
+        fit: fit,
         children: <Widget>[
           Positioned.fill(
             child: GlassBackgroundSource(
@@ -1263,7 +1271,9 @@ class _OperitThemeBackground extends StatelessWidget {
                                 themePreferenceSnapshot.backgroundMediaType,
                             opacity:
                                 themePreferenceSnapshot.backgroundImageOpacity,
-                            muted: themePreferenceSnapshot.videoBackgroundMuted,
+                            muted:
+                                muteVideo ||
+                                themePreferenceSnapshot.videoBackgroundMuted,
                             loop: themePreferenceSnapshot.videoBackgroundLoop,
                             blurEnabled:
                                 themePreferenceSnapshot.useBackgroundBlur,
@@ -1320,7 +1330,7 @@ class _ThemeBackgroundMedia extends StatelessWidget {
           )
         : media;
     return AnimatedOpacity(
-      duration: _OperitThemeBackground._backgroundAnimationDuration,
+      duration: OperitThemeBackground._backgroundAnimationDuration,
       curve: Curves.easeOutCubic,
       opacity: opacity.clamp(0, 1),
       child: blurred,

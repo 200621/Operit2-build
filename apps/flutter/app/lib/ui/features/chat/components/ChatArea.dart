@@ -18,9 +18,7 @@ import 'MessageContextMenu.dart';
 import 'MessageCopyPreview.dart';
 import 'ChatScrollNavigator.dart';
 import 'NewChatIntro.dart';
-import 'style/bubble/BubbleStyleChatMessage.dart';
-import 'style/bubble/BubbleSurface.dart';
-import 'style/cursor/CursorStyleChatMessage.dart';
+import 'style/ThemedChatMessage.dart';
 
 const Duration _navigatorHideDelay = Duration(milliseconds: 1200);
 const Duration _viewportResizeSettleDelay = Duration(milliseconds: 120);
@@ -913,7 +911,7 @@ class _ChatAreaState extends State<ChatArea>
       context,
     ).themePreferenceSnapshot;
     final colorScheme = Theme.of(context).colorScheme;
-    final messageThemeColors = _resolveMessageRowThemeColors(
+    final messageThemeColors = resolveChatMessageThemeColors(
       themePreferenceSnapshot,
       colorScheme,
     );
@@ -933,50 +931,16 @@ class _ChatAreaState extends State<ChatArea>
       return cached.widget;
     }
 
-    final chatMessage =
-        themePreferenceSnapshot.chatStyle ==
-            UserPreferencesManager.CHAT_STYLE_BUBBLE
-        ? BubbleStyleChatMessage(
-            key: ValueKey<String>(_messageWidgetKey(message)),
-            message: message,
-            userMessageColor: messageThemeColors.userMessageColor,
-            aiMessageColor: messageThemeColors.aiMessageColor,
-            userTextColor: messageThemeColors.userTextColor,
-            aiTextColor: messageThemeColors.aiTextColor,
-            systemMessageColor: messageThemeColors.systemMessageColor,
-            systemTextColor: messageThemeColors.systemTextColor,
-            transparentSurface:
-                themePreferenceSnapshot.transparentSurfaceEnabled,
-            userBubbleImageStyle: _userBubbleImageStyle(
-              themePreferenceSnapshot,
-            ),
-            aiBubbleImageStyle: _aiBubbleImageStyle(themePreferenceSnapshot),
-            bubbleUserRoundedCornersEnabled:
-                themePreferenceSnapshot.bubbleUserRoundedCornersEnabled,
-            bubbleAiRoundedCornersEnabled:
-                themePreferenceSnapshot.bubbleAiRoundedCornersEnabled,
-            bubbleUserContentPaddingLeft:
-                themePreferenceSnapshot.bubbleUserContentPaddingLeft,
-            bubbleUserContentPaddingRight:
-                themePreferenceSnapshot.bubbleUserContentPaddingRight,
-            bubbleAiContentPaddingLeft:
-                themePreferenceSnapshot.bubbleAiContentPaddingLeft,
-            bubbleAiContentPaddingRight:
-                themePreferenceSnapshot.bubbleAiContentPaddingRight,
-            currentCharacterCardAvatarUri: widget.currentCharacterCardAvatarUri,
-            splitMarkdownContent: widget.splitMarkdownContent,
-            onDeleteMessage: widget.onDeleteMessage,
-            onEditSummary: widget.onSelectMessageToEdit,
-          )
-        : CursorStyleChatMessage(
-            key: ValueKey<String>(_messageWidgetKey(message)),
-            message: message,
-            currentCharacterCardAvatarUri: widget.currentCharacterCardAvatarUri,
-            splitMarkdownContent: widget.splitMarkdownContent,
-            onDeleteMessage: widget.onDeleteMessage,
-            onEditSummary: widget.onSelectMessageToEdit,
-            enableDialogs: true,
-          );
+    final chatMessage = buildThemedChatMessage(
+      snapshot: themePreferenceSnapshot,
+      colorScheme: colorScheme,
+      key: ValueKey<String>(_messageWidgetKey(message)),
+      message: message,
+      currentCharacterCardAvatarUri: widget.currentCharacterCardAvatarUri,
+      splitMarkdownContent: widget.splitMarkdownContent,
+      onDeleteMessage: widget.onDeleteMessage,
+      onEditSummary: widget.onSelectMessageToEdit,
+    );
     final messageContent = _SelectableMessageFrame(
       selected: selected,
       selectionMode: selectionMode,
@@ -1373,87 +1337,8 @@ class _CachedMessageRow {
   final bool isStreaming;
   final String? currentCharacterCardAvatarUri;
   final ThemePreferenceSnapshot themePreferenceSnapshot;
-  final _MessageRowThemeColors messageThemeColors;
+  final ChatMessageThemeColors messageThemeColors;
   final Widget widget;
-}
-
-/// Captures concrete theme-dependent colors used by one cached message row.
-typedef _MessageRowThemeColors = ({
-  Color userMessageColor,
-  Color aiMessageColor,
-  Color userTextColor,
-  Color aiTextColor,
-  Color systemMessageColor,
-  Color systemTextColor,
-});
-
-/// Resolves concrete colors used by one cached message row.
-_MessageRowThemeColors _resolveMessageRowThemeColors(
-  ThemePreferenceSnapshot snapshot,
-  ColorScheme colorScheme,
-) {
-  return (
-    userMessageColor:
-        _optionalColor(snapshot.bubbleUserBubbleColor) ??
-        colorScheme.primaryContainer,
-    aiMessageColor:
-        _optionalColor(snapshot.bubbleAiBubbleColor) ??
-        colorScheme.surfaceContainerHighest,
-    userTextColor:
-        _optionalColor(snapshot.bubbleUserTextColor) ??
-        colorScheme.onPrimaryContainer,
-    aiTextColor:
-        _optionalColor(snapshot.bubbleAiTextColor) ?? colorScheme.onSurface,
-    systemMessageColor: colorScheme.surfaceContainerHighest,
-    systemTextColor: colorScheme.onSurfaceVariant,
-  );
-}
-
-/// Builds user bubble image settings from the active theme snapshot.
-BubbleImageStyle? _userBubbleImageStyle(ThemePreferenceSnapshot snapshot) {
-  final imagePath = snapshot.bubbleUserImageUri;
-  if (!snapshot.bubbleUserUseImage || imagePath == null || imagePath.isEmpty) {
-    return null;
-  }
-  return BubbleImageStyle(
-    imagePath: imagePath,
-    cropLeftRatio: snapshot.bubbleUserImageCropLeft,
-    cropTopRatio: snapshot.bubbleUserImageCropTop,
-    cropRightRatio: snapshot.bubbleUserImageCropRight,
-    cropBottomRatio: snapshot.bubbleUserImageCropBottom,
-    repeatXStartRatio: snapshot.bubbleUserImageRepeatStart,
-    repeatXEndRatio: snapshot.bubbleUserImageRepeatEnd,
-    repeatYStartRatio: snapshot.bubbleUserImageRepeatYStart,
-    repeatYEndRatio: snapshot.bubbleUserImageRepeatYEnd,
-    imageScale: snapshot.bubbleUserImageScale,
-    renderMode: snapshot.bubbleUserImageRenderMode,
-  );
-}
-
-/// Builds AI bubble image settings from the active theme snapshot.
-BubbleImageStyle? _aiBubbleImageStyle(ThemePreferenceSnapshot snapshot) {
-  final imagePath = snapshot.bubbleAiImageUri;
-  if (!snapshot.bubbleAiUseImage || imagePath == null || imagePath.isEmpty) {
-    return null;
-  }
-  return BubbleImageStyle(
-    imagePath: imagePath,
-    cropLeftRatio: snapshot.bubbleAiImageCropLeft,
-    cropTopRatio: snapshot.bubbleAiImageCropTop,
-    cropRightRatio: snapshot.bubbleAiImageCropRight,
-    cropBottomRatio: snapshot.bubbleAiImageCropBottom,
-    repeatXStartRatio: snapshot.bubbleAiImageRepeatStart,
-    repeatXEndRatio: snapshot.bubbleAiImageRepeatEnd,
-    repeatYStartRatio: snapshot.bubbleAiImageRepeatYStart,
-    repeatYEndRatio: snapshot.bubbleAiImageRepeatYEnd,
-    imageScale: snapshot.bubbleAiImageScale,
-    renderMode: snapshot.bubbleAiImageRenderMode,
-  );
-}
-
-/// Converts a stored ARGB color value into a Flutter color.
-Color? _optionalColor(int? value) {
-  return value == null ? null : Color(value);
 }
 
 /// Reports whether one cached message row can be reused unchanged.

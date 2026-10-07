@@ -264,7 +264,12 @@ export async function onChatViewEvent(event: ToolPkg.ChatViewHookEvent): Promise
   }
   const workspacePath = payload.workspacePath;
   const title = payload.title;
-  if (typeof workspacePath !== "string" || workspacePath.trim() === "" || typeof title !== "string") {
+  if (typeof workspacePath !== "string" || workspacePath.trim() === "") {
+    await removeTrackedChatViewAsync(runtime, viewId);
+    await setGoalInputSlotEnabledAsync(chatId, false);
+    return;
+  }
+  if (typeof title !== "string") {
     return;
   }
   await upsertTrackedChatViewAsync({

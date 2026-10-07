@@ -233,7 +233,12 @@ async function onChatViewEvent(event) {
     }
     const workspacePath = payload.workspacePath;
     const title = payload.title;
-    if (typeof workspacePath !== "string" || workspacePath.trim() === "" || typeof title !== "string") {
+    if (typeof workspacePath !== "string" || workspacePath.trim() === "") {
+        await (0, goal_mode_ipc_js_1.removeTrackedChatViewAsync)(runtime, viewId);
+        await (0, goal_mode_ipc_js_1.setGoalInputSlotEnabledAsync)(chatId, false);
+        return;
+    }
+    if (typeof title !== "string") {
         return;
     }
     await (0, goal_mode_ipc_js_1.upsertTrackedChatViewAsync)({

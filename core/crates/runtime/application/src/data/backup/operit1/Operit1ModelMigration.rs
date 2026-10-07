@@ -270,6 +270,8 @@ struct Operit1ModelConfig {
     #[serde(default)]
     enableToolCall: bool,
     #[serde(default)]
+    enableClaude1hPromptCache: bool,
+    #[serde(default)]
     requestLimitPerMinute: i32,
     #[serde(default)]
     maxConcurrentRequests: i32,
@@ -411,6 +413,7 @@ fn buildModelProfile(
     });
     model.requestOverride = Some(ModelRequestSpec {
         supportsStructuredTools: config.enableToolCall,
+        enableClaude1hPromptCache: config.enableClaude1hPromptCache,
     });
     model.summary = ModelSummarySettings {
         enableSummary: config.enableSummary,

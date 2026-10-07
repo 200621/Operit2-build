@@ -6,3 +6,6 @@ pub mod ForegroundServiceCompat;
 
 #[path = "OperitApplication.rs"]
 pub mod OperitApplication;
+
+#[path = "MarketInstallSupport.rs"]
+mod MarketInstallSupport;

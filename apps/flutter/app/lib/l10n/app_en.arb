@@ -1603,6 +1603,34 @@
   "settingsAppearanceLivePreviewUserSample": "Help me organize today's work plan.",
   "settingsAppearanceLivePreviewAiSample": "Sure! I've organized your core task list and we're ready to start.",
   "settingsAppearanceLivePreviewThinkingSample": "Analyzing context and schedule priorities...",
+  "settingsDataLogsSection": "Diagnostic logs",
+  "settingsDataLogsDescription": "Export the selected Core and this client’s logs as one time-ordered .log file, marked [CORE] / [CLIENT]. Logs may contain sensitive data; review before sharing.",
+  "settingsDataExportLogs": "Export diagnostic logs",
+  "settingsDataLogsExporting": "Exporting logs…",
+  "settingsDataLogsExportError": "Log export failed: {error}",
+  "@settingsDataLogsExportError": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsDataLogsExportPartial": "Saved to {path}. One log source could not be read; see the warnings in the file.",
+  "@settingsDataLogsExportPartial": {
+    "placeholders": {
+      "path": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsDataOverviewLoadError": "The data overview could not be loaded: {error}. You can still export diagnostic logs.",
+  "@settingsDataOverviewLoadError": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
   "settingsDataRuntimeSection": "Data overview",
   "settingsDataCoreVersion": "Current version",
   "settingsDataStorageSection": "Storage location",

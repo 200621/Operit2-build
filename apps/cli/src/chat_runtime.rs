@@ -1103,6 +1103,7 @@ pub(crate) fn build_attachment_info(path: &str) -> Result<AttachmentInfo, String
     let mimeType = guess_mime_type(path).to_string();
     let content = attachment_text_content(path, &mimeType)?;
     Ok(AttachmentInfo {
+        nodeId: operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore::localNodeId(),
         filePath: path.to_string(),
         fileName,
         mimeType,

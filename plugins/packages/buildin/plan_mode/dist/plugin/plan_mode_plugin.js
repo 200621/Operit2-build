@@ -360,9 +360,7 @@ async function onChatViewEvent(event) {
         const title = payload.title;
         if (!isPlanModeRuntime(runtime) ||
             !isNonEmptyString(viewId) ||
-            !isNonEmptyString(chatId) ||
-            !isNonEmptyString(workspacePath) ||
-            typeof title !== "string") {
+            !isNonEmptyString(chatId)) {
             (0, plan_mode_workspace_js_1.logPlanModeDebug)("onChatViewEvent.ignore_invalid_workspace", {
                 eventName,
                 runtime,
@@ -371,6 +369,21 @@ async function onChatViewEvent(event) {
                 workspacePath: typeof workspacePath === "string" ? workspacePath : workspacePath === null ? "null" : undefined,
                 workspaceEnv: typeof workspaceEnv === "string" ? workspaceEnv : workspaceEnv === null ? "null" : undefined,
             });
+            return;
+        }
+        // Closing or unbinding a view is valid even when its workspace path is empty.
+        if (eventName === "view_closed") {
+            await plan_mode_runtime_ipc_js_1.PlanModeShared.removeTrackedChatView(runtime, viewId);
+            return;
+        }
+        if (!isNonEmptyString(workspacePath)) {
+            await plan_mode_runtime_ipc_js_1.PlanModeShared.removeTrackedChatView(runtime, viewId);
+            await plan_mode_runtime_ipc_js_1.PlanModeShared.disable(chatId);
+            (0, plan_mode_workspace_js_1.logPlanModeDebug)("onChatViewEvent.workspace_unbound", { eventName, runtime, viewId, chatId });
+            return;
+        }
+        if (typeof title !== "string") {
+            (0, plan_mode_workspace_js_1.logPlanModeDebug)("onChatViewEvent.ignore_invalid_title", { eventName, runtime, viewId, chatId });
             return;
         }
         (0, plan_mode_workspace_js_1.logPlanModeDebug)("onChatViewEvent", {
@@ -382,10 +395,6 @@ async function onChatViewEvent(event) {
             workspaceEnv,
             title,
         });
-        if (eventName === "view_closed") {
-            await plan_mode_runtime_ipc_js_1.PlanModeShared.removeTrackedChatView(runtime, viewId);
-            return;
-        }
         await plan_mode_runtime_ipc_js_1.PlanModeShared.upsertTrackedChatView({
             viewId,
             runtime,

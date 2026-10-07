@@ -377,8 +377,16 @@ class _AppContentState extends State<AppContent> {
             ),
           ],
         );
-        return SizedBox.expand(
-          child: mainLayoutController.decorate(context, frame),
+        // Scaffold avoids the keyboard, but not system navigation controls.
+        // Protect every retained page (and workspace attachment) at this shared
+        // boundary. The top bar already handles the status-bar padding above;
+        // regular SafeArea padding also disappears when the keyboard consumes
+        // it, so we do not add a second bottom gap above the IME.
+        return SafeArea(
+          top: false,
+          child: SizedBox.expand(
+            child: mainLayoutController.decorate(context, frame),
+          ),
         );
       },
     );

@@ -255,3 +255,197 @@ fn failed_reindex_rolls_back_the_entire_revision_deletion() {
         assert_eq!(snapshot(&database), before);
     }
 }
+
+/// Creates a manually ordered sidebar with a pinned chat above two ordinary chats.
+fn chatOrderFixture(name: &str) -> (ChatHistoryManager, Arc<AppDatabase>) {
+    let (paths, database, _) = openTestStore(name);
+    let manager = ChatHistoryManager::create(paths).unwrap();
+    for (index, id) in ["pinned", "recent", "older"].into_iter().enumerate() {
+        let mut chat = ChatEntity::new(id.to_string(), id.to_string(), 1);
+        chat.displayOrder = index as i64;
+        chat.pinned = id == "pinned";
+        chat.group = Some("saved-group".to_string());
+        chat.characterCardName = Some("saved-character".to_string());
+        database.chatDao().insertChat(chat).unwrap();
+    }
+    (manager, database)
+}
+
+fn sidebarChatIds(manager: &ChatHistoryManager) -> Vec<String> {
+    manager
+        .chatHistoriesFlow()
+        .unwrap()
+        .value()
+        .into_iter()
+        .map(|chat| chat.id)
+        .collect()
+}
+
+#[test]
+fn new_user_message_promotes_chat_below_pins_and_preserves_metadata() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = chatOrderFixture("chat-order-user-send");
+    let original = database.chatDao().getChatById("older").unwrap().unwrap();
+    let recent = database.chatDao().getChatById("recent").unwrap().unwrap();
+    manager
+        .addMessage(
+            "older".to_string(),
+            ChatMessage::new_with_markdown_timestamp("user".to_string(), "hello".to_string(), 100),
+        )
+        .unwrap();
+
+    assert_eq!(sidebarChatIds(&manager), ["pinned", "older", "recent"]);
+    let promoted = database.chatDao().getChatById("older").unwrap().unwrap();
+    assert!(promoted.displayOrder < recent.displayOrder);
+    assert_eq!(
+        promoted.clone(),
+        ChatEntity {
+            displayOrder: promoted.displayOrder,
+            updatedAt: promoted.updatedAt,
+            ..original
+        }
+    );
+    assert_eq!(
+        database.chatDao().getChatById("recent").unwrap().unwrap(),
+        recent
+    );
+}
+
+#[test]
+fn successive_user_sends_follow_send_order_even_with_negative_display_orders() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = chatOrderFixture("chat-order-successive-sends");
+    // A saved order can be smaller than the negated current time. Promotion must
+    // still move ahead of it rather than relying solely on the wall clock.
+    database
+        .chatDao()
+        .updateChatOrderAndGroup(
+            "recent",
+            -9_000_000_000_000_000,
+            Some("saved-group".to_string()),
+            1,
+        )
+        .unwrap();
+    for (index, id) in ["older", "recent", "older"].into_iter().enumerate() {
+        manager
+            .addMessage(
+                id.to_string(),
+                ChatMessage::new_with_markdown_timestamp(
+                    "user".to_string(),
+                    "hello".to_string(),
+                    100 + index as i64,
+                ),
+            )
+            .unwrap();
+        let expectedOther = if id == "older" { "recent" } else { "older" };
+        assert_eq!(sidebarChatIds(&manager), ["pinned", id, expectedOther]);
+    }
+}
+
+#[test]
+fn replies_edits_and_duplicate_user_saves_do_not_promote_chat() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = chatOrderFixture("chat-order-no-promote-on-update");
+    let userMessage =
+        ChatMessage::new_with_markdown_timestamp("user".to_string(), "original".to_string(), 100);
+    manager
+        .addMessage("older".to_string(), userMessage.clone())
+        .unwrap();
+    manager
+        .addMessage(
+            "recent".to_string(),
+            ChatMessage::new_with_markdown_timestamp("user".to_string(), "latest".to_string(), 101),
+        )
+        .unwrap();
+    let savedOrder = database
+        .chatDao()
+        .getChatById("older")
+        .unwrap()
+        .unwrap()
+        .displayOrder;
+    manager
+        .updateMessage(
+            "older".to_string(),
+            ChatMessage::new_with_markdown_timestamp("user".to_string(), "edited".to_string(), 100),
+        )
+        .unwrap();
+    manager
+        .addMessage("older".to_string(), userMessage)
+        .unwrap();
+    for (index, sender) in ["ai", "summary", "tool"].into_iter().enumerate() {
+        let mut message = ChatMessage::new_with_markdown_timestamp(
+            sender.to_string(),
+            "reply".to_string(),
+            102 + index as i64,
+        );
+        manager
+            .addMessage("older".to_string(), message.clone())
+            .unwrap();
+        message.completedAt = 200;
+        manager.updateMessage("older".to_string(), message).unwrap();
+        assert_eq!(sidebarChatIds(&manager), ["pinned", "recent", "older"]);
+        assert_eq!(
+            database
+                .chatDao()
+                .getChatById("older")
+                .unwrap()
+                .unwrap()
+                .displayOrder,
+            savedOrder
+        );
+    }
+}
+
+#[test]
+fn new_background_user_message_promotes_chat_through_update_path() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = chatOrderFixture("chat-order-background-send");
+    let message = ChatMessage::new_with_markdown_timestamp(
+        "user".to_string(),
+        "background send".to_string(),
+        100,
+    );
+    manager
+        .updateMessage("older".to_string(), message.clone())
+        .unwrap();
+    assert_eq!(sidebarChatIds(&manager), ["pinned", "older", "recent"]);
+    let savedOrder = database
+        .chatDao()
+        .getChatById("older")
+        .unwrap()
+        .unwrap()
+        .displayOrder;
+    manager.updateMessage("older".to_string(), message).unwrap();
+    assert_eq!(
+        database
+            .chatDao()
+            .getChatById("older")
+            .unwrap()
+            .unwrap()
+            .displayOrder,
+        savedOrder
+    );
+}
+
+#[test]
+fn user_send_in_pinned_chat_moves_it_to_front_without_unpinning() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database) = chatOrderFixture("chat-order-pinned-send");
+    manager.updateChatPinned("older".to_string(), true).unwrap();
+    assert_eq!(sidebarChatIds(&manager), ["pinned", "older", "recent"]);
+    manager
+        .addMessage(
+            "older".to_string(),
+            ChatMessage::new_with_markdown_timestamp("user".to_string(), "hello".to_string(), 100),
+        )
+        .unwrap();
+    assert_eq!(sidebarChatIds(&manager), ["older", "pinned", "recent"]);
+    assert!(
+        database
+            .chatDao()
+            .getChatById("older")
+            .unwrap()
+            .unwrap()
+            .pinned
+    );
+}

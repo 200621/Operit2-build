@@ -502,7 +502,9 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
         .operit1SnapshotImportProgressFlow()
         .listen(
           (progress) {
-            if (!mounted) {
+            if (!mounted ||
+                !_importingOperit1Snapshot ||
+                progress.stage == 'idle') {
               return;
             }
             setState(() {
@@ -983,7 +985,13 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       _readingOperit1Snapshot = true;
       _setupError = null;
       _operit1Snapshot = null;
-      _operit1ImportProgress = null;
+      _operit1ImportProgress = const core_proxy.Operit1SnapshotImportProgress(
+        stage: 'select',
+        title: '选择快照',
+        detail: '请在文件选择器中选择 Operit1 快照。',
+        progress: 0,
+        active: true,
+      );
       _operit1SnapshotSession = null;
       _operit1SnapshotFileName = null;
     });
@@ -999,8 +1007,48 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
         'snapshot selected name=${file.name} bytes=${file.byteLength}',
         tag: _operit1SnapshotImportLogTag,
       );
-      final session = await SnapshotImportUploader(widget.clients).stage(file);
+      if (!mounted) {
+        await file.close();
+        return;
+      }
+      setState(() {
+        _operit1SnapshotFileName = file.name;
+      });
+      var lastUploadPercent = -1;
+      final session = await SnapshotImportUploader(widget.clients).stage(
+        file,
+        onProgress: (uploadedBytes, totalBytes) {
+          final uploadPercent = totalBytes <= 0
+              ? 0
+              : (uploadedBytes * 100 / totalBytes).floor().clamp(0, 100);
+          if (!mounted || uploadPercent == lastUploadPercent) {
+            return;
+          }
+          lastUploadPercent = uploadPercent;
+          setState(() {
+            _operit1ImportProgress = core_proxy.Operit1SnapshotImportProgress(
+              stage: 'upload',
+              title: '上传快照',
+              detail: '正在读取并上传快照文件（$uploadPercent%）。',
+              progress: uploadPercent / 100,
+              active: true,
+            );
+          });
+        },
+      );
       stagedSession = session;
+      if (mounted) {
+        setState(() {
+          _operit1ImportProgress =
+              const core_proxy.Operit1SnapshotImportProgress(
+                stage: 'inspect',
+                title: '检查快照',
+                detail: '正在检查 Operit1 快照内容，请稍候。',
+                progress: 0,
+                active: true,
+              );
+        });
+      }
       ClientLogger.i(
         'snapshot upload completed bytes=${session.byteLength}; inspection started',
         tag: _operit1SnapshotImportLogTag,
@@ -1040,6 +1088,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       if (mounted) {
         setState(() {
           _readingOperit1Snapshot = false;
+          _operit1ImportProgress = null;
         });
       }
     }
@@ -1056,6 +1105,13 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
 
     setState(() {
       _importingOperit1Snapshot = true;
+      _operit1ImportProgress = const core_proxy.Operit1SnapshotImportProgress(
+        stage: 'prepare',
+        title: '准备导入',
+        detail: '正在准备迁移 Operit1 快照内容，请稍候。',
+        progress: 0,
+        active: true,
+      );
       _setupError = null;
     });
     try {
@@ -1293,7 +1349,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
                                     errorText: _setupError,
                                   );
                                 case _AiSetupPage.import:
-                                  return _AiSetupImportPage(
+                                  return OnboardingSnapshotImportPage(
                                     snapshot: _operit1Snapshot,
                                     fileName: _operit1SnapshotFileName,
                                     reading: _readingOperit1Snapshot,
@@ -2380,8 +2436,10 @@ class _StoragePathField extends StatelessWidget {
   }
 }
 
-class _AiSetupImportPage extends StatelessWidget {
-  const _AiSetupImportPage({
+/// Displays snapshot staging and migration progress in the onboarding flow.
+class OnboardingSnapshotImportPage extends StatelessWidget {
+  const OnboardingSnapshotImportPage({
+    super.key,
     required this.snapshot,
     required this.fileName,
     required this.reading,
@@ -2405,7 +2463,16 @@ class _AiSetupImportPage extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final preview = snapshot;
-    final importProgress = importing ? progress : null;
+    final importProgress = reading || importing
+        ? progress ??
+              const core_proxy.Operit1SnapshotImportProgress(
+                stage: 'prepare',
+                title: '准备导入',
+                detail: '正在准备 Operit1 快照，请稍候。',
+                progress: 0,
+                active: true,
+              )
+        : null;
     return Align(
       alignment: Alignment.topCenter,
       child: SingleChildScrollView(
@@ -2419,7 +2486,8 @@ class _AiSetupImportPage extends StatelessWidget {
                 icon: Icons.move_to_inbox_rounded,
                 eyebrow: '导入配置',
                 title: '从 Operit1 导入',
-                description: '请使用最新版 Operit1 导出的快照，将配置、聊天、角色卡、资源等数据迁移到 Operit2。',
+                description:
+                    '请使用最新版 Operit1 导出的快照，将配置、聊天、角色卡、资源等数据迁移到 Operit2。',
               ),
               const SizedBox(height: 22),
               Align(
@@ -2444,6 +2512,13 @@ class _AiSetupImportPage extends StatelessWidget {
                   style: textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
+                ),
+              ],
+              if (importProgress != null) ...<Widget>[
+                const SizedBox(height: 18),
+                Semantics(
+                  liveRegion: true,
+                  child: _Operit1ImportProgressPanel(progress: importProgress),
                 ),
               ],
               if (preview != null) ...<Widget>[
@@ -2518,10 +2593,6 @@ class _AiSetupImportPage extends StatelessWidget {
                     height: 1.36,
                   ),
                 ),
-                if (importProgress != null) ...<Widget>[
-                  const SizedBox(height: 14),
-                  _Operit1ImportProgressPanel(progress: importProgress),
-                ],
               ],
               if (errorText != null) ...<Widget>[
                 const SizedBox(height: 12),
@@ -2562,6 +2633,11 @@ class _Operit1ImportProgressPanel extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final value = progress.progress.clamp(0.0, 1.0).toDouble();
+    final indeterminate = const <String>{
+      'select',
+      'prepare',
+      'inspect',
+    }.contains(progress.stage);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2584,22 +2660,24 @@ class _Operit1ImportProgressPanel extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 12),
-            Text(
-              '${(value * 100).round()}%',
-              style: textTheme.labelMedium?.copyWith(
-                color: colorScheme.primary,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0,
+            if (!indeterminate) ...<Widget>[
+              const SizedBox(width: 12),
+              Text(
+                '${(value * 100).round()}%',
+                style: textTheme.labelMedium?.copyWith(
+                  color: colorScheme.primary,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0,
+                ),
               ),
-            ),
+            ],
           ],
         ),
         const SizedBox(height: 8),
         ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: LinearProgressIndicator(
-            value: value,
+            value: indeterminate ? null : value,
             minHeight: 6,
             backgroundColor: colorScheme.surfaceContainerHighest.withValues(
               alpha: 0.72,

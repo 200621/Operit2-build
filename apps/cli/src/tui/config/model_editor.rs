@@ -70,6 +70,7 @@ pub(crate) struct EditorState {
 
     // Request
     pub(crate) supports_structured_tools: bool,
+    pub(crate) enable_claude_1h_prompt_cache: bool,
 
     // Thinking
     pub(crate) thinking_configurations: String,
@@ -113,6 +114,7 @@ impl EditorState {
             ),
             builtin_tools: config.builtinTools.clone(),
             supports_structured_tools: config.request.supportsStructuredTools,
+            enable_claude_1h_prompt_cache: config.request.enableClaude1hPromptCache,
             thinking_configurations: config.thinkingConfigurations.clone(),
             thinking_option_id: config.thinkingOptionId.clone(),
             thinking_options: Vec::new(),
@@ -185,6 +187,7 @@ impl EditorState {
             },
             request: ModelRequestSpec {
                 supportsStructuredTools: self.supports_structured_tools,
+                enableClaude1hPromptCache: self.enable_claude_1h_prompt_cache,
             },
             summary: ModelSummarySettings {
                 enableSummary: self.enable_summary,

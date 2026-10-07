@@ -353,8 +353,7 @@ class _CursorAiMessageHeader extends StatelessWidget {
                   Flexible(
                     child: Text(
                       primaryTitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      softWrap: true,
                       style: theme.textTheme.labelSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                         color: colorScheme.onSurface.withValues(alpha: 0.85),
@@ -375,8 +374,7 @@ class _CursorAiMessageHeader extends StatelessWidget {
                         ),
                         child: Text(
                           modelLabel,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          softWrap: true,
                           style: theme.textTheme.labelSmall?.copyWith(
                             fontSize: 10,
                             color: colorScheme.onSurface.withValues(alpha: 0.72),
@@ -394,8 +392,7 @@ class _CursorAiMessageHeader extends StatelessWidget {
                 child: Text(
                   statsText,
                   textAlign: TextAlign.end,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  softWrap: true,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurface.withValues(alpha: 0.75),
                     fontFeatures: const <FontFeature>[

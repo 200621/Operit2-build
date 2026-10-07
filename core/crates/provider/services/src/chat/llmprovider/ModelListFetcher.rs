@@ -362,6 +362,7 @@ fn readRequest(
     .unwrap_or(false);
     Ok(ModelRequestSpec {
         supportsStructuredTools,
+        ..ModelRequestSpec::default()
     })
 }
 

@@ -3346,6 +3346,34 @@ class AppLocalizationsEn extends AppLocalizations {
       'Analyzing context and schedule priorities...';
 
   @override
+  String get settingsDataLogsSection => 'Diagnostic logs';
+
+  @override
+  String get settingsDataLogsDescription =>
+      'Export the selected Core and this client’s logs as one time-ordered .log file, marked [CORE] / [CLIENT]. Logs may contain sensitive data; review before sharing.';
+
+  @override
+  String get settingsDataExportLogs => 'Export diagnostic logs';
+
+  @override
+  String get settingsDataLogsExporting => 'Exporting logs…';
+
+  @override
+  String settingsDataLogsExportError(String error) {
+    return 'Log export failed: $error';
+  }
+
+  @override
+  String settingsDataLogsExportPartial(String path) {
+    return 'Saved to $path. One log source could not be read; see the warnings in the file.';
+  }
+
+  @override
+  String settingsDataOverviewLoadError(String error) {
+    return 'The data overview could not be loaded: $error. You can still export diagnostic logs.';
+  }
+
+  @override
   String get settingsDataRuntimeSection => 'Data overview';
 
   @override

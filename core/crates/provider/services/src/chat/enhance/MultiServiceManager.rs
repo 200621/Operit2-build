@@ -648,14 +648,18 @@ impl MultiServiceManager {
                 custom_headers,
                 provider_type,
                 enable_tool_call,
-            } => Ok(Box::new(ClaudeProvider::new(
-                api_endpoint,
-                Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
-                model_name,
-                provider_type.name().to_string(),
-                custom_headers.into_iter().collect(),
-                enable_tool_call,
-            ))),
+                enable_claude_1h_prompt_cache,
+            } => Ok(Box::new(
+                ClaudeProvider::new(
+                    api_endpoint,
+                    Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
+                    model_name,
+                    provider_type.name().to_string(),
+                    custom_headers.into_iter().collect(),
+                    enable_tool_call,
+                )
+                .with_claude_1h_prompt_cache(enable_claude_1h_prompt_cache),
+            )),
             ProviderCreateParams::GeminiProvider {
                 api_endpoint,
                 api_key_provider,

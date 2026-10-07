@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::PreferencesDataStore::{emptyPreferences, stringPreferencesKey, CoreNodeStateStore};
-use crate::RuntimeStorageHost::defaultRuntimeStorageHost;
+use crate::RuntimeStorageHost::{defaultRuntimeStorageHost, defaultRuntimeStorageHostOption};
 
 const CORE_NODE_IDENTITY_RECORD_KEY: &str = "record";
 
@@ -32,6 +32,16 @@ impl CoreNodeIdentityStore {
     /// Creates an identity store over the process-wide runtime storage host.
     pub fn native() -> Self {
         Self::new(defaultRuntimeStorageHost())
+    }
+
+    /// Reads the local source identity without initializing storage or inventing a node.
+    #[allow(non_snake_case)]
+    pub fn localNodeId() -> Option<String> {
+        let storage = defaultRuntimeStorageHostOption()?;
+        Self::new(storage)
+            .identity()
+            .ok()
+            .map(|identity| identity.nodeId)
     }
 
     /// Reads the persisted CoreNode identity.

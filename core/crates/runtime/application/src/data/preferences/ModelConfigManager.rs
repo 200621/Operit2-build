@@ -60,8 +60,6 @@ pub enum ModelConfigError {
     ConnectionTest(String),
     #[error("invalid thinking configuration: {0}")]
     InvalidThinkingConfiguration(String),
-    #[error("built-in provider operation is not allowed: {0}")]
-    BuiltInProvider(String),
 }
 
 /// Reports the result of importing model configuration backup data.
@@ -190,11 +188,6 @@ impl ModelConfigManager {
     ) -> Result<String, ModelConfigError> {
         let providerType = ApiProviderType::fromProviderTypeId(&providerTypeId)
             .ok_or_else(|| ModelConfigError::InvalidProviderType(providerTypeId.clone()))?;
-        if providerType == ApiProviderType::LOCAL_MODEL {
-            return Err(ModelConfigError::BuiltInProvider(
-                ApiProviderType::LOCAL_MODEL.name().to_string(),
-            ));
-        }
         let endpoint = if providerType == ApiProviderType::OPENAI_CODEX {
             "https://chatgpt.com/backend-api/codex/responses".to_string()
         } else {
@@ -262,9 +255,6 @@ impl ModelConfigManager {
 
     /// Deletes one provider profile and removes it from provider order.
     pub fn deleteProvider(&self, providerId: &str) -> Result<(), ModelConfigError> {
-        if providerId == ApiProviderType::LOCAL_MODEL.name() {
-            return Err(ModelConfigError::BuiltInProvider(providerId.to_string()));
-        }
         let providerKey = self.providerKey(providerId);
         self.modelConfigDataStore.try_edit_result(|preferences| {
             self.assertProviderExistsInPreferences(preferences, providerId)?;
@@ -1167,7 +1157,7 @@ impl ModelConfigManager {
 mod tests {
     use super::{ModelConfigError, ModelConfigManager};
     use operit_host_api::{HostError, HostResult, RuntimeStorageEntry, RuntimeStorageHost};
-    use operit_model::ModelConfigData::ModelConfigDefaults;
+    use operit_model::ModelConfigData::{ApiProviderType, ModelConfigDefaults};
     use operit_store::RuntimeStorageHost::setDefaultRuntimeStorageHost;
     use operit_util::RuntimeStorageLayout::WORKSPACE_DIR_PATH;
     use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeStoreRootConfig};
@@ -1199,6 +1189,82 @@ mod tests {
                 .iter()
                 .any(|provider| provider.id == "LOCAL_MODEL"));
         });
+        fs::remove_dir_all(root).expect("remove model config test root");
+    }
+
+    #[test]
+    fn create_local_provider_with_empty_endpoint() {
+        let root = unique_test_root("create_local_provider_with_empty_endpoint");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let provider_id = manager
+            .createProvider(
+                "Additional Local Models".to_string(),
+                ApiProviderType::LOCAL_MODEL.name().to_string(),
+                String::new(),
+            )
+            .expect("create local provider");
+
+        let provider = manager
+            .getProviderProfile(&provider_id)
+            .expect("created local provider");
+        assert_eq!(provider.providerType, ApiProviderType::LOCAL_MODEL);
+        assert!(provider.endpoint.is_empty());
+        let ids = manager.getProviderIds().expect("provider ids");
+        assert!(ids.contains(&provider_id));
+        assert!(ids.iter().any(|id| id == ApiProviderType::LOCAL_MODEL.name()));
+
+        fs::remove_dir_all(root).expect("remove model config test root");
+    }
+
+    #[test]
+    fn delete_and_recreate_local_provider() {
+        let root = unique_test_root("delete_and_recreate_local_provider");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let original_id = ApiProviderType::LOCAL_MODEL.name();
+        manager
+            .getProviderProfile(original_id)
+            .expect("initial local provider");
+        manager
+            .deleteProvider(original_id)
+            .expect("delete initial local provider");
+        assert!(matches!(
+            manager.getProviderProfile(original_id),
+            Err(ModelConfigError::ProviderNotFound(_))
+        ));
+
+        let manager = ModelConfigManager::new(root.clone());
+        assert!(!manager
+            .getProviderIds()
+            .expect("provider ids after reload")
+            .iter()
+            .any(|id| id == original_id));
+        let provider_id = manager
+            .createProvider(
+                "Local Models".to_string(),
+                ApiProviderType::LOCAL_MODEL.name().to_string(),
+                String::new(),
+            )
+            .expect("recreate local provider");
+        let manager = ModelConfigManager::new(root.clone());
+        let provider = manager
+            .getProviderProfile(&provider_id)
+            .expect("recreated local provider after reload");
+        assert_eq!(provider.name, "Local Models");
+        assert_eq!(provider.providerType, ApiProviderType::LOCAL_MODEL);
+        manager
+            .deleteProvider(&provider_id)
+            .expect("delete recreated local provider");
+        assert!(!manager
+            .getProviderIds()
+            .expect("provider ids after deletion")
+            .contains(&provider_id));
+        assert!(matches!(
+            manager.getProviderProfile(&provider_id),
+            Err(ModelConfigError::ProviderNotFound(_))
+        ));
+
         fs::remove_dir_all(root).expect("remove model config test root");
     }
 

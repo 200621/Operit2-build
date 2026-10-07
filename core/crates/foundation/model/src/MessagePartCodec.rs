@@ -15,6 +15,28 @@ impl MessagePartCodec {
         state.finish()
     }
 
+    /// Imports historical assistant text without requiring live-output markup rules.
+    ///
+    /// Unsupported self-closing semantic tags remain literal Markdown, matching
+    /// Operit1's text-based storage. Valid semantic parts around them still parse.
+    /// Never reject or discard a historical message because its markup is invalid.
+    pub fn parseAssistantMarkupForImport(content: &str) -> Vec<MessagePart> {
+        let mut state = AssistantMarkupStreamState {
+            preserveUnsupportedTags: true,
+            ..AssistantMarkupStreamState::new()
+        };
+        state
+            .push(content)
+            .and_then(|()| state.finish())
+            .unwrap_or_else(|_| {
+                vec![MessagePart::markdown(
+                    "part-0".to_string(),
+                    0,
+                    content.to_string(),
+                )]
+            })
+    }
+
     /// Serializes canonical parts for a text-only provider protocol boundary.
     pub fn assistantMarkup(parts: &[MessagePart]) -> String {
         let mut markup = String::new();
@@ -214,6 +236,7 @@ pub struct AssistantMarkupStreamState {
     parts: Vec<MessagePart>,
     activeThinkingOpenTag: Option<String>,
     activeThinkingCloseTag: Option<String>,
+    preserveUnsupportedTags: bool,
 }
 
 impl Default for AssistantMarkupStreamState {
@@ -229,6 +252,7 @@ impl Default for AssistantMarkupStreamState {
             )],
             activeThinkingOpenTag: None,
             activeThinkingCloseTag: None,
+            preserveUnsupportedTags: false,
         }
     }
 }
@@ -338,6 +362,11 @@ impl AssistantMarkupStreamState {
                 continue;
             }
             if openingTag.trim_end().ends_with("/>") {
+                if self.preserveUnsupportedTags {
+                    self.appendMarkdownContent(&openingTag);
+                    self.pending = self.pending[openEnd..].to_string();
+                    continue;
+                }
                 return Err(format!(
                     "assistant semantic tag cannot be self-closing: {tagName}"
                 ));
@@ -528,6 +557,87 @@ fn asciiCaseInsensitiveSuffixPrefixLength(content: &str, closingTag: &str) -> us
 #[cfg(test)]
 mod tests {
     use super::{AssistantMarkupStreamState, MessagePartCodec, MessagePartKind};
+
+    /// Historical self-closing tags must survive import exactly, not reject a chat.
+    #[test]
+    fn import_preserves_self_closing_semantic_tags() {
+        for source in [
+            "前文<tool_NtfY/>后文",
+            "before<tool_NtfY name=\"read_file\" />after",
+            "<status type=\"completion\"/>",
+            "<tool_result_NtfY name=\"read_file\"/>",
+            "<think/>正文<thinking />",
+        ] {
+            let parts = MessagePartCodec::parseAssistantMarkupForImport(source);
+            assert!(parts
+                .iter()
+                .all(|part| part.kind == MessagePartKind::Markdown));
+            assert_eq!(MessagePartCodec::assistantMarkup(&parts), source);
+        }
+    }
+
+    /// Invalid historical fragments must not suppress valid neighboring semantics.
+    #[test]
+    fn import_preserves_valid_parts_around_unsupported_tags() {
+        let parts = MessagePartCodec::parseAssistantMarkupForImport(
+            "before<tool_NtfY/><think>reasoning</think><tool name=\"read_file\"><param name=\"path\">README.md</param></tool><status type=\"completion\"/>after",
+        );
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0].kind, MessagePartKind::Markdown);
+        assert_eq!(parts[0].content, "before<tool_NtfY/>");
+        assert_eq!(parts[1].kind, MessagePartKind::Thinking);
+        assert_eq!(parts[1].content, "reasoning");
+        assert_eq!(parts[2].kind, MessagePartKind::ToolCall);
+        assert_eq!(parts[2].toolName.as_deref(), Some("read_file"));
+        assert_eq!(
+            parts[2].attributes.get("path").map(String::as_str),
+            Some("README.md")
+        );
+        assert_eq!(parts[3].kind, MessagePartKind::Markdown);
+        assert_eq!(parts[3].content, "<status type=\"completion\"/>after");
+        for (sequence, part) in parts.iter().enumerate() {
+            assert_eq!(part.sequence, sequence as i32);
+            assert_eq!(part.partId, format!("part-{sequence}"));
+        }
+    }
+
+    /// Incomplete or unrecognizable historical markup remains readable source text.
+    #[test]
+    fn import_preserves_malformed_and_incomplete_markup() {
+        for source in [
+            "前文<tool name=\"read_file\">unfinished",
+            "text<tool>missing name</tool>end",
+            "text<tool_result name=\"read_file\">missing payload</tool_result>end",
+            "text<think>unfinished reasoning",
+            "text<tool_NtfY",
+            "text<unknown/>end",
+            "",
+        ] {
+            let parts = MessagePartCodec::parseAssistantMarkupForImport(source);
+            assert_eq!(MessagePartCodec::assistantMarkup(&parts), source);
+        }
+    }
+
+    /// Valid historical markup retains the normal canonical representation.
+    #[test]
+    fn import_matches_strict_parser_for_valid_markup() {
+        let source = "answer<think>reasoning</think><tool name=\"read_file\"><param name=\"path\">README.md</param></tool><tool_result name=\"read_file\" status=\"success\"><content>done</content></tool_result><status type=\"warning\">careful</status>";
+        assert_eq!(
+            MessagePartCodec::parseAssistantMarkupForImport(source),
+            MessagePartCodec::parseAssistantMarkup(source).unwrap(),
+        );
+    }
+
+    /// Leniency at the import boundary must not change validation of live output.
+    #[test]
+    fn import_does_not_relax_live_assistant_markup_validation() {
+        let source = "<tool_NtfY/>";
+        assert!(MessagePartCodec::parseAssistantMarkup(source).is_err());
+        let mut stream = AssistantMarkupStreamState::new();
+        assert!(stream.push(source).is_err());
+        let parts = MessagePartCodec::parseAssistantMarkupForImport(source);
+        assert_eq!(MessagePartCodec::assistantMarkup(&parts), source);
+    }
 
     /// Verifies that protocol markup is converted into independent semantic parts.
     #[test]

@@ -2,7 +2,6 @@
 
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart';
-import '../../../main/navigation/ToolPkgCatalogChangeBus.dart';
 
 /// Minimum client version recorded for every marketplace publication.
 const String marketMinimumAppVersion = '2.0.0';
@@ -30,55 +29,6 @@ String artifactTypeLabel(String type) {
     final value when value.isNotEmpty => value,
     _ => 'Artifact',
   };
-}
-
-Future<String> runCoreMarketInstall({
-  required GeneratedCoreProxyClients clients,
-  required String type,
-  required String entryId,
-  String? versionId,
-}) async {
-  final normalizedType = type.trim();
-  if (normalizedType.isEmpty) {
-    throw StateError('Artifact type is empty');
-  }
-  final entry = await clients.providersMarketStatsApiService.getEntryById(
-    entryId: entryId,
-  );
-  if (entry.type != normalizedType) {
-    throw StateError('Marketplace entry type changed during installation');
-  }
-  final selectedVersionId = versionId?.trim();
-  final targetVersionId = selectedVersionId == null || selectedVersionId.isEmpty
-      ? entry.latestVersion?.id.trim()
-      : selectedVersionId;
-  if (targetVersionId == null || targetVersionId.isEmpty) {
-    throw StateError('Marketplace entry has no installable version');
-  }
-  final asset = entry.assets
-      .where(
-        (candidate) =>
-            candidate.versionId == targetVersionId &&
-            candidate.id.trim().isNotEmpty,
-      )
-      .firstOrNull;
-  if (asset == null) {
-    throw StateError('Marketplace entry has no downloadable asset for version');
-  }
-  final fileName = asset.assetName?.trim();
-  if (fileName == null || fileName.isEmpty) {
-    throw StateError('Marketplace asset has no file name');
-  }
-  final result = await clients.application.installMarketArtifact(
-    assetId: asset.id,
-    fileName: fileName,
-    expectedSha256: asset.sha256,
-  );
-  if (!result.toLowerCase().startsWith('successfully imported')) {
-    throw StateError(result);
-  }
-  ToolPkgCatalogChangeBus.notifyCatalogChanged();
-  return result;
 }
 
 /// Starts a broker transaction for one Flutter market browser surface.

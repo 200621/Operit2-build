@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/logging/ClientLogger.dart';
+import '../../../../core/logging/DiagnosticLogExporter.dart';
 import '../../../../core/host/FileSaveService.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart';
@@ -32,14 +33,23 @@ const XTypeGroup _backupJsonFileTypeGroup = XTypeGroup(
   extensions: <String>['json'],
 );
 
+const XTypeGroup _diagnosticLogFileTypeGroup = XTypeGroup(
+  label: 'Diagnostic log',
+  extensions: <String>['log', 'txt'],
+);
+
 const String _operit1SnapshotImportLogTag = 'Operit1SnapshotImport';
 
 class DataSettingsPanel extends StatefulWidget {
-  const DataSettingsPanel({super.key, GeneratedCoreProxyClients? clients})
-    : clients =
-          clients ?? const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge());
+  const DataSettingsPanel({
+    super.key,
+    GeneratedCoreProxyClients? clients,
+    this.diagnosticLogExporter,
+  }) : clients =
+           clients ?? const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge());
 
   final GeneratedCoreProxyClients clients;
+  final DiagnosticLogExporter? diagnosticLogExporter;
 
   @override
   State<DataSettingsPanel> createState() => _DataSettingsPanelState();
@@ -48,6 +58,7 @@ class DataSettingsPanel extends StatefulWidget {
 class _DataSettingsPanelState extends State<DataSettingsPanel> {
   Future<_DataSettingsData>? _future;
   bool _busy = false;
+  bool _exportingLogs = false;
   int? _lastSnapshotBytes;
   StreamSubscription<Operit1SnapshotImportProgress>?
   _operit1ImportProgressSubscription;
@@ -277,7 +288,8 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
       final savedPath = await FileSaveService.saveGeneratedFile(
         // Generate the snapshot only after the registered output implementation is ready.
         generate: () async {
-          final file = await widget.clients.servicesSnapshotImportManager.exportRawSnapshot();
+          final file = await widget.clients.servicesSnapshotImportManager
+              .exportRawSnapshot();
           exported = file;
           return XFile(
             file.fileReference,
@@ -295,22 +307,23 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
       setState(() {
         _lastSnapshotBytes = exported!.archive.byteLength;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.savedTo(savedPath))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.settingsDataSnapshotExportError('$error'))),
+          SnackBar(
+            content: Text(l10n.settingsDataSnapshotExportError('$error')),
+          ),
         );
       }
     } finally {
       try {
         final file = exported;
         if (file != null) {
-          await widget.clients.servicesArchiveTransferManager.discardArchiveUpload(
-            archiveId: file.archive.archiveId,
-          );
+          await widget.clients.servicesArchiveTransferManager
+              .discardArchiveUpload(archiveId: file.archive.archiveId);
         }
       } finally {
         if (mounted) {
@@ -567,6 +580,63 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     } finally {
       if (mounted) {
         setState(() => _busy = false);
+      }
+    }
+  }
+
+  /// Exports merged Core/client diagnostics through the platform save dialog.
+  Future<void> _exportDiagnosticLogs() async {
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _busy = true;
+      _exportingLogs = true;
+    });
+    try {
+      final exporter =
+          widget.diagnosticLogExporter ??
+          DiagnosticLogExporter(clients: widget.clients);
+      final exported = await exporter.collect();
+      if (!mounted) {
+        return;
+      }
+      final savedPath = await FileSaveService.saveBytes(
+        bytes: Uint8List.fromList(utf8.encode(exported.text)),
+        name: 'operit-diagnostics-${DateTime.now().millisecondsSinceEpoch}.log',
+        mimeType: 'text/plain',
+        acceptedTypeGroups: const <XTypeGroup>[_diagnosticLogFileTypeGroup],
+      );
+      if (savedPath == null || !mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            exported.isPartial
+                ? l10n.settingsDataLogsExportPartial(savedPath)
+                : l10n.savedTo(savedPath),
+          ),
+        ),
+      );
+    } catch (error, stackTrace) {
+      if (ClientLogger.isInitialized) {
+        ClientLogger.e(
+          'Diagnostic log export failed',
+          tag: 'DiagnosticLogExport',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.settingsDataLogsExportError('$error'))),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _exportingLogs = false;
+        });
       }
     }
   }
@@ -867,6 +937,34 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
+  /// Keeps diagnostics usable even if the overview cannot connect to Core.
+  Widget _buildDiagnosticLogsCard(
+    AppLocalizations l10n,
+    ColorScheme colorScheme,
+  ) {
+    return _SectionCard(
+      title: l10n.settingsDataLogsSection,
+      children: <Widget>[
+        Text(
+          l10n.settingsDataLogsDescription,
+          style: TextStyle(color: colorScheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          onPressed: _busy ? null : _exportDiagnosticLogs,
+          icon: _exportingLogs
+              ? const M3LoadingIndicator(size: 20)
+              : const Icon(Icons.download_outlined),
+          label: Text(
+            _exportingLogs
+                ? l10n.settingsDataLogsExporting
+                : l10n.settingsDataExportLogs,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -874,16 +972,30 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     return FutureBuilder<_DataSettingsData>(
       future: _future,
       builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          Error.throwWithStackTrace(snapshot.error!, snapshot.stackTrace!);
-        }
         final data = snapshot.data;
         if (data == null) {
-          return const M3LoadingPane();
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            children: <Widget>[
+              _buildDiagnosticLogsCard(l10n, colorScheme),
+              if (snapshot.hasError)
+                _SectionCard(
+                  title: l10n.settingsDataRuntimeSection,
+                  children: <Widget>[
+                    Text(
+                      l10n.settingsDataOverviewLoadError('${snapshot.error}'),
+                    ),
+                  ],
+                )
+              else
+                const SizedBox(height: 160, child: M3LoadingPane()),
+            ],
+          );
         }
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
           children: <Widget>[
+            _buildDiagnosticLogsCard(l10n, colorScheme),
             _SectionCard(
               title: l10n.settingsDataBackupSection,
               children: <Widget>[

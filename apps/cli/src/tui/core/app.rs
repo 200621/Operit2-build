@@ -710,12 +710,28 @@ impl OperitTui {
             Event::Key(key) => self.handle_key_event(key).await,
             Event::Mouse(mouse) => self.handle_mouse_event(mouse).await,
             Event::Paste(text) => {
+                if self.show_config_popup {
+                    self.config_ui.handle_paste(&text);
+                    return Ok(());
+                }
                 if let Some(editor) = &mut self.compose.editor {
                     editor.value.push_str(&text);
-                    Ok(())
-                } else {
-                    self.handle_paste(text).await
+                    return Ok(());
                 }
+                if self.show_list_popup {
+                    self.list_popup_search.push_str(&text);
+                    self.update_list_popup_filter();
+                    return Ok(());
+                }
+                if self.show_model_chooser {
+                    self.status_message.clear();
+                    self.status_message_expires_at = None;
+                    self.transient_status_message = None;
+                    self.model_chooser_search.push_str(&text);
+                    self.update_model_chooser_filter();
+                    return Ok(());
+                }
+                self.handle_paste(text).await
             }
             _ => Ok(()),
         }

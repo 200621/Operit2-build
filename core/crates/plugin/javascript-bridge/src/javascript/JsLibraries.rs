@@ -436,10 +436,10 @@ pub fn buildRuntimeBootstrapScript() -> String {
                 return __operitNativeGetEnvForCall(String(callId || ''), String(key || ''));
             }},
             setEnv: function(key, value) {{
-                return __operitNativeSetEnv(String(key || ''), value == null ? '' : String(value));
+                return __operitNativeSetEnv(String(globalThis.__operitCurrentCallId || ''), String(key || ''), value == null ? '' : String(value));
             }},
             setEnvs: function(valuesJson) {{
-                return __operitNativeSetEnvs(String(valuesJson || '{{}}'));
+                return __operitNativeSetEnvs(String(globalThis.__operitCurrentCallId || ''), String(valuesJson || '{{}}'));
             }},
             getPluginConfigDir: function(pluginId) {{
                 return __operitNativeGetPluginConfigDir(String(pluginId || ''));

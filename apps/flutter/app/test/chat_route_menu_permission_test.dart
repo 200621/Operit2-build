@@ -33,7 +33,13 @@ RuntimeHostInteractionToolPermissionRequest _request(String id) =>
       requestedAtMillis: 1,
     );
 
-Widget _app(Widget child) => MaterialApp(
+Widget _app(Widget child, {double textScale = 1}) => MaterialApp(
+  builder: (context, child) => MediaQuery(
+    data: MediaQuery.of(
+      context,
+    ).copyWith(textScaler: TextScaler.linear(textScale)),
+    child: child!,
+  ),
   locale: const Locale('zh'),
   localizationsDelegates: AppLocalizations.localizationsDelegates,
   supportedLocales: AppLocalizations.supportedLocales,
@@ -125,6 +131,117 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  for (final textScale in [1.0, 1.6]) {
+    testWidgets('expanded memory menu stays compact at text scale $textScale', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(360, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _MenuBridge();
+      final viewModel = ChatViewModel(bridge: bridge);
+      await tester.pumpWidget(
+        _app(
+          AgentInputMenuPopup(
+            viewModel: viewModel,
+            currentChatId: 'computer-chat',
+            currentCharacterCardName: null,
+            currentCharacterCardAvatarUri: null,
+            onDismiss: () {},
+          ),
+          textScale: textScale,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('记忆'));
+      await tester.pumpAndSettle();
+      expect(find.text('记忆设置'), findsOneWidget);
+      expect(find.text('手动更新记忆'), findsOneWidget);
+      expect(find.byType(ListTile), findsNothing);
+      for (final label in ['自动更新记忆库', '提供用户资料']) {
+        final row = find
+            .ancestor(of: find.text(label), matching: find.byType(InkWell))
+            .first;
+        expect(
+          find.descendant(of: row, matching: find.text('开')),
+          findsNothing,
+        );
+        expect(
+          find.descendant(of: row, matching: find.text('关')),
+          findsOneWidget,
+        );
+        if (textScale == 1) {
+          expect(tester.getSize(row).height, 32);
+        }
+      }
+      expect(find.textContaining('待处理'), findsNothing);
+      expect(find.text('沉淀、检索与历史重建'), findsNothing);
+      final action = find
+          .ancestor(of: find.text('手动更新记忆'), matching: find.byType(InkWell))
+          .first;
+      expect(
+        tester.getSize(action).height,
+        lessThanOrEqualTo(textScale == 1 ? 32 : 56),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('memory settings replace the root overlay instead of stacking', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _MenuBridge();
+    final viewModel = ChatViewModel(bridge: bridge);
+    await tester.pumpWidget(_app(_OverlayMenuHost(viewModel: viewModel)));
+    await tester.tap(find.text('打开菜单'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('记忆'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('记忆设置'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentInputMenuPopup), findsNothing);
+    expect(find.byType(MemoryOwnerControlsDialog), findsOneWidget);
+    expect(find.text('自动提取'), findsOneWidget);
+    expect(find.text('检索'), findsOneWidget);
+    expect(find.text('历史重建'), findsOneWidget);
+    await tester.tap(find.text('历史重建'));
+    await tester.pumpAndSettle();
+    expect(find.text('此记忆库暂无绑定聊天'), findsOneWidget);
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.byType(MemoryOwnerControlsDialog), findsNothing);
+    expect(find.byType(AgentInputMenuPopup), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'queue information replaces the overlay without changing switches',
+    (tester) async {
+      final bridge = _MenuBridge();
+      final viewModel = ChatViewModel(bridge: bridge);
+      await tester.pumpWidget(_app(_OverlayMenuHost(viewModel: viewModel)));
+      await tester.tap(find.text('打开菜单'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('记忆'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('记忆状态说明'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentInputMenuPopup), findsNothing);
+      expect(find.textContaining('待处理 1 条'), findsOneWidget);
+      expect(
+        bridge.calls.any(
+          (call) => call.methodName == 'saveChatInputMenuSettings',
+        ),
+        isFalse,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('memory controls opened from chat never use local owner APIs', (
     tester,
   ) async {
@@ -143,6 +260,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('所属记忆库：computer-owner'), findsOneWidget);
     await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('检索'));
     await tester.pumpAndSettle();
     final button = find.text('重建向量缓存（使用已保存设置）');
     await tester.ensureVisible(button);
@@ -348,4 +467,50 @@ class _MenuBridge extends OperitRuntimeBridge {
   @override
   Stream<CoreEvent> watchStream(CoreWatchRequest request) =>
       throw UnimplementedError();
+}
+
+class _OverlayMenuHost extends StatefulWidget {
+  const _OverlayMenuHost({required this.viewModel});
+  final ChatViewModel viewModel;
+
+  @override
+  State<_OverlayMenuHost> createState() => _OverlayMenuHostState();
+}
+
+class _OverlayMenuHostState extends State<_OverlayMenuHost> {
+  OverlayEntry? _entry;
+
+  void _dismiss() {
+    _entry?.remove();
+    _entry?.dispose();
+    _entry = null;
+  }
+
+  @override
+  void dispose() {
+    _dismiss();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    onPressed: () {
+      _entry = OverlayEntry(
+        builder: (_) => Positioned(
+          right: 12,
+          bottom: 60,
+          width: 300,
+          child: AgentInputMenuPopup(
+            viewModel: widget.viewModel,
+            currentChatId: 'computer-chat',
+            currentCharacterCardName: null,
+            currentCharacterCardAvatarUri: null,
+            onDismiss: _dismiss,
+          ),
+        ),
+      );
+      Overlay.of(context).insert(_entry!);
+    },
+    child: const Text('打开菜单'),
+  );
 }

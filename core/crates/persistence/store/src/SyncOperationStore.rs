@@ -1281,44 +1281,70 @@ fn encryptedPreferenceSyncPayloadAad(operation: &SyncOperation) -> String {
     )
 }
 
-/// Compacts replaceable entity states while preserving every transaction operation.
+/// Identifies one independently compactable state within its origin's operation log.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(non_snake_case)]
-pub fn compactSyncOperations(operations: Vec<SyncOperation>) -> Vec<SyncOperation> {
-    let mut latestStateOperations = BTreeMap::<(String, String, String, String), i64>::new();
-    for operation in &operations {
-        if operation.semantics == SyncOperationSemantics::EntityState {
-            let key = syncEntityKey(operation);
-            let sequence = latestStateOperations
-                .entry(key)
-                .or_insert(operation.sequence);
-            if operation.sequence > *sequence {
-                *sequence = operation.sequence;
-            }
-        }
-    }
-
-    let mut compacted = Vec::with_capacity(operations.len());
-    for operation in operations {
-        if operation.semantics == SyncOperationSemantics::EntityState {
-            let key = syncEntityKey(&operation);
-            if latestStateOperations.get(&key).copied() != Some(operation.sequence) {
-                continue;
-            }
-        }
-        compacted.push(operation);
-    }
-    compacted
+struct SyncEntityKey {
+    originDeviceId: String,
+    domain: String,
+    entityType: String,
+    entityId: String,
 }
 
+/// Compacts replaceable entity states while preserving every transaction operation.
+/// A later JSON-parent replacement supersedes earlier descendant edits from the
+/// same origin; edits after the replacement and other origins remain independent.
 #[allow(non_snake_case)]
+pub fn compactSyncOperations(operations: Vec<SyncOperation>) -> Vec<SyncOperation> {
+    let mut latestSequences = BTreeMap::<SyncEntityKey, i64>::new();
+    for operation in &operations {
+        if operation.semantics == SyncOperationSemantics::EntityState {
+            latestSequences
+                .entry(syncEntityKey(operation))
+                .and_modify(|sequence| *sequence = (*sequence).max(operation.sequence))
+                .or_insert(operation.sequence);
+        }
+    }
+    operations
+        .into_iter()
+        .filter(|operation| {
+            operation.semantics == SyncOperationSemantics::Transaction
+                || (latestSequences.get(&syncEntityKey(operation)) == Some(&operation.sequence)
+                    && !hasNewerPreferenceAncestor(operation, &latestSequences))
+        })
+        .collect()
+}
+
+/// Prevents exporting a model leaf edit after its creation has been compacted
+/// away by a later model deletion or replacement.
+#[allow(non_snake_case)]
+fn hasNewerPreferenceAncestor(
+    operation: &SyncOperation,
+    latestSequences: &BTreeMap<SyncEntityKey, i64>,
+) -> bool {
+    let Some(ancestors) =
+        crate::PreferencesDataStore::preferenceMutationAncestorEntityIds(operation)
+    else {
+        return false;
+    };
+    let mut key = syncEntityKey(operation);
+    ancestors.into_iter().any(|entityId| {
+        key.entityId = entityId;
+        latestSequences
+            .get(&key)
+            .is_some_and(|sequence| *sequence > operation.sequence)
+    })
+}
+
 /// Builds the origin-scoped identity used for operation-log compaction.
-fn syncEntityKey(operation: &SyncOperation) -> (String, String, String, String) {
-    (
-        operation.originDeviceId.clone(),
-        operation.domain.clone(),
-        operation.entityType.clone(),
-        operation.entityId.clone(),
-    )
+#[allow(non_snake_case)]
+fn syncEntityKey(operation: &SyncOperation) -> SyncEntityKey {
+    SyncEntityKey {
+        originDeviceId: operation.originDeviceId.clone(),
+        domain: operation.domain.clone(),
+        entityType: operation.entityType.clone(),
+        entityId: operation.entityId.clone(),
+    }
 }
 
 /// Encodes one entity identity without relying on path or delimiter parsing.

@@ -156,13 +156,22 @@ impl AppLogger {
     }
 
     /// Configures runtime and ToolPkg logs through the supplied file-system host.
+    /// Falls back to console and in-memory logging if either file cannot be prepared.
     pub fn configure_log_files(
         file_system_host: Arc<dyn FileSystemHost>,
         log_file: String,
         package_log_file: String,
     ) -> Result<(), String> {
-        ensure_log_file(&file_system_host, &log_file)?;
-        ensure_log_file(&file_system_host, &package_log_file)?;
+        if let Err(error) = ensure_log_file(&file_system_host, &log_file)
+            .and_then(|()| ensure_log_file(&file_system_host, &package_log_file))
+        {
+            let mut guard = state().lock().expect("AppLogger mutex poisoned");
+            guard.file_system_host = None;
+            guard.log_file = None;
+            guard.package_log_file = None;
+            guard.enable_file_logging = false;
+            return Err(error);
+        }
         let mut guard = state().lock().expect("AppLogger mutex poisoned");
         guard.file_system_host = Some(file_system_host);
         guard.log_file = Some(log_file);
@@ -407,11 +416,24 @@ fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &st
 fn ensure_log_file(file_system_host: &Arc<dyn FileSystemHost>, path: &str) -> Result<(), String> {
     let metadata = file_system_host
         .fileExists(path)
-        .map_err(|error| error.message)?;
+        .map_err(|error| format!("Cannot inspect log file '{path}': {}", error.message))?;
+    if metadata.exists && metadata.isDirectory {
+        return Err(format!("Log file path is a directory: '{path}'"));
+    }
     if !metadata.exists {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let parent = parent.to_string_lossy();
+            if !parent.is_empty() {
+                file_system_host
+                    .makeDirectory(&parent, true)
+                    .map_err(|error| {
+                        format!("Cannot create log directory '{parent}': {}", error.message)
+                    })?;
+            }
+        }
         file_system_host
             .writeFile(path, "", false)
-            .map_err(|error| error.message)?;
+            .map_err(|error| format!("Cannot create log file '{path}': {}", error.message))?;
     }
     Ok(())
 }
@@ -578,3 +600,7 @@ fn error_chain(error: &(dyn std::error::Error)) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "AppLoggerTests.rs"]
+mod tests;

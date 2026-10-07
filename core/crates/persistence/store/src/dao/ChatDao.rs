@@ -204,6 +204,14 @@ impl ChatDao {
         )
     }
 
+    /// Promotes an active chat without changing its pin, group, or bindings.
+    pub fn moveChatToFront(&self, chatId: &str, timestamp: i64) -> Result<(), SqliteStoreError> {
+        self.execute(
+            "UPDATE chats SET displayOrder = MIN(-?2, (SELECT MIN(displayOrder) FROM chats) - 1), updatedAt = ?2 WHERE id = ?1",
+            sqliteParams![chatId, timestamp],
+        )
+    }
+
     pub fn updateChatOrderAndGroup(
         &self,
         chatId: &str,

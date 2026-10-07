@@ -398,12 +398,16 @@ impl Default for LocalModelRuntimeSettings {
 #[allow(non_snake_case)]
 pub struct ModelRequestSpec {
     pub supportsStructuredTools: bool,
+    /// Uses Kotlin's optional one-hour TTL for Claude prompt-cache breakpoints.
+    #[serde(default)]
+    pub enableClaude1hPromptCache: bool,
 }
 
 impl Default for ModelRequestSpec {
     fn default() -> Self {
         Self {
             supportsStructuredTools: false,
+            enableClaude1hPromptCache: false,
         }
     }
 }
@@ -665,6 +669,7 @@ pub fn default_deepseek_model() -> ModelProfile {
     });
     model.requestOverride = Some(ModelRequestSpec {
         supportsStructuredTools: true,
+        ..ModelRequestSpec::default()
     });
     model.builtinToolsOverride = Some(vec![ModelBuiltinTool::disabled(
         BuiltinToolType::WebSearch,

@@ -547,20 +547,6 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
             onPressed: _busy ? null : _autoCategorize,
             icon: const Icon(Icons.auto_awesome),
           ),
-          IconButton(
-            tooltip: '沉淀、检索与历史重建',
-            icon: const Icon(Icons.tune),
-            onPressed: _busy
-                ? null
-                : () async {
-                    await MemoryOwnerControlsDialog.open(
-                      context,
-                      _clients,
-                      widget.ownerKey,
-                    );
-                    if (mounted) _refresh();
-                  },
-          ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('取消'),
@@ -687,6 +673,20 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
           icon: const Icon(Icons.close),
         ),
         actions: <Widget>[
+          IconButton(
+            tooltip: '记忆设置',
+            icon: const Icon(Icons.tune),
+            onPressed: _busy
+                ? null
+                : () async {
+                    await MemoryOwnerControlsDialog.open(
+                      context,
+                      _clients,
+                      widget.ownerKey,
+                    );
+                    if (mounted) _refresh();
+                  },
+          ),
           IconButton(
             tooltip: '导入 JSON',
             onPressed: _busy ? null : _importJson,

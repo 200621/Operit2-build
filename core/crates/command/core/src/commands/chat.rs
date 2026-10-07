@@ -885,6 +885,7 @@ fn build_attachment_info(path: &str) -> Result<AttachmentInfo, String> {
         String::new()
     };
     Ok(AttachmentInfo {
+        nodeId: operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore::localNodeId(),
         filePath: path.to_string(),
         fileName,
         mimeType,

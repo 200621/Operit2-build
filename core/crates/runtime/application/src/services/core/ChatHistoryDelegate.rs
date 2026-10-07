@@ -2,6 +2,7 @@ use crate::data::preferences::ActivePromptManager::ActivePromptManager;
 use crate::data::preferences::CharacterCardManager::CharacterCardManager;
 use crate::data::preferences::CharacterGroupCardManager::CharacterGroupCardManager;
 use crate::plugins::toolpkg::ToolPkgChatMessageHookBridge::ToolPkgChatMessageHookBridge;
+use crate::plugins::toolpkg::ToolPkgInputMenuToggleBridge::ToolPkgInputMenuToggleBridge;
 use crate::plugins::toolpkg::ToolPkgChatViewHookBridge::{
     ChatViewEvent, ChatViewHookParams, ToolPkgChatViewHookBridge,
 };
@@ -2146,6 +2147,15 @@ impl ChatHistoryDelegate {
         }
     }
 
+    /// Synchronizes plugin view state and menu definitions after a workspace mutation.
+    #[allow(non_snake_case)]
+    pub fn notifyChatWorkspaceChanged(&self, chatId: &str) {
+        if self.currentChatIdFlow.value().as_deref() == Some(chatId) {
+            self.dispatchChatViewEvent(ChatViewEvent::ViewUpdated, chatId);
+        }
+        ToolPkgInputMenuToggleBridge::invalidateToggleDefinitions();
+    }
+
     #[allow(non_snake_case)]
     /// Binds a chat to a workspace.
     pub fn bindChatToWorkspace(&mut self, chatId: String, workspace: String) {
@@ -2198,9 +2208,7 @@ impl ChatHistoryDelegate {
                 created
             }
         };
-        if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
-            self.dispatchChatViewEvent(ChatViewEvent::ViewUpdated, &chatId);
-        }
+        self.notifyChatWorkspaceChanged(&chatId);
         Ok(workspace)
     }
 
@@ -2266,9 +2274,7 @@ impl ChatHistoryDelegate {
         self.chatHistoryManager
             .updateChatWorkspaceId(chatId.clone(), None)
             .expect("ChatHistoryManager.updateChatWorkspaceId must succeed");
-        if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
-            self.dispatchChatViewEvent(ChatViewEvent::ViewUpdated, &chatId);
-        }
+        self.notifyChatWorkspaceChanged(&chatId);
     }
 
     #[allow(non_snake_case)]

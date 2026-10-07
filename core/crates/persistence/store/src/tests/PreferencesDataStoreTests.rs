@@ -1056,3 +1056,288 @@ fn state_in_releases_observation_on_last_state_drop() {
     // A late notification from the old source is harmless.
     for callback in callbacks.lock().unwrap().iter() { callback(); }
 }
+
+#[test]
+/// A configured source may edit and then remove an unused model before a new
+/// device joins. Compaction must not export a leaf edit without its model.
+fn structured_model_sync_after_editing_and_deleting_unused_model() {
+    let sourceHost = Arc::new(MemoryStorageHost::default());
+    let targetHost = Arc::new(MemoryStorageHost::default());
+    let providerKey = stringPreferencesKey("provider_DEEPSEEK");
+    let baseline = json!({
+        "id": "DEEPSEEK",
+        "models": [{"id": "deepseek-v4-flash", "capabilitiesOverride": {"toolCall": true}}]
+    });
+    let sourceStore =
+        PreferencesDataStore::newWithStorage(sourceHost.clone(), MODEL_CONFIGS_PREFERENCES_PATH)
+            .withStructuredJsonSync();
+    let targetStore =
+        PreferencesDataStore::newWithStorage(targetHost.clone(), MODEL_CONFIGS_PREFERENCES_PATH)
+            .withStructuredJsonSync();
+    // Managers create their baseline in a local, non-exported schema migration.
+    for store in [&sourceStore, &targetStore] {
+        store
+            .migrate(|preferences| {
+                preferences.set(&providerKey, baseline.to_string());
+                Ok::<(), PreferencesDataStoreError>(())
+            })
+            .expect("initialize local defaults");
+    }
+    let write = |provider: &Value| {
+        sourceStore
+            .edit(|preferences| {
+                preferences.set(&providerKey, provider.to_string());
+            })
+            .expect("edit source provider");
+    };
+    let mut provider = baseline.clone();
+    provider["models"].as_array_mut().unwrap().push(json!({
+        "id": "unused-model", "capabilitiesOverride": {"toolCall": false}
+    }));
+    write(&provider);
+    provider["models"][1]["capabilitiesOverride"]["toolCall"] = json!(true);
+    write(&provider);
+    provider["models"].as_array_mut().unwrap().remove(1);
+    write(&provider);
+    provider["models"].as_array_mut().unwrap().push(json!({
+        "id": "deepseek-flash", "capabilitiesOverride": {"toolCall": true}
+    }));
+    write(&provider);
+
+    let operations = SyncOperationStore::new(sourceHost, RUNTIME_SYNC_DIR_PATH)
+        .operationsSince(&SyncClock::empty(), &["preferences".to_string()], 512)
+        .expect("export initial model synchronization");
+    let entries = operations
+        .iter()
+        .map(PreferencesSyncedEntry::fromOperation)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode source operations");
+    PreferencesDataStore::applySyncedEntriesWithStorage(targetHost, &entries)
+        .expect("new device must receive the configured model");
+    let preferences = targetStore.data().expect("synced provider");
+    let actual: Value = serde_json::from_str(preferences.get(&providerKey).unwrap()).unwrap();
+    assert_eq!(actual, provider);
+}
+
+#[test]
+fn preference_sync_batch_validation_keeps_chat_binding_when_model_file_fails() {
+    use operit_util::RuntimeStorageLayout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH;
+    let sourceHost = Arc::new(MemoryStorageHost::default());
+    let targetHost = Arc::new(MemoryStorageHost::default());
+    let bindingKey = stringPreferencesKey("function_model_binding");
+    let providerKey = stringPreferencesKey("provider_DEEPSEEK");
+    let sourceBindings = PreferencesDataStore::newWithStorage(
+        sourceHost.clone(),
+        FUNCTIONAL_CONFIGS_PREFERENCES_PATH,
+    );
+    let sourceModels =
+        PreferencesDataStore::newWithStorage(sourceHost.clone(), MODEL_CONFIGS_PREFERENCES_PATH)
+            .withStructuredJsonSync();
+    let targetBindings = PreferencesDataStore::newWithStorage(
+        targetHost.clone(),
+        FUNCTIONAL_CONFIGS_PREFERENCES_PATH,
+    );
+    let originalBinding =
+        json!({"CHAT": {"providerId": "DEEPSEEK", "modelId": "deepseek-v4-flash"}});
+    let newBinding = json!({"CHAT": {"providerId": "DEEPSEEK", "modelId": "deepseek-flash"}});
+    targetBindings
+        .migrate(|preferences| {
+            preferences.set(&bindingKey, originalBinding.to_string());
+            Ok::<(), PreferencesDataStoreError>(())
+        })
+        .unwrap();
+    sourceModels
+        .migrate(|preferences| {
+            preferences.set(
+                &providerKey,
+                json!({"id": "DEEPSEEK", "models": []}).to_string(),
+            );
+            Ok::<(), PreferencesDataStoreError>(())
+        })
+        .unwrap();
+    sourceBindings
+        .edit(|preferences| {
+            preferences.set(&bindingKey, newBinding.to_string());
+        })
+        .unwrap();
+    sourceModels
+        .edit(|preferences| {
+            preferences.set(
+                &providerKey,
+                json!({"id": "DEEPSEEK", "models": [{"id": "deepseek-flash"}]}).to_string(),
+            );
+        })
+        .unwrap();
+    let operations = SyncOperationStore::new(sourceHost, RUNTIME_SYNC_DIR_PATH)
+        .operationsSince(&SyncClock::empty(), &["preferences".to_string()], 512)
+        .unwrap();
+    let entries = operations
+        .iter()
+        .map(PreferencesSyncedEntry::fromOperation)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let writesBefore = targetHost.writeCount();
+    let error =
+        PreferencesDataStore::applySyncedPreferencesWithStorage(targetHost.clone(), &entries)
+            .expect_err("a model delta without its baseline cannot be applied");
+    assert!(error
+        .to_string()
+        .contains("structured preference entry is missing"));
+    assert_eq!(targetHost.writeCount(), writesBefore);
+    assert_eq!(
+        targetBindings.data().unwrap().get(&bindingKey),
+        Some(&originalBinding.to_string())
+    );
+}
+
+#[test]
+fn preference_sync_batch_publishes_models_before_binding_observers_run() {
+    operit_host_api::HostManager::setDefaultHostRuntimeTaskSchedulerHost(Arc::new(
+        ImmediatePreferenceObserverScheduler,
+    ));
+    use operit_util::RuntimeStorageLayout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH;
+    let sourceHost = Arc::new(MemoryStorageHost::default());
+    let targetHost = Arc::new(MemoryStorageHost::default());
+    let bindingKey = stringPreferencesKey("function_model_binding");
+    let providerKey = stringPreferencesKey("provider_DEEPSEEK");
+    let sourceBindings = PreferencesDataStore::newWithStorage(
+        sourceHost.clone(),
+        FUNCTIONAL_CONFIGS_PREFERENCES_PATH,
+    );
+    let sourceModels =
+        PreferencesDataStore::newWithStorage(sourceHost.clone(), MODEL_CONFIGS_PREFERENCES_PATH);
+    let targetBindings = PreferencesDataStore::newWithStorage(
+        targetHost.clone(),
+        FUNCTIONAL_CONFIGS_PREFERENCES_PATH,
+    );
+    let targetModels =
+        PreferencesDataStore::newWithStorage(targetHost.clone(), MODEL_CONFIGS_PREFERENCES_PATH);
+    let binding = json!({"CHAT": {"providerId": "DEEPSEEK", "modelId": "deepseek-flash"}});
+    let provider = json!({"id": "DEEPSEEK", "models": [{"id": "deepseek-flash"}]});
+    sourceBindings
+        .edit(|preferences| preferences.set(&bindingKey, binding.to_string()))
+        .unwrap();
+    sourceModels
+        .edit(|preferences| preferences.set(&providerKey, provider.to_string()))
+        .unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observedForSubscription = observed.clone();
+    let bindingKeyForSubscription = bindingKey.clone();
+    let providerKeyForSubscription = providerKey.clone();
+    let _subscription = targetBindings
+        .dataFlow()
+        .subscribeWithCancellation(super::FlowCancellation::new(), move |preferences| {
+            if preferences.get(&bindingKeyForSubscription).is_some() {
+                observedForSubscription.lock().unwrap().push(
+                    targetModels
+                        .data()
+                        .unwrap()
+                        .get(&providerKeyForSubscription)
+                        .cloned(),
+                );
+            }
+        })
+        .unwrap();
+    let operations = SyncOperationStore::new(sourceHost, RUNTIME_SYNC_DIR_PATH)
+        .operationsSince(&SyncClock::empty(), &["preferences".to_string()], 512)
+        .unwrap();
+    let entries = operations
+        .iter()
+        .map(PreferencesSyncedEntry::fromOperation)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    PreferencesDataStore::applySyncedPreferencesWithStorage(targetHost, &entries).unwrap();
+    assert_eq!(*observed.lock().unwrap(), vec![Some(provider.to_string())]);
+}
+
+/// Executes preference observation immediately so a test can verify that no
+/// callback sees a partially published multi-file synchronization batch.
+struct ImmediatePreferenceObserverScheduler;
+
+impl operit_host_api::HostRuntimeTaskSchedulerHost for ImmediatePreferenceObserverScheduler {
+    fn monotonicTimeMillis(&self) -> operit_host_api::HostResult<u64> {
+        Ok(0)
+    }
+
+    fn scheduleHostRuntimeTask(
+        &self,
+        _: &str,
+        task: operit_host_api::HostRuntimeTask,
+    ) -> operit_host_api::HostResult<()> {
+        task();
+        Ok(())
+    }
+
+    fn scheduleHostRuntimeAsyncTask(
+        &self,
+        _: &str,
+        _: operit_host_api::HostRuntimeAsyncTask,
+    ) -> operit_host_api::HostResult<()> {
+        Err(HostError::new(
+            "async tasks are not used by preference observer tests",
+        ))
+    }
+
+    fn scheduleDelayedHostRuntimeTask(
+        &self,
+        _: &str,
+        _: u64,
+        _: operit_host_api::HostRuntimeTask,
+    ) -> operit_host_api::HostResult<()> {
+        Err(HostError::new(
+            "delayed tasks are not used by preference observer tests",
+        ))
+    }
+
+    fn waitForHostRuntimeTaskTurn(&self) -> operit_host_api::HostRuntimeTurnFuture {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn waitForHostRuntimeDelay(&self, _: u64) -> operit_host_api::HostRuntimeTurnFuture {
+        Box::pin(async {
+            Err(HostError::new(
+                "timers are not used by preference observer tests",
+            ))
+        })
+    }
+}
+
+
+
+fn synchronizedPreferenceSet(path: &str, encrypted: bool) -> PreferencesSyncedEntry {
+    PreferencesSyncedEntry {
+        storagePath: path.to_string(),
+        encrypted,
+        mutation: super::PreferencesSyncedMutation::SetEntry {
+            key: "setting".to_string(),
+            value: "synced-value".to_string(),
+        },
+    }
+}
+
+#[test]
+fn preference_sync_replay_skips_unchanged_files_and_notifications() {
+    let host = Arc::new(MemoryStorageHost::default());
+    let store = PreferencesDataStore::newWithStorage(host.clone(), MODEL_CONFIGS_PREFERENCES_PATH);
+    let entries = [synchronizedPreferenceSet(MODEL_CONFIGS_PREFERENCES_PATH, false)];
+    PreferencesDataStore::applySyncedPreferencesWithStorage(host.clone(), &entries).unwrap();
+    let writes = host.writeCount();
+    let version = *store.changeSignal.version.lock().unwrap();
+    PreferencesDataStore::applySyncedPreferencesWithStorage(host.clone(), &entries).unwrap();
+    PreferencesDataStore::applySyncedPreferencesWithStorage(host.clone(), &[]).unwrap();
+    assert_eq!(host.writeCount(), writes);
+    assert_eq!(*store.changeSignal.version.lock().unwrap(), version);
+}
+
+#[test]
+fn preference_sync_rejects_mixed_encryption_before_loading_or_writing_files() {
+    let host = Arc::new(MemoryStorageHost::default());
+    let entries = [
+        synchronizedPreferenceSet(MODEL_CONFIGS_PREFERENCES_PATH, false),
+        synchronizedPreferenceSet(MODEL_CONFIGS_PREFERENCES_PATH, true),
+    ];
+    PreferencesDataStore::applySyncedPreferencesWithStorage(host.clone(), &entries)
+        .expect_err("a preferences file must have one encryption mode");
+    assert_eq!(host.writeCount(), 0);
+    assert_eq!(host.readCount(), 0);
+}

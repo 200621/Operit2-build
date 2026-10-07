@@ -6067,6 +6067,48 @@ abstract class AppLocalizations {
   /// **'Analyzing context and schedule priorities...'**
   String get settingsAppearanceLivePreviewThinkingSample;
 
+  /// No description provided for @settingsDataLogsSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Diagnostic logs'**
+  String get settingsDataLogsSection;
+
+  /// No description provided for @settingsDataLogsDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Export the selected Core and this client’s logs as one time-ordered .log file, marked [CORE] / [CLIENT]. Logs may contain sensitive data; review before sharing.'**
+  String get settingsDataLogsDescription;
+
+  /// No description provided for @settingsDataExportLogs.
+  ///
+  /// In en, this message translates to:
+  /// **'Export diagnostic logs'**
+  String get settingsDataExportLogs;
+
+  /// No description provided for @settingsDataLogsExporting.
+  ///
+  /// In en, this message translates to:
+  /// **'Exporting logs…'**
+  String get settingsDataLogsExporting;
+
+  /// No description provided for @settingsDataLogsExportError.
+  ///
+  /// In en, this message translates to:
+  /// **'Log export failed: {error}'**
+  String settingsDataLogsExportError(String error);
+
+  /// No description provided for @settingsDataLogsExportPartial.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved to {path}. One log source could not be read; see the warnings in the file.'**
+  String settingsDataLogsExportPartial(String path);
+
+  /// No description provided for @settingsDataOverviewLoadError.
+  ///
+  /// In en, this message translates to:
+  /// **'The data overview could not be loaded: {error}. You can still export diagnostic logs.'**
+  String settingsDataOverviewLoadError(String error);
+
   /// No description provided for @settingsDataRuntimeSection.
   ///
   /// In en, this message translates to:

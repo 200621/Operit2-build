@@ -313,6 +313,7 @@ impl OperitTui {
         self.paste_attachment_counter += 1;
         let file_name = format!("pasted-text-{}.txt", self.paste_attachment_counter);
         AttachmentInfo {
+            nodeId: None,
             filePath: format!("tui-paste:{file_name}"),
             fileName: file_name,
             mimeType: "text/plain".to_string(),
@@ -339,12 +340,14 @@ impl OperitTui {
             .to_str()
             .ok_or_else(|| format!("clipboard image path is not UTF-8: {}", file_path.display()))?
             .to_string();
-        Ok(AttachmentInfo::new(
+        let mut attachment = AttachmentInfo::new(
             file_path_text,
             file_name,
             "image/png".to_string(),
             png.len() as i64,
-        ))
+        );
+        attachment.nodeId = operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore::localNodeId();
+        Ok(attachment)
     }
 
     /// Reads a clipboard image and queues it as a direct file attachment.

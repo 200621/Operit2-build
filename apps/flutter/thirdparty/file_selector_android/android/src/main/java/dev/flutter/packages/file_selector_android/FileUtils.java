@@ -111,8 +111,9 @@ public class FileUtils {
    * <p>Each file is placed in its own directory to avoid conflicts according to the following
    * scheme: {cacheDir}/{randomUuid}/{fileName}
    *
-   * <p>File extension is changed to match MIME type of the file, if known. Otherwise, the extension
-   * is left unchanged.
+   * <p>An existing file extension is retained, even if it differs from the MIME type. Document
+   * providers may report generic MIME types for custom formats such as .toolpkg. If the file name
+   * has no extension, an extension is deduced from the MIME type when possible.
    *
    * <p>If the original file name is unknown, a predefined "file_selector" filename is used and the
    * file extension is deduced from the mime type.
@@ -137,7 +138,7 @@ public class FileUtils {
         } else {
           fileName = "file_selector" + extension;
         }
-      } else if (extension != null) {
+      } else if (extension != null && !hasFileExtension(fileName)) {
         fileName = getBaseName(fileName) + extension;
       }
 
@@ -199,6 +200,12 @@ public class FileUtils {
       out.write(buffer, 0, bytesRead);
     }
     out.flush();
+  }
+
+  /** Returns whether the provided file name already has a non-empty extension. */
+  private static boolean hasFileExtension(String fileName) {
+    int lastDotIndex = fileName.lastIndexOf('.');
+    return lastDotIndex > 0 && lastDotIndex < fileName.length() - 1;
   }
 
   private static String getBaseName(String fileName) {

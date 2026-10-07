@@ -3215,6 +3215,34 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceLivePreviewThinkingSample => '正在分析上下文与日程优先级...';
 
   @override
+  String get settingsDataLogsSection => '诊断日志';
+
+  @override
+  String get settingsDataLogsDescription =>
+      '将当前连接的 Core 与本客户端的日志按时间合并为一个 .log 文件，并标记 [CORE] / [CLIENT]。日志可能包含敏感信息，分享前请检查。';
+
+  @override
+  String get settingsDataExportLogs => '导出诊断日志';
+
+  @override
+  String get settingsDataLogsExporting => '正在导出日志…';
+
+  @override
+  String settingsDataLogsExportError(String error) {
+    return '日志导出失败：$error';
+  }
+
+  @override
+  String settingsDataLogsExportPartial(String path) {
+    return '已保存至 $path。部分日志读取失败，请查看文件中的警告。';
+  }
+
+  @override
+  String settingsDataOverviewLoadError(String error) {
+    return '数据概览加载失败：$error。仍可导出诊断日志。';
+  }
+
+  @override
   String get settingsDataRuntimeSection => '数据概览';
 
   @override

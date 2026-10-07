@@ -379,8 +379,7 @@ class _WideAiBubbleLayout extends StatelessWidget {
                       if (roleNameText.isNotEmpty)
                         Text(
                           roleNameText,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          softWrap: true,
                           style: Theme.of(context).textTheme.titleSmall
                               ?.copyWith(
                                 fontWeight: FontWeight.w600,
@@ -670,8 +669,7 @@ class _BubbleMetadataLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = Text(
       text,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
+      softWrap: true,
       style: Theme.of(context).textTheme.labelSmall?.copyWith(
         color: Theme.of(context).colorScheme.onSurfaceVariant,
         fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],

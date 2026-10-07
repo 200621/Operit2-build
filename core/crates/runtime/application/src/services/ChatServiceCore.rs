@@ -64,6 +64,7 @@ use operit_store::PreferencesDataStore::{
     combine4, combine5, mutableStateFlow, MutableStateFlow, StateFlow,
 };
 use operit_store::RuntimeStorageHost::defaultRuntimeStorageHost;
+use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::files::VisualFileSystem::VisualFileSystem;
 use operit_tools::runtime_support::CoreRouteResumeContext;
@@ -1395,8 +1396,9 @@ impl ChatServiceCore {
             .map_err(|error| error.to_string())?;
         self.chatHistoryDelegate
             .chatHistoryManager
-            .updateChatWorkspaceId(chatId, Some(workspace.id))
+            .updateChatWorkspaceId(chatId.clone(), Some(workspace.id))
             .map_err(|error| error.to_string())?;
+        self.chatHistoryDelegate.notifyChatWorkspaceChanged(&chatId);
         Ok(workspacePath)
     }
 
@@ -1695,6 +1697,7 @@ impl ChatServiceCore {
     #[allow(non_snake_case)]
     fn attachPastedText(&mut self, content: String) {
         let attachmentInfo = AttachmentInfo {
+            nodeId: None,
             filePath: format!(
                 "pasted_text_{}_{}",
                 currentTimeMillis(),
@@ -1765,6 +1768,7 @@ impl ChatServiceCore {
             }
         };
         let attachmentInfo = AttachmentInfo {
+            nodeId: localAttachmentNodeId(),
             filePath: tempFile.to_string_lossy().into_owned(),
             fileName,
             mimeType,
@@ -1794,6 +1798,7 @@ impl ChatServiceCore {
                 return Err("无法导入附件: 存储结果与文件内容不一致".to_string());
             }
             Ok(AttachmentInfo {
+                nodeId: localAttachmentNodeId(),
                 mimeType: getMimeTypeFromPath(Path::new(&fileName)).to_string(),
                 fileName,
                 filePath: path.to_string_lossy().into_owned(),
@@ -1861,6 +1866,7 @@ impl ChatServiceCore {
         let captureId = format!("screen_ocr_{}", currentTimeMillis());
         let content = format!("屏幕内容{positionInfo}\n\n{ocrText}\n\n{OCR_INLINE_INSTRUCTION}");
         self.attachments.push(AttachmentInfo {
+            nodeId: None,
             filePath: captureId,
             fileName: "screen_content.txt".to_string(),
             mimeType: "text/plain".to_string(),
@@ -1902,6 +1908,7 @@ impl ChatServiceCore {
 
         let content = result.result.toString();
         let attachmentInfo = AttachmentInfo {
+            nodeId: None,
             filePath: format!("notifications_{}", currentTimeMillis()),
             fileName: "notifications.json".to_string(),
             mimeType: "application/json".to_string(),
@@ -1942,6 +1949,7 @@ impl ChatServiceCore {
 
         let content = result.result.toString();
         let attachmentInfo = AttachmentInfo {
+            nodeId: None,
             filePath: format!("location_{}", currentTimeMillis()),
             fileName: "location.json".to_string(),
             mimeType: "application/json".to_string(),
@@ -2004,6 +2012,7 @@ impl ChatServiceCore {
             }
 
             let attachmentInfo = AttachmentInfo {
+                nodeId: None,
                 filePath: packageAttachmentPath(packageName),
                 fileName: packageAttachmentDisplayName(packageName),
                 mimeType: "text/plain".to_string(),
@@ -2046,6 +2055,7 @@ impl ChatServiceCore {
             )
         };
         let attachmentInfo = AttachmentInfo {
+            nodeId: None,
             filePath: workspaceMentionAttachmentPath(&normalizedRelativePath),
             fileName: normalizedRelativePath.clone(),
             mimeType,
@@ -2122,6 +2132,7 @@ impl ChatServiceCore {
             .size;
 
         Ok(AttachmentInfo {
+            nodeId: localAttachmentNodeId(),
             filePath: tempFile.to_string_lossy().into_owned(),
             fileName,
             mimeType,
@@ -3035,6 +3046,12 @@ fn isXmlLikeTagNameStart(value: u8) -> bool {
 #[allow(non_snake_case)]
 fn isXmlLikeTagNameChar(value: u8) -> bool {
     value.is_ascii_alphanumeric() || matches!(value, b':' | b'_' | b'-')
+}
+
+/// Reads the identity of the node that actually imported the file, without creating one.
+#[allow(non_snake_case)]
+fn localAttachmentNodeId() -> Option<String> {
+    CoreNodeIdentityStore::localNodeId()
 }
 
 #[allow(non_snake_case)]

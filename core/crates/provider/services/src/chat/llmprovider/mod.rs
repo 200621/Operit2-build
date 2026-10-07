@@ -68,3 +68,7 @@ pub mod ThinkingConfiguration;
 pub mod ToolPkgJsAiProviderService;
 #[path = "UnsafeModelSsl.rs"]
 pub mod UnsafeModelSsl;
+
+#[cfg(test)]
+#[path = "../../../../tests/ProviderMediaTestSupport.rs"]
+mod ProviderMediaTestSupport;

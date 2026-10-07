@@ -39,6 +39,7 @@ use operit_model::ToolPrompt::{ToolParameterSchema, ToolPrompt};
 use operit_store::repository::UsageStatisticsStore::{UsageRequestSource, UsageStatisticsStore};
 use operit_store::repository::UserMarkdownRepository::UserMarkdownRepository;
 use operit_store::RuntimeStorageHost::defaultRuntimeStorageHost;
+use operit_tools::files::PathMapper::{PathMapper, ResolvedVfsPath};
 use operit_tools::runtime_support::{CoreRouteResumeContext, ToolRuntimeSupport};
 use operit_tools::tools::climode::CliToolModeSupport::{
     CliToolModeSupport, ToolExposureMode as ResolvedToolExposureMode,
@@ -434,6 +435,26 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
             None => String::new(),
         };
         let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
+        // Use the same host-owned roots as file tools, not a guessed storage location.
+        // Resolve afresh for every request so workspace switches cannot retain stale paths.
+        let context = self.tool_handler.getContext();
+        let workspace_path_mappings = context
+            .runtimeStorageHost
+            .as_ref()
+            .and_then(|storage| {
+                Some(PathMapper::new(
+                    storage.runtimeRootDir()?,
+                    storage.workspaceRootDir()?,
+                ))
+            })
+            .map(|mapper| {
+                resolve_workspace_path_mappings(
+                    &mapper,
+                    request.workspace_path.as_deref(),
+                    &request.workspace_folders,
+                )
+            })
+            .unwrap_or_default();
         let package_manager = self.tool_handler.getOrCreatePackageManager();
         let package_manager_guard = package_manager
             .lock()
@@ -476,6 +497,7 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                 chat_id: request.chat_id.clone(),
                 workspace_path: request.workspace_path.clone(),
                 workspace_folders: request.workspace_folders.clone(),
+                workspace_path_mappings,
                 use_english,
                 custom_system_prompt_template,
                 enable_tools: true,
@@ -3276,4 +3298,102 @@ fn value_to_btree_map(source: HashMap<String, Value>) -> BTreeMap<String, String
             (key, value)
         })
         .collect()
+}
+
+/// Resolves the primary root and every mounted folder without searching for directories.
+fn resolve_workspace_path_mappings(
+    mapper: &PathMapper,
+    workspace_path: Option<&str>,
+    workspace_folders: &[String],
+) -> Vec<ResolvedVfsPath> {
+    let mut seen = BTreeSet::new();
+    workspace_path
+        .into_iter()
+        .chain(workspace_folders.iter().map(String::as_str))
+        .filter(|path| !path.trim().is_empty())
+        .filter_map(|path| mapper.resolve(path).ok())
+        // Browser storage keys (e.g. workspaces/chat-id) are not terminal paths.
+        .filter(|mapping| std::path::Path::new(&mapping.physicalPath).is_absolute())
+        .filter(|mapping| seen.insert(mapping.vfsPath.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod workspace_path_tests {
+    use super::resolve_workspace_path_mappings;
+    use operit_tools::files::PathMapper::PathMapper;
+
+    #[test]
+    fn resolves_primary_and_all_folders_from_configured_roots() {
+        let root = std::env::temp_dir().join("Operit My Projects");
+        let workspace_root = root.join("workspaces");
+        let mapper = PathMapper::new(root.join("runtime"), workspace_root.clone());
+        let mappings = resolve_workspace_path_mappings(
+            &mapper,
+            Some("/app/workspaces/main"),
+            &[
+                "/app/workspaces/main/".into(),
+                "/app/workspaces/other".into(),
+                "".into(),
+                "/unknown/project".into(),
+            ],
+        );
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].vfsPath, "/app/workspaces/main");
+        assert_eq!(
+            mappings[0].physicalPath,
+            workspace_root
+                .join("main")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(
+            mappings[1].physicalPath,
+            workspace_root
+                .join("other")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+
+    #[test]
+    fn workspace_switch_resolves_new_path() {
+        let root = std::env::temp_dir().join("Operit workspace switch");
+        let mapper = PathMapper::new(root.join("runtime"), root.join("workspaces"));
+        let first = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/first"), &[]);
+        let second = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/second"), &[]);
+        assert_eq!(
+            first[0].physicalPath,
+            root.join("workspaces/first")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(
+            second[0].physicalPath,
+            root.join("workspaces/second")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolves_external_macos_workspace_alongside_default_workspace() {
+        let mapper = PathMapper::new("/runtime".into(), "/workspaces".into());
+        let mappings = resolve_workspace_path_mappings(
+            &mapper,
+            Some("/app/workspaces/main"),
+            &["/mnt/macos/Users/test/External Project".into()],
+        );
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[1].physicalPath, "/Users/test/External Project");
+    }
+
+    #[test]
+    fn browser_storage_keys_are_not_advertised_as_terminal_paths() {
+        let mapper = PathMapper::new("runtime".into(), "workspaces".into());
+        assert!(
+            resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/main"), &[]).is_empty()
+        );
+    }
 }

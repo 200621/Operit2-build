@@ -300,6 +300,9 @@ class MarketGridCard extends StatelessWidget {
     required this.actionLabel,
     required this.actionIcon,
     required this.actionBusy,
+    this.actionEnabled = true,
+    this.statusLabel,
+    this.updateAvailable = false,
     required this.onAction,
     required this.onTap,
   });
@@ -314,6 +317,9 @@ class MarketGridCard extends StatelessWidget {
   final String actionLabel;
   final IconData actionIcon;
   final bool actionBusy;
+  final bool actionEnabled;
+  final String? statusLabel;
+  final bool updateAvailable;
   final VoidCallback onAction;
   final VoidCallback onTap;
 
@@ -359,6 +365,30 @@ class MarketGridCard extends StatelessWidget {
                             ),
                           ),
                         ),
+                        if (statusLabel != null) ...<Widget>[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: updateAvailable
+                                  ? colorScheme.tertiaryContainer
+                                  : colorScheme.secondaryContainer,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              statusLabel!,
+                              style: textTheme.labelSmall?.copyWith(
+                                color: updateAvailable
+                                    ? colorScheme.onTertiaryContainer
+                                    : colorScheme.onSecondaryContainer,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
                         if (apiVersion != null) ...<Widget>[
                           const SizedBox(width: 6),
                           Text(
@@ -398,11 +428,15 @@ class MarketGridCard extends StatelessWidget {
                 child: Material(
                   color: actionBusy
                       ? colorScheme.primaryContainer
+                      : !actionEnabled
+                      ? colorScheme.secondaryContainer
+                      : updateAvailable
+                      ? colorScheme.tertiary
                       : colorScheme.primary,
                   shape: const CircleBorder(),
                   child: InkWell(
                     customBorder: const CircleBorder(),
-                    onTap: actionBusy ? null : onAction,
+                    onTap: actionBusy || !actionEnabled ? null : onAction,
                     child: SizedBox.square(
                       dimension: 30,
                       child: Center(
@@ -414,7 +448,11 @@ class MarketGridCard extends StatelessWidget {
                             : Icon(
                                 actionIcon,
                                 size: 17,
-                                color: colorScheme.onPrimary,
+                                color: !actionEnabled
+                                    ? colorScheme.onSecondaryContainer
+                                    : updateAvailable
+                                    ? colorScheme.onTertiary
+                                    : colorScheme.onPrimary,
                               ),
                       ),
                     ),

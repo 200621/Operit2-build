@@ -65,11 +65,6 @@ class _RemoteAnnouncementHostState extends State<RemoteAnnouncementHost> {
         error: error,
         stackTrace: stackTrace,
       );
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(error.toString())));
-      }
     } finally {
       _checking = false;
     }

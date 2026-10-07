@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:liquid_glass_widgets/widgets/shared/glass_effect.dart';
 
+import '../../../../../../../core/logging/ClientLogger.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import '../../../../../../../l10n/generated/app_localizations.dart';
@@ -127,6 +128,10 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     Map<core_proxy.FunctionType, core_proxy.FunctionModelBinding>
   >?
   _modelBindingSubscription;
+  StreamSubscription<List<core_proxy.ProviderProfile>>?
+  _modelProfilesSubscription;
+  core_proxy.FunctionModelBinding? _currentModelBinding;
+  List<core_proxy.ProviderProfile> _modelProfiles = const [];
   bool _draggingFiles = false;
   bool _inputExpanded = false;
   String _modelLabel = '';
@@ -429,36 +434,57 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     });
   }
 
-  Future<void> _watchCurrentModelLabel() async {
+  void _watchCurrentModelLabel() {
     final clients = widget.viewModel.clients;
-    final binding = await clients.preferencesFunctionalConfigManager
-        .getModelBindingForFunction(functionType: core_proxy.FunctionType.chat);
-    await _applyModelBinding(binding);
-    if (!mounted) {
-      return;
+    try {
+      _modelBindingSubscription = clients.preferencesFunctionalConfigManager
+          .functionModelBindingFlow()
+          .listen((bindings) {
+            _currentModelBinding = bindings[core_proxy.FunctionType.chat];
+            _refreshCurrentModelLabel();
+          }, onError: _logModelLabelError);
+      _modelProfilesSubscription = clients.preferencesModelConfigManager
+          .getProviderProfilesFlow()
+          .listen((profiles) {
+            _modelProfiles = profiles;
+            _refreshCurrentModelLabel();
+          }, onError: _logModelLabelError);
+    } catch (error, stackTrace) {
+      _logModelLabelError(error, stackTrace);
     }
-    _modelBindingSubscription = clients.preferencesFunctionalConfigManager
-        .functionModelBindingFlow()
-        .listen((bindings) {
-          _applyModelBinding(bindings[core_proxy.FunctionType.chat]!);
-        });
   }
 
-  Future<void> _applyModelBinding(
-    core_proxy.FunctionModelBinding binding,
-  ) async {
-    final config = await widget.viewModel.clients.preferencesModelConfigManager
-        .getResolvedModelConfig(
-          providerId: binding.providerId,
-          modelId: binding.modelId,
-        );
+  void _logModelLabelError(Object error, StackTrace stackTrace) {
+    ClientLogger.w(
+      'Unable to observe current model label',
+      tag: 'AgentChatInputSection',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
+
+  /// Derives cosmetic metadata from snapshots rather than resolving a runtime
+  /// config. A binding may temporarily precede its provider during sync.
+  void _refreshCurrentModelLabel() {
     if (!mounted) {
       return;
     }
+    final binding = _currentModelBinding;
+    core_proxy.ProviderProfile? boundProvider;
+    if (binding != null) {
+      for (final provider in _modelProfiles) {
+        if (provider.id == binding.providerId &&
+            provider.models.any((model) => model.id == binding.modelId)) {
+          boundProvider = provider;
+          break;
+        }
+      }
+    }
     setState(() {
-      _modelLabel = _formatModelLabel(config.modelId);
-      _modelProviderTypeId = config.apiProviderTypeId;
-      _modelProviderName = config.providerName;
+      // Keep the original model ID visible; never silently choose a fallback.
+      _modelLabel = _formatModelLabel(binding?.modelId ?? '');
+      _modelProviderTypeId = boundProvider?.providerTypeId ?? '';
+      _modelProviderName = boundProvider?.name ?? '';
     });
   }
 
@@ -578,6 +604,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_handleInputChanged);
     _modelBindingSubscription?.cancel();
+    _modelProfilesSubscription?.cancel();
     _dismissModelSettingsPopup();
     _dismissInputMenuPopup();
     _dismissMentionSuggestionPopup();
@@ -1496,14 +1523,20 @@ class _AttachmentPanelItemButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: <Widget>[
-              Icon(item.icon, size: 16, color: enabled ? iconColor : disabledColor),
+              Icon(
+                item.icon,
+                size: 16,
+                color: enabled ? iconColor : disabledColor,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   item.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: textStyle?.copyWith(color: enabled ? textColor : disabledColor),
+                  style: textStyle?.copyWith(
+                    color: enabled ? textColor : disabledColor,
+                  ),
                 ),
               ),
             ],

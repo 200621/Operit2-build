@@ -174,5 +174,5 @@ class _PendingModelBridge extends OperitRuntimeBridge {
   /// Rejects watches until model metadata has completed.
   @override
   Stream<CoreEvent> watchStream(CoreWatchRequest request) =>
-      throw UnimplementedError();
+      const Stream<CoreEvent>.empty();
 }

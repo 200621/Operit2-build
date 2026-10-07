@@ -107,8 +107,16 @@ impl OperitApplication {
                 .resolve("/app/data/logs/toolpkg.log")
                 .expect("ToolPkg log path must resolve through the file-system host")
                 .physicalPath;
-            AppLogger::configure_log_files(fileSystemHost, logFile, packageLogFile)
-                .expect("runtime log files must be configured through the file-system host");
+            if let Err(error) =
+                AppLogger::configure_log_files(fileSystemHost, logFile, packageLogFile)
+            {
+                AppLogger::w(
+                    "OperitApplication",
+                    &format!(
+                        "File logging unavailable; continuing with console and in-memory logs: {error}"
+                    ),
+                );
+            }
             setDefaultRuntimeStoreRootConfig(RuntimeStoreRootConfig::new(
                 runtimeRoot,
                 workspaceRoot,
@@ -585,6 +593,22 @@ impl OperitApplication {
         result
     }
 
+    /// Returns marketplace entry/version markers for plugins that are still installed.
+    #[allow(non_snake_case)]
+    pub fn getInstalledMarketVersions(&self) -> Result<BTreeMap<String, String>, String> {
+        super::MarketInstallSupport::installed_versions(self)
+    }
+
+    /// Installs a market entry and persists its successfully installed version in Core.
+    #[allow(non_snake_case)]
+    pub fn installMarketEntry(
+        &self,
+        entryId: String,
+        versionId: Option<String>,
+    ) -> Result<String, String> {
+        super::MarketInstallSupport::install_entry(self, &entryId, versionId.as_deref())
+    }
+
     /// Returns package names enabled in this application runtime.
     pub fn active_package_names(&self) -> Vec<String> {
         self.toolHandler
@@ -796,29 +820,13 @@ impl OperitApplication {
         let mut applied = 0usize;
         let mut syncClock = store.localClock().map_err(|error| error.to_string())?;
         let mut persistentOperations = Vec::new();
+        let mut observedDomainOperations = Vec::new();
         for operation in operations {
-            if operation.domain == CHAT_SYNC_DOMAIN {
-                if forceApply {
-                    sqlStore
-                        .applyBootstrapOperation(&operation)
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    sqlStore
-                        .applyOperation(&operation)
-                        .map_err(|error| error.to_string())?;
-                }
-            } else if operation.domain == BINDING_SYNC_DOMAIN {
-                if forceApply {
-                    bindingStore.applyBootstrapOperation(&operation)?;
-                } else {
-                    bindingStore.applySyncedOperation(&operation)?;
-                }
-            } else if operation.domain == NETWORK_CONTROL_SYNC_DOMAIN {
-                if forceApply {
-                    networkControlStore.applyBootstrapOperation(&operation)?;
-                } else {
-                    networkControlStore.applySyncedOperation(&operation)?;
-                }
+            if matches!(
+                operation.domain.as_str(),
+                CHAT_SYNC_DOMAIN | BINDING_SYNC_DOMAIN | NETWORK_CONTROL_SYNC_DOMAIN
+            ) {
+                observedDomainOperations.push(operation);
             } else {
                 if !forceApply
                     && operation.sequence <= syncClock.sequenceFor(&operation.originDeviceId)
@@ -839,7 +847,7 @@ impl OperitApplication {
                 .map_err(|error| error.to_string())?
         };
         let mut appliedPersistentOperations = Vec::new();
-        let mut preferenceEntriesByPath = BTreeMap::<String, Vec<PreferencesSyncedEntry>>::new();
+        let mut preferenceEntries = Vec::new();
         let mut nonPreferenceOperations = Vec::new();
         for (operation, shouldApply) in persistentOperations.iter().zip(applyDecisions) {
             if !shouldApply {
@@ -848,10 +856,7 @@ impl OperitApplication {
             if operation.domain == "preferences" {
                 let entry = PreferencesSyncedEntry::fromOperation(operation)
                     .map_err(|error| error.to_string())?;
-                preferenceEntriesByPath
-                    .entry(entry.storagePath().to_string())
-                    .or_default()
-                    .push(entry);
+                preferenceEntries.push(entry);
             } else {
                 nonPreferenceOperations.push(operation);
             }
@@ -867,14 +872,34 @@ impl OperitApplication {
                 self.applyNonPreferenceSyncOperation(operation)?;
             }
         }
-        if !preferenceEntriesByPath.is_empty() {
+        if !preferenceEntries.is_empty() {
             let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
                 "RuntimeStorageHost is not registered for persistent sync".to_string()
             })?;
-            for entries in preferenceEntriesByPath.values() {
-                PreferencesDataStore::applySyncedEntriesWithStorage(storageHost.clone(), entries)
-                    .map_err(|error| error.to_string())?;
-            }
+            PreferencesDataStore::applySyncedPreferencesWithStorage(storageHost, &preferenceEntries)
+                .map_err(|error| error.to_string())?;
+        }
+        // These domain stores record their own clocks. A newer chat/binding
+        // operation must not make an earlier failed preference delta disappear
+        // from the next synchronization retry.
+        for operation in observedDomainOperations {
+            match (operation.domain.as_str(), forceApply) {
+                (CHAT_SYNC_DOMAIN, true) => sqlStore
+                    .applyBootstrapOperation(&operation)
+                    .map_err(|error| error.to_string()),
+                (CHAT_SYNC_DOMAIN, false) => sqlStore
+                    .applyOperation(&operation)
+                    .map_err(|error| error.to_string()),
+                (BINDING_SYNC_DOMAIN, true) => bindingStore.applyBootstrapOperation(&operation),
+                (BINDING_SYNC_DOMAIN, false) => bindingStore.applySyncedOperation(&operation),
+                (NETWORK_CONTROL_SYNC_DOMAIN, true) => {
+                    networkControlStore.applyBootstrapOperation(&operation)
+                }
+                (NETWORK_CONTROL_SYNC_DOMAIN, false) => {
+                    networkControlStore.applySyncedOperation(&operation)
+                }
+                _ => unreachable!("observed sync domains are classified before materialization"),
+            }?;
         }
         if forceApply {
             store

@@ -36,10 +36,18 @@ class ChatMarkupRegex {
     r'<reply_to\s+sender="([^"]+)"\s+timestamp="([^"]+)">([^<]*)</reply_to>',
   );
   static final attachmentDataTag = RegExp(
-    r'<attachment\s+id="([^"]+)"\s+filename="([^"]+)"\s+type="([^"]+)"(?:\s+size="([^"]+)")?\s*>([\s\S]*?)</attachment>',
+    r'<attachment\s+id="([^"]+)"\s+filename="([^"]+)"\s+type="([^"]+)"'
+    r'(?:\s+(?:node_id|path)="[^"]*")*'
+    r'(?:\s+size="([^"]+)")?'
+    r'(?:\s+(?:node_id|path)="[^"]*")*'
+    r'\s*>([\s\S]*?)</attachment>',
   );
   static final attachmentDataSelfClosingTag = RegExp(
-    r'<attachment\s+id="([^"]+)"\s+filename="([^"]+)"\s+type="([^"]+)"(?:\s+size="([^"]+)")?(?:\s+content="(.*?)")?\s*/>',
+    r'<attachment\s+id="([^"]+)"\s+filename="([^"]+)"\s+type="([^"]+)"'
+    r'(?:\s+(?:node_id|path)="[^"]*")*'
+    r'(?:\s+size="([^"]+)")?'
+    r'(?:\s+(?:node_id|path)="[^"]*")*'
+    r'(?:\s+content="(.*?)")?\s*/>',
     dotAll: true,
   );
   static final attachmentTag = RegExp(

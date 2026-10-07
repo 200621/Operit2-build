@@ -39,6 +39,7 @@ class _WorkspaceFileBrowserContentState
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _pathController = TextEditingController();
   bool _editingPath = false;
+  // Freeze navigation so a pending bind and its errors stay on the selected path.
   bool _selectingCurrentDirectory = false;
   String? _selectionError;
   String? _pathError;
@@ -79,17 +80,19 @@ class _WorkspaceFileBrowserContentState
         WorkspacePathBar.editable(
           path: _displayPath(),
           controller: _pathController,
-          isEditing: _editingPath,
+          isEditing: _editingPath && !_selectingCurrentDirectory,
           leading: WorkspacePathIconButton(
             tooltip: l10n.back,
-            onPressed: _history.isEmpty ? null : _openPreviousPath,
+            onPressed: _history.isEmpty || _selectingCurrentDirectory
+                ? null
+                : _openPreviousPath,
             icon: Icons.arrow_back,
           ),
-          onRefresh: () {
-            setState(_loadCurrentPath);
-          },
-          onEditToggle: _startEditingPath,
-          onSubmitted: _submitEditedPath,
+          onRefresh: _selectingCurrentDirectory
+              ? null
+              : () => setState(_loadCurrentPath),
+          onEditToggle: _selectingCurrentDirectory ? null : _startEditingPath,
+          onSubmitted: _selectingCurrentDirectory ? null : _submitEditedPath,
         ),
         if (_pathError != null)
           Align(
@@ -170,13 +173,15 @@ class _WorkspaceFileBrowserContentState
                         subtitle: entry.isDirectory
                             ? null
                             : Text(_previewLabel(l10n, previewKind!)),
-                        onTap: () {
-                          if (entry.isDirectory) {
-                            _openDirectory(entry.relativePath);
-                            return;
-                          }
-                          widget.onOpenFile(entry);
-                        },
+                        onTap: _selectingCurrentDirectory
+                            ? null
+                            : () {
+                                if (entry.isDirectory) {
+                                  _openDirectory(entry.relativePath);
+                                  return;
+                                }
+                                widget.onOpenFile(entry);
+                              },
                       );
                     },
                   ),
@@ -207,6 +212,9 @@ class _WorkspaceFileBrowserContentState
 
   /// Opens a directory returned by the active workspace listing service.
   void _openDirectory(String path) {
+    if (_selectingCurrentDirectory) {
+      return;
+    }
     if (!_directorySelectionEnabled && !_isWorkspaceRelativePath(path)) {
       setState(() {
         _pathError = '工作区目录路径必须是相对路径';
@@ -224,6 +232,9 @@ class _WorkspaceFileBrowserContentState
 
   /// Restores the previous valid workspace-relative directory.
   void _openPreviousPath() {
+    if (_selectingCurrentDirectory) {
+      return;
+    }
     setState(() {
       _currentPath = _history.removeLast();
       _editingPath = false;
@@ -235,6 +246,9 @@ class _WorkspaceFileBrowserContentState
 
   /// Starts editing the displayed workspace path.
   void _startEditingPath() {
+    if (_selectingCurrentDirectory) {
+      return;
+    }
     setState(() {
       _pathController.text = _displayPath();
       _pathController.selection = TextSelection.collapsed(
@@ -246,6 +260,9 @@ class _WorkspaceFileBrowserContentState
 
   /// Converts and submits a displayed path within the current workspace root.
   void _submitEditedPath(String value) {
+    if (_selectingCurrentDirectory) {
+      return;
+    }
     final normalizedPath = _relativePathFromDisplay(value);
     if (normalizedPath == null) {
       setState(() {

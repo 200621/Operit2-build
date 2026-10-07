@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use operit_host_api::HostEnvironmentDescriptor;
+use operit_host_api::{HostEnvironmentDescriptor, HostPlatform};
+use operit_tools::files::PathMapper::ResolvedVfsPath;
 use serde_json::{json, Value};
 
 use crate::chat::config::SystemToolPrompts::SystemToolPrompts;
@@ -127,6 +128,8 @@ pub struct SystemPromptOptions {
     pub chat_id: Option<String>,
     pub workspace_path: Option<String>,
     pub workspace_folders: Vec<String>,
+    /// VFS roots mapped to absolute host paths by the active file-tool mapper.
+    pub workspace_path_mappings: Vec<ResolvedVfsPath>,
     pub saf_bookmark_names: Vec<String>,
     pub use_english: bool,
     pub custom_system_prompt_template: String,
@@ -156,6 +159,7 @@ impl Default for SystemPromptOptions {
             chat_id: None,
             workspace_path: None,
             workspace_folders: Vec::new(),
+            workspace_path_mappings: Vec::new(),
             saf_bookmark_names: Vec::new(),
             use_english: false,
             custom_system_prompt_template: String::new(),
@@ -249,6 +253,8 @@ impl SystemPromptConfig {
         let workspace_guidelines = getWorkspaceGuidelines(
             options.workspace_path.as_deref(),
             &options.workspace_folders,
+            &options.workspace_path_mappings,
+            &options.host_environment.platform,
             options.use_english,
             options.workspace_rule_file.as_ref(),
         );
@@ -377,6 +383,21 @@ impl SystemPromptConfig {
                 .replace(&workspace_guidelines, "");
         }
 
+        // Custom templates may omit the placeholder, but workspace context is
+        // still required to use tools correctly.
+        if options.enable_tools
+            && !workspace_guidelines.is_empty()
+            && !template_to_use.contains("WORKSPACE_GUIDELINES_SECTION")
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(&workspace_guidelines);
+        }
+
+        if options.enable_tools {
+            prompt.push_str("\n\n");
+            prompt.push_str(getAttachmentGuidelines(options.use_english));
+        }
+
         collapse_blank_lines(&prompt)
     }
 
@@ -390,6 +411,18 @@ impl SystemPromptConfig {
             (
                 "workspaceFolders".to_string(),
                 json!(options.base.workspace_folders),
+            ),
+            (
+                "workspacePathMappings".to_string(),
+                json!(options
+                    .base
+                    .workspace_path_mappings
+                    .iter()
+                    .map(|mapping| json!({
+                        "vfsPath": mapping.vfsPath,
+                        "physicalPath": mapping.physicalPath,
+                    }))
+                    .collect::<Vec<_>>()),
             ),
             (
                 "hostEnvironment".to_string(),
@@ -560,11 +593,23 @@ fn buildWorkspaceRuleFileSection(
     }
 }
 
+/// Attachment files remain node-local and ephemeral; metadata does not copy their bytes.
+#[allow(non_snake_case)]
+fn getAttachmentGuidelines(use_english: bool) -> &'static str {
+    if use_english {
+        "ATTACHMENT LOCATIONS:\n- An attachment's `node_id` identifies the CoreNode that actually holds its file; it is not necessarily the current execution node. Node metadata does not transfer or synchronize the file.\n- Use content already embedded in the message directly. To access a file, use `list_core_nodes` to check the current node and source reachability. If the source differs, call `switch_core` with the exact `node_id` and wait for continuation on that node before using file tools; switching changes this chat's execution node. Prefer the attachment's `path` VFS locator over its host-local `id`. If no `path` is provided, resolve `id` using the source node's host-to-VFS mapping; do not pass a physical path directly to file tools. Do not search the current device for another device's file.\n- Files under `/app/data/temp/clean_on_exit` are temporary, not Space-synchronized, and may have been cleaned. If the source is unreachable or the file has been cleaned, explain this and request reconnection or re-upload instead of searching unrelated directories. Legacy attachments without `node_id` have an unknown source; do not invent one."
+    } else {
+        "附件位置：\n- 附件的 `node_id` 是文件实际所在的 CoreNode，不一定是当前执行节点；携带节点信息不代表文件已传输或同步。\n- 消息中已经内嵌的内容可直接使用。需要访问文件时，先用 `list_core_nodes` 确认当前节点和来源节点是否可达；来源不同则用精确的 `node_id` 调用 `switch_core`，等待在目标节点继续执行后再调用文件工具。切换会改变这段聊天的执行节点。文件工具优先使用附件的 `path` VFS 地址，而不是本机物理路径 `id`；没有 `path` 时，按来源节点的平台映射把物理路径 `id` 转成 VFS 地址，不要直接把物理路径交给文件工具。不要在当前设备搜索另一台设备的文件。\n- `/app/data/temp/clean_on_exit` 下的文件是临时附件，不参与 Space 文件同步，可能已经清理。来源不可达或文件已清理时，明确说明并请用户重连或重新上传，不要搜索无关目录。旧附件没有 `node_id` 时来源未知，不得猜测补成当前节点。"
+    }
+}
+
 /// Builds workspace instructions with every mounted folder visible to the model.
 #[allow(non_snake_case)]
 fn getWorkspaceGuidelines(
     workspace_path: Option<&str>,
     workspace_folders: &[String],
+    workspace_path_mappings: &[ResolvedVfsPath],
+    host_platform: &HostPlatform,
     use_english: bool,
     workspace_rule_file: Option<&WorkspaceRuleFile>,
 ) -> String {
@@ -574,26 +619,76 @@ fn getWorkspaceGuidelines(
     if workspace_path.trim().is_empty() {
         return String::new();
     }
-    let mounted_folders = workspace_folders
-        .iter()
+    let mut seen = std::collections::HashSet::new();
+    let mounted_folders = std::iter::once(workspace_path)
+        .chain(workspace_folders.iter().map(String::as_str))
         .filter(|folder| !folder.trim().is_empty())
+        .filter(|folder| seen.insert(folder.trim_end_matches('/').to_string()))
         .map(|folder| format!("- `{folder}`"))
         .collect::<Vec<_>>()
         .join("\n");
     let base_guidelines = if use_english {
         format!(
-            "WORKSPACE GUIDELINES:\n- The current workspace root is `{workspace_path}`.\n- This workspace contains these mounted folders; every listed path belongs to the same workspace:\n{mounted_folders}\n- Treat every listed VFS path as an allowed workspace root; do not limit workspace operations to the first path.\n- File tools accept VFS paths only. Use absolute paths rooted at the relevant listed workspace folder.\n- The workspace collection is under `/app/workspaces`; each workspace must be addressed by its full VFS path.\n- Root listing always shows `/app`; `/mnt` is listed when this host has mounted external entries.\n- `/sdcard` and `/data` are hidden Android aliases that can be opened directly on Android hosts.\n- Relative paths are only for file contents or project-internal references, not for tool parameters.\n- **Best Practice for Code Modifications**: Before modifying any file, use `grep_code` and `grep_context` to locate and understand relevant code with surrounding context. This ensures you understand the codebase structure before making changes."
+            "WORKSPACE GUIDELINES:\n- The current workspace root is `{workspace_path}`.\n- This workspace contains these mounted folders; every listed path belongs to the same workspace:\n{mounted_folders}\n- Treat every listed VFS path as an allowed workspace root; do not limit workspace operations to the first path.\n- File tools accept VFS paths only. Use absolute paths rooted at the relevant listed workspace folder.\n- The workspace collection is under `/app/workspaces`; each workspace must be addressed by its full VFS path.\n- Within the same Space, ordinary files in the workspace body under `/app/workspaces/<workspace-id>/...` are automatically replicated bidirectionally between devices running supported Core versions. Synchronization is eventual and needs connectivity; membership, pairing, or an identical path does not prove a file has arrived. Verify availability on the execution node.\n- External mounted folders (such as `/mnt/...` and `/data/...`), symlinks, and temporary attachments are not automatically included in workspace synchronization. To retain and share such a file, copy it into the workspace body; a mount or symlink alone is not enough.\n- Root listing always shows `/app`; `/mnt` is listed when this host has mounted external entries.\n- `/sdcard` and `/data` are hidden Android aliases that can be opened directly on Android hosts.\n- Relative paths are allowed in project-internal references and terminal commands after selecting the working directory, but not in file-tool path parameters.\n- **Best Practice for Code Modifications**: Before modifying any file, use `grep_code` and `grep_context` to locate and understand relevant code with surrounding context. This ensures you understand the codebase structure before making changes."
         )
     } else {
         format!(
-            "工作区指南：\n- 当前工作区根目录是 `{workspace_path}`。\n- 当前工作区包含以下挂载文件夹，所有列出的路径都属于同一个工作区：\n{mounted_folders}\n- 每个列出的 VFS 路径都是允许访问的工作区根目录，不能只使用第一个路径。\n- 文件工具只接受 VFS 路径；操作文件时，请使用以对应工作区文件夹为根的绝对路径。\n- 工作区集合位于 `/app/workspaces`；每个工作区都必须用完整 VFS 路径访问。\n- 根目录列表固定展示 `/app`；当前 Host 存在外部挂载项时才展示 `/mnt`。\n- `/sdcard` 和 `/data` 是 Android 隐藏别名，只在 Android Host 上可直接访问。\n- 相对路径只用于文件内容里的项目内部引用，不用于工具参数。\n- **代码修改最佳实践**：修改任何文件之前，建议组合使用 `grep_code` 与 `grep_context` 定位并理解相关代码及其上下文，避免在未理解项目结构时盲改。"
+            "工作区指南：\n- 当前工作区根目录是 `{workspace_path}`。\n- 当前工作区包含以下挂载文件夹，所有列出的路径都属于同一个工作区：\n{mounted_folders}\n- 每个列出的 VFS 路径都是允许访问的工作区根目录，不能只使用第一个路径。\n- 文件工具只接受 VFS 路径；操作文件时，请使用以对应工作区文件夹为根的绝对路径。\n- 工作区集合位于 `/app/workspaces`；每个工作区都必须用完整 VFS 路径访问。\n- 同一 Space 内，`/app/workspaces/<workspace-id>/...` 工作区本体中的普通文件，会在运行支持版本 Core 的设备间自动双向复制。同步是最终一致的，需要设备连通；仅配对、成员关系或路径相同不代表文件已到达，使用前应确认当前执行节点的文件已就绪。\n- 外部挂载目录（如 `/mnt/...`、`/data/...`）、软链接和临时附件，不会自动纳入工作区文件同步。需要长期保留并跨端共享的文件，应实际复制进工作区本体；只挂载目录或创建软链接不够。\n- 根目录列表固定展示 `/app`；当前 Host 存在外部挂载项时才展示 `/mnt`。\n- `/sdcard` 和 `/data` 是 Android 隐藏别名，只在 Android Host 上可直接访问。\n- 项目内部引用和已切换工作目录的终端命令可以使用相对路径，但文件工具的路径参数必须使用 VFS 绝对路径。\n- **代码修改最佳实践**：修改任何文件之前，建议组合使用 `grep_code` 与 `grep_context` 定位并理解相关代码及其上下文，避免在未理解项目结构时盲改。"
         )
     };
+    let terminal_section =
+        buildWorkspaceTerminalPathSection(workspace_path_mappings, host_platform, use_english);
     let rule_section = buildWorkspaceRuleFileSection(workspace_rule_file, use_english);
-    if rule_section.is_empty() {
-        base_guidelines
+    [base_guidelines, terminal_section, rule_section]
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Distinguishes virtual file-tool paths from terminal-visible filesystem paths.
+#[allow(non_snake_case)]
+fn buildWorkspaceTerminalPathSection(
+    mappings: &[ResolvedVfsPath],
+    host_platform: &HostPlatform,
+    use_english: bool,
+) -> String {
+    if *host_platform == HostPlatform::Web {
+        return if use_english {
+            "TERMINAL WORKSPACE PATHS:\n- The browser terminal runs in an isolated Linux VM. Workspace VFS storage is not mounted into that VM; do not use VFS paths or browser storage keys as terminal directories. Use file tools for workspace files."
+        } else {
+            "终端工作区路径：\n- 浏览器终端运行在独立的 Linux 虚拟机中，工作区 VFS 存储未挂载到该虚拟机。不要把 VFS 路径或浏览器存储键当作终端目录；请使用文件工具访问工作区文件。"
+        }.to_string();
+    }
+    if mappings.is_empty() {
+        return if use_english {
+            "TERMINAL WORKSPACE PATHS:\n- No absolute host path mapping is available for this workspace. Do not assume `/app/workspaces` exists in the terminal or guess its physical location; use file tools for workspace files."
+        } else {
+            "终端工作区路径：\n- 当前工作区没有可用的宿主绝对路径映射。不要假设终端中存在 `/app/workspaces`，也不要猜测其物理位置；请使用文件工具访问工作区文件。"
+        }.to_string();
+    }
+    let paths = mappings.iter().map(|mapping| {
+        if *host_platform == HostPlatform::Ohos {
+            // QEMU-vroot mounts the native host root at /mnt/host-root.
+            if use_english {
+                format!("- File tools (VFS): `{}` → Native terminal: `{}`; QEMU-vroot terminal: `/mnt/host-root{}`",
+                    mapping.vfsPath, mapping.physicalPath, mapping.physicalPath)
+            } else {
+                format!("- 文件工具（VFS）：`{}` → 原生终端：`{}`；QEMU-vroot 终端：`/mnt/host-root{}`",
+                    mapping.vfsPath, mapping.physicalPath, mapping.physicalPath)
+            }
+        } else if use_english {
+            format!("- File tools (VFS): `{}` → Terminal absolute path: `{}`",
+                mapping.vfsPath, mapping.physicalPath)
+        } else {
+            format!("- 文件工具（VFS）：`{}` → 终端绝对路径：`{}`",
+                mapping.vfsPath, mapping.physicalPath)
+        }
+    }).collect::<Vec<_>>().join("\n");
+    if use_english {
+        format!("TERMINAL WORKSPACE PATHS (resolved by the host):\n{paths}\n- File tools must continue to use the VFS paths on the left; terminal commands must use the corresponding terminal paths on the right. `/app/workspaces` and `/mnt/...` are virtual paths, not necessarily terminal mount points.\n- Before running project commands, explicitly `cd` to the corresponding terminal directory using your shell's quoting syntax (paths may contain spaces). Do not assume the session's initial or current directory is the workspace.\n- These mappings already locate the workspace; do not search the entire filesystem for it. For a child file, append the same workspace-relative suffix to the corresponding root.")
     } else {
-        format!("{base_guidelines}\n\n{rule_section}")
+        format!("终端工作区路径（由宿主解析）：\n{paths}\n- 文件工具继续使用左侧 VFS 路径；终端命令必须使用右侧对应的终端路径。`/app/workspaces` 和 `/mnt/...` 是虚拟路径，不一定是终端挂载点。\n- 执行项目命令前，先用当前 shell 的引号语法显式 `cd` 到对应终端目录（路径可能包含空格）。不要假设会话的初始目录或当前目录就是工作区。\n- 上述映射已经定位工作区，不要再全盘搜索工作区位置。访问子文件时，在对应根目录后拼接相同的工作区内相对路径。")
     }
 }
 
@@ -655,6 +750,40 @@ mod tests {
         assert!(prompt.contains("<param name=\"package_name\">"));
     }
 
+    #[test]
+    fn attachment_origin_guidelines_are_visible_without_a_workspace_in_both_languages() {
+        for use_english in [true, false] {
+            let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
+                use_english, custom_system_prompt_template: "Custom instructions".into(),
+                ..SystemPromptOptions::default()
+            });
+            assert!(prompt.contains("node_id"));
+            assert!(prompt.contains("switch_core"));
+            assert!(prompt.contains("/app/data/temp/clean_on_exit"));
+        }
+    }
+
+    #[test]
+    fn workspace_prompt_explains_sync_and_external_mount_boundaries() {
+        for use_english in [true, false] {
+            let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
+                use_english, workspace_path: Some("/app/workspaces/test".into()),
+                ..SystemPromptOptions::default()
+            });
+            if use_english {
+                assert!(prompt.contains("automatically replicated bidirectionally"));
+                assert!(prompt.contains("Synchronization is eventual"));
+                assert!(prompt.contains("External mounted folders"));
+                assert!(prompt.contains("copy it into the workspace body"));
+            } else {
+                assert!(prompt.contains("自动双向复制"));
+                assert!(prompt.contains("最终一致"));
+                assert!(prompt.contains("外部挂载目录"));
+                assert!(prompt.contains("实际复制进工作区本体"));
+            }
+        }
+    }
+
     /// Verifies every mounted workspace folder is exposed in the model prompt.
     #[test]
     fn workspacePromptListsAllMountedFolders() {
@@ -671,5 +800,126 @@ mod tests {
         assert!(prompt.contains("/app/workspaces/test"));
         assert!(prompt.contains("/mnt/windows/d/Code/stm32"));
         assert!(prompt.contains("do not limit workspace operations to the first path"));
+    }
+
+    fn workspacePromptOptions(use_english: bool) -> SystemPromptOptions {
+        SystemPromptOptions {
+            use_english,
+            workspace_path: Some("/app/workspaces/main".into()),
+            workspace_folders: vec![
+                "/app/workspaces/main".into(),
+                "/app/workspaces/library".into(),
+            ],
+            workspace_path_mappings: vec![
+                super::ResolvedVfsPath {
+                    vfsPath: "/app/workspaces/main".into(),
+                    physicalPath: "/Users/test/My Projects/main".into(),
+                },
+                super::ResolvedVfsPath {
+                    vfsPath: "/app/workspaces/library".into(),
+                    physicalPath: "/Users/test/My Projects/library".into(),
+                },
+            ],
+            ..SystemPromptOptions::default()
+        }
+    }
+
+    #[test]
+    fn workspacePromptIncludesTerminalMappingsInBothLanguagesAndToolModes() {
+        for use_english in [false, true] {
+            for mode in [super::ToolExposureMode::FULL, super::ToolExposureMode::CLI] {
+                for use_tool_call_api in [false, true] {
+                    let mut options = workspacePromptOptions(use_english);
+                    options.tool_exposure_mode = mode.clone();
+                    options.use_tool_call_api = use_tool_call_api;
+                    let prompt = SystemPromptConfig::getSystemPrompt(options);
+                    assert!(prompt.contains("/Users/test/My Projects/main"));
+                    assert!(prompt.contains("/Users/test/My Projects/library"));
+                    assert!(prompt.contains(if use_english {
+                        "terminal commands must use the corresponding terminal paths"
+                    } else {
+                        "终端命令必须使用右侧对应的终端路径"
+                    }));
+                    assert!(prompt.contains(if use_english {
+                        "do not search the entire filesystem"
+                    } else {
+                        "不要再全盘搜索"
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspacePromptSurvivesCustomTemplatesWithOrWithoutPlaceholder() {
+        for template in [
+            "Custom instructions.",
+            "Custom instructions.\nWORKSPACE_GUIDELINES_SECTION",
+        ] {
+            let mut options = workspacePromptOptions(true);
+            options.custom_system_prompt_template = template.into();
+            let prompt = SystemPromptConfig::getSystemPrompt(options);
+            assert!(prompt.contains("Custom instructions."));
+            assert!(prompt.contains("/Users/test/My Projects/main"));
+            assert_eq!(prompt.matches("TERMINAL WORKSPACE PATHS").count(), 1);
+            assert!(!prompt.contains("WORKSPACE_GUIDELINES_SECTION"));
+        }
+    }
+
+    #[test]
+    fn workspacePromptOmitsPathsWhenToolsAreDisabledOrWorkspaceIsUnbound() {
+        for template in ["Custom instructions.", "WORKSPACE_GUIDELINES_SECTION"] {
+            let mut options = workspacePromptOptions(true);
+            options.custom_system_prompt_template = template.into();
+            options.enable_tools = false;
+            assert!(
+                !SystemPromptConfig::getSystemPrompt(options).contains("/Users/test/My Projects")
+            );
+        }
+        for path in [None, Some(" ".into())] {
+            let mut options = workspacePromptOptions(true);
+            options.workspace_path = path;
+            assert!(
+                !SystemPromptConfig::getSystemPrompt(options).contains("TERMINAL WORKSPACE PATHS")
+            );
+        }
+    }
+
+    #[test]
+    fn workspacePromptDoesNotGuessUnresolvedTerminalPaths() {
+        let mut options = workspacePromptOptions(true);
+        options.workspace_path_mappings.clear();
+        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        assert!(prompt.contains("No absolute host path mapping is available"));
+        assert!(!prompt.contains("Terminal absolute path:"));
+    }
+
+    #[test]
+    fn workspacePromptDistinguishesOhosNativeAndVrootPaths() {
+        let mut options = workspacePromptOptions(true);
+        options.host_environment.platform = super::HostPlatform::Ohos;
+        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        assert!(prompt.contains("Native terminal: `/Users/test/My Projects/main`"));
+        assert!(
+            prompt.contains("QEMU-vroot terminal: `/mnt/host-root/Users/test/My Projects/main`")
+        );
+    }
+
+    #[test]
+    fn workspacePromptDoesNotTreatBrowserStorageAsVmDirectories() {
+        let mut options = workspacePromptOptions(true);
+        options.host_environment.platform = super::HostPlatform::Web;
+        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        assert!(prompt.contains("Workspace VFS storage is not mounted into that VM"));
+        assert!(!prompt.contains("/Users/test/My Projects"));
+    }
+
+    #[test]
+    fn workspacePromptIncludesWindowsDrivePathsWithoutRewritingThem() {
+        let mut options = workspacePromptOptions(true);
+        options.host_environment.platform = super::HostPlatform::Windows;
+        options.workspace_path_mappings[0].physicalPath = "D:/My Projects/main".into();
+        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        assert!(prompt.contains("Terminal absolute path: `D:/My Projects/main`"));
     }
 }

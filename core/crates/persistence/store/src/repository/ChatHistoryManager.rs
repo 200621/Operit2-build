@@ -826,6 +826,13 @@ impl ChatHistoryManager {
         chatId: &str,
         messageToPersist: ChatMessage,
     ) -> ChatHistoryManagerResult<ChatMessage> {
+        // Only a newly persisted user message promotes the conversation. Re-saving
+        // or editing an existing message must not change the sidebar order.
+        let shouldMoveToFront = messageToPersist.sender == "user"
+            && self
+                .messageDao
+                .getMessageByTimestamp(chatId, messageToPersist.timestamp)?
+                .is_none();
         let messageEntity =
             MessageEntity::fromChatMessage(chatId.to_string(), messageToPersist.clone(), 0, 0);
         self.messageDao.insertMessage(messageEntity)?;
@@ -840,7 +847,12 @@ impl ChatHistoryManager {
                 &messageToPersist.parts,
             ),
         )?;
-        self.touchChatMetadata(chatId)?;
+        if shouldMoveToFront {
+            self.chatDao.moveChatToFront(chatId, currentTimeMillis())?;
+            self.recordChatMetadata(chatId)?;
+        } else {
+            self.touchChatMetadata(chatId)?;
+        }
         self.recordMessageSnapshot(chatId, messageToPersist.timestamp)?;
         Ok(messageToPersist)
     }
@@ -1185,18 +1197,9 @@ impl ChatHistoryManager {
             }
             self.recordMessageSnapshot(&chatId, messageTimestamp)?;
         } else {
-            let messageTimestamp = message.timestamp;
-            let parts = message.parts.clone();
-            let messageEntity = MessageEntity::fromChatMessage(chatId.clone(), message, 0, 0);
-            self.messageDao.insertMessage(messageEntity)?;
-            self.messagePartDao.replaceParts(
-                &chatId,
-                messageTimestamp,
-                0,
-                messagePartEntities(&chatId, messageTimestamp, 0, &parts),
-            )?;
-            self.touchChatMetadata(&chatId)?;
-            self.recordMessageSnapshot(&chatId, messageTimestamp)?;
+            // Background sends also enter through updateMessage, so share the
+            // insertion path and its new-user-message ordering behavior.
+            self.persistMessageLocked(&chatId, message)?;
         }
         Ok(())
     }

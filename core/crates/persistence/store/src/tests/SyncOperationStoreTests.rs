@@ -245,8 +245,17 @@ fn policy_cache_observes_remote_revocation_and_matches_fresh_replay() {
 fn repeated_domain_queries_do_not_rescan_large_history() {
     let storage = Arc::new(MemoryStorageHost::default());
     let store = SyncOperationStore::new(storage.clone(), "large-history");
-    let history = (1..=5000).map(|sequence| operationFromOrigin("peer", sequence,
-        "message", &sequence.to_string(), "upsert", json!({"content": "x".repeat(512)})))
+    let history = (1..=5000)
+        .map(|sequence| {
+            operationFromOrigin(
+                "peer",
+                sequence,
+                "message",
+                &sequence.to_string(),
+                "upsert",
+                json!({"content": "x".repeat(512)}),
+            )
+        })
         .collect::<Vec<_>>();
     store.appendOperations(&history).unwrap();
     let mut policy = operationFromOrigin("peer", 5001, "command", "policy", "apply", json!({}));
@@ -755,3 +764,64 @@ fn stress_ultra_compacts_many_entities_without_cross_entity_loss() {
         .filter(|operation| operation.operation == "upsert")
         .all(|operation| operation.payload["round"] == updateRounds - 1));
 }
+
+/// Builds canonical structured preference identities, independent of plaintext payloads.
+fn preferenceOperation(origin: &str, sequence: i64, path: Value) -> SyncOperation {
+    let entityId = if path.as_array().unwrap().is_empty() {
+        json!([
+            "runtime/config/preferences/model_configs.preferences.json",
+            "provider_DEEPSEEK"
+        ])
+    } else {
+        json!([
+            "runtime/config/preferences/model_configs.preferences.json",
+            "provider_DEEPSEEK",
+            path
+        ])
+    };
+    let mut op = operationFromOrigin(
+        origin,
+        sequence,
+        "model_configs",
+        &entityId.to_string(),
+        "set",
+        Value::Null,
+    );
+    op.domain = "preferences".to_string();
+    op
+}
+
+#[test]
+fn compact_preferences_discards_descendants_superseded_by_parent_replacement() {
+    let parent =
+        json!([{"kind": "field", "value": "models"}, {"kind": "item", "value": "old-model"}]);
+    let child = json!([{"kind": "field", "value": "models"}, {"kind": "item", "value": "old-model"}, {"kind": "field", "value": "capabilitiesOverride"}]);
+    let sibling = json!([{"kind": "field", "value": "apiKey"}]);
+    let compacted = compactSyncOperations(vec![
+        preferenceOperation("android", 1, parent.clone()),
+        preferenceOperation("android", 2, child.clone()),
+        preferenceOperation("android", 3, sibling),
+        preferenceOperation("android", 4, parent),
+        preferenceOperation("android", 5, child),
+    ]);
+    assert_eq!(sequences(&compacted), vec![3, 4, 5]);
+}
+
+#[test]
+fn compact_preferences_preserves_other_origins_and_edits_after_entry_replacement() {
+    let child = json!([{"kind": "field", "value": "apiKey"}]);
+    let compacted = compactSyncOperations(vec![
+        preferenceOperation("android", 1, child.clone()),
+        preferenceOperation("windows", 2, child.clone()),
+        preferenceOperation("android", 3, json!([])),
+        preferenceOperation("android", 4, child),
+    ]);
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|op| (op.originDeviceId.as_str(), op.sequence))
+            .collect::<Vec<_>>(),
+        vec![("windows", 2), ("android", 3), ("android", 4)]
+    );
+}
+

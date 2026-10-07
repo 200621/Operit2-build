@@ -1237,7 +1237,11 @@ impl CoreNodeRouter {
                 request.requestId.0, streamId, route.methodName, self.localNodeId, targetNodeId
             ),
         );
-        self.watchBindingNode(targetNodeId, request, originNodeId).await
+        // A response is a logical watch too: opening during peer admission or
+        // losing its physical connection must not permanently end the UI stream.
+        // The producer's explicit Completed event remains terminal (unlike a
+        // StateFlow segment completing when it needs to be rebound).
+        self.watchBindingFlow(bindingKey, request, originNodeId, None)
     }
 
     /// Opens one push on an explicit target CoreNode.
@@ -1503,6 +1507,7 @@ impl CoreNodeRouter {
     ) {
         let requestId = request.requestId.0.clone();
         let propertyName = request.propertyName.clone();
+        let isEmbeddedStream = request.target == CORE_STREAM_TARGET;
         let mut segmentCount = 0_u64;
         let mut initialSnapshotForwarded = false;
         let (changes, mut routeChanges) = tokio::sync::mpsc::channel(1);
@@ -1607,6 +1612,7 @@ impl CoreNodeRouter {
                 ),
             );
             let mut firstEventLogged = false;
+            let mut peerChangedSinceOpen = false;
 
             loop {
                 tokio::select! {
@@ -1627,6 +1633,11 @@ impl CoreNodeRouter {
                         if matches!(peerChange, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
                             break 'outer;
                         }
+                        // Connection replacement can be announced before the
+                        // old watch delivers EOF, without changing its owner.
+                        // Remember that evidence rather than consuming it and
+                        // then waiting forever for another notification at EOF.
+                        peerChangedSinceOpen = true;
                         // Lagged notifications also require a fresh route check.
                         if !self.bindingStillCurrent(&bindingKey, &binding) {
                             break;
@@ -1669,6 +1680,13 @@ impl CoreNodeRouter {
                             );
                         }
                         if event.kind == CoreEventKind::Completed {
+                            if isEmbeddedStream {
+                                if self.bindingStillCurrent(&bindingKey, &binding) {
+                                    let _ = sender.send(event);
+                                    break 'outer;
+                                }
+                                break;
+                            }
                             AppLogger::e(
                                 "CoreNodeRouter",
                                 &format!(
@@ -1743,6 +1761,7 @@ impl CoreNodeRouter {
                 }
             }
             if self.bindingStillCurrent(&bindingKey, &binding)
+                && !(isEmbeddedStream && peerChangedSinceOpen)
                 && self
                     .waitForBindingFlowRetryOrCancel(&mut cancelReceiver, &mut routeChanges, &mut peerChanges)
                     .await
@@ -4617,6 +4636,114 @@ mod tests {
         peer.close();
     }
 
+    /// A failed open must not become a permanently completed embedded response.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embedded_binding_watch_recovers_after_initial_open_failure() {
+        assertEmbeddedWatchRecovery(true, false).await;
+    }
+
+    /// A transport EOF is not the producer's explicit Completed event.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embedded_binding_watch_recovers_after_transport_closes() {
+        assertEmbeddedWatchRecovery(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embedded_binding_watch_recovers_when_peer_change_precedes_eof() {
+        assertEmbeddedWatchRecovery(false, true).await;
+    }
+
+    async fn assertEmbeddedWatchRecovery(failFirstOpen: bool, peerChangeBeforeEof: bool) {
+        let _guard = routeTestGlobalLock().lock().await;
+        installTestRuntimeScheduler();
+        let local = "embedded-recovery-client";
+        let remote = "embedded-recovery-owner";
+        let chatId = "embedded-recovery-chat";
+        let streamId = "embedded-recovery-stream";
+        let router = testCoreNodeRouter(local, remote, chatId);
+        let endpoint = TestSpaceEndpoint::new();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let (attempts, mut attempted) = tokio::sync::mpsc::unbounded_channel();
+        let (segments, mut opened) = tokio::sync::mpsc::unbounded_channel();
+        endpoint.streamPool.adoptAll(vec![operit_link::CoreStreamAttachment {
+            streamId: streamId.into(),
+            source: Arc::new(CoreStreamSource::new({
+                let opens = opens.clone();
+                move |request| {
+                    let attempt = opens.fetch_add(1, Ordering::SeqCst);
+                    attempts.send(attempt).unwrap();
+                    if failFirstOpen && attempt == 0 {
+                        return Err(CoreLinkError::new("CORE_NODE_UNREACHABLE", "simulated opening race"));
+                    }
+                    let (sender, receiver) = CoreEventStream::channel();
+                    segments.send((request, sender)).unwrap();
+                    Ok(receiver)
+                }
+            })),
+        }]);
+        let peer = TestPeerService::new(local.into(), remote.into(), endpoint.clone());
+        router.installNodeServices(NodeServices::new(peer.clone())).unwrap();
+        let request = CoreWatchRequest::new(
+            "embedded-recovery-watch", CORE_STREAM_TARGET, "openCoreStream",
+            CoreValue::Map(BTreeMap::from([
+                ("streamId".into(), CoreValue::String(streamId.into())),
+                (CORE_ROUTE_STREAM_SOURCE_MODE_ARGUMENT.into(), CoreValue::String("watch".into())),
+                (CORE_ROUTE_STREAM_SOURCE_METHOD_ARGUMENT.into(), CoreValue::String("chatMessagesFlow".into())),
+                (CORE_ROUTE_STREAM_SOURCE_ARGS_ARGUMENT.into(), CoreValue::Map(BTreeMap::from([
+                    ("chatId".into(), CoreValue::String(chatId.into())),
+                ]))),
+            ])),
+        );
+        let mut watch = router.watchSpace(request).await.expect("logical watch must survive an opening race");
+        tokio::time::timeout(Duration::from_secs(5), attempted.recv()).await.unwrap().unwrap();
+        if !failFirstOpen {
+            let (request, sender) = tokio::time::timeout(Duration::from_secs(5), opened.recv()).await.unwrap().unwrap();
+            sender.send(CoreEvent {
+                requestId: Some(request.requestId), target: request.target,
+                propertyName: request.propertyName, kind: CoreEventKind::Changed,
+                value: CoreValue::String("before disconnect".into()),
+            }).unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().unwrap();
+            assert_eq!(event.value, CoreValue::String("before disconnect".into()));
+            if peerChangeBeforeEof {
+                peer.attach(endpoint.clone());
+                // The router's biased select consumes peer evidence before
+                // forwarding this event; close only after it was forwarded.
+                sender.send(CoreEvent {
+                    requestId: None, target: CORE_STREAM_TARGET.into(),
+                    propertyName: "openCoreStream".into(), kind: CoreEventKind::Changed,
+                    value: CoreValue::String("still connected".into()),
+                }).unwrap();
+                let event = tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().unwrap();
+                assert_eq!(event.value, CoreValue::String("still connected".into()));
+            }
+            drop(sender); // Physical connection closes without a producer Completed event.
+        }
+        // The same peer can replace a connection without changing the persisted owner.
+        if !peerChangeBeforeEof {
+            peer.attach(endpoint);
+        }
+        let (request, sender) = tokio::time::timeout(Duration::from_secs(5), opened.recv())
+            .await.expect("embedded watch must reopen after peer recovery").unwrap();
+        sender.send(CoreEvent {
+            requestId: Some(request.requestId.clone()), target: request.target.clone(),
+            propertyName: request.propertyName.clone(), kind: CoreEventKind::Changed,
+            value: CoreValue::String("after reconnect".into()),
+        }).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().unwrap();
+        assert_eq!(event.value, CoreValue::String("after reconnect".into()));
+        sender.send(CoreEvent {
+            requestId: Some(request.requestId), target: request.target,
+            propertyName: request.propertyName, kind: CoreEventKind::Completed,
+            value: CoreValue::Null,
+        }).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().unwrap();
+        assert_eq!(event.kind, CoreEventKind::Completed);
+        assert!(tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().is_none());
+        assert_eq!(opens.load(Ordering::SeqCst), 2, "normal completion must not reopen the producer");
+        peer.close();
+    }
+
     /// Verifies an async annotation wrapper routes public Rust calls to the selected remote Core.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rust_internal_annotated_call_routes_when_binding_owner_is_remote() {
@@ -4851,7 +4978,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn routed_real_chat_messages_flow_embedded_stream_receives_live_chunks_after_open() {
+    async fn routed_real_chat_messages_flow_embedded_stream_replays_history_and_receives_live_chunks() {
         let _globalGuard = routeTestGlobalLock().lock().await;
         installTestRuntimeScheduler();
         let localNodeId = "core-node-real-chat-live-client".to_string();
@@ -4876,6 +5003,7 @@ mod tests {
         let liveStream = source
             .publishLiveChatMessageStream(&chatId, "chat-message-stream:real-chat-live-route-test")
             .await;
+        liveStream.emit_chunk("already streaming before joining".to_string());
         let messages = waitForRoutedChatMessages(&routedFlow).await;
         let stream = messages
             .iter()
@@ -4894,17 +5022,28 @@ mod tests {
                 stream.descriptor.args.clone(),
             ))
             .expect("real live embedded ChatMessage stream must reopen through CoreNodeRouter");
-        liveStream.emit_chunk("hello after live open".to_string());
-        liveStream.close();
         let reset = receiveEvent(&mut openedStream).await;
         assert_eq!(reset.kind, CoreEventKind::Changed);
         let resetEvent: MarkdownStreamEvent =
             operit_link::fromCoreValue(reset.value).expect("Markdown reset event must decode");
         assert_eq!(resetEvent.eventType, "reset");
-        let chunk = receiveEvent(&mut openedStream).await;
-        assert_eq!(chunk.kind, CoreEventKind::Changed);
-        let event: MarkdownStreamEvent =
-            operit_link::fromCoreValue(chunk.value).expect("Markdown chunk event must decode");
+        let replay = receiveEvent(&mut openedStream).await;
+        let replayEvent: MarkdownStreamEvent = operit_link::fromCoreValue(replay.value).unwrap();
+        assert_eq!(replayEvent.eventType, "chunk");
+        assert_eq!(replayEvent.value.as_deref(), Some("already streaming before joining"));
+        // Emit only after replay arrived, so this verifies a live subscription,
+        // not just buffered chunks collected after an already-completed turn.
+        liveStream.emit_chunk("hello after live open".to_string());
+        liveStream.close();
+        let event: MarkdownStreamEvent = loop {
+            let chunk = tokio::time::timeout(Duration::from_secs(5), openedStream.recv())
+                .await.unwrap().unwrap();
+            assert_eq!(chunk.kind, CoreEventKind::Changed);
+            let event: MarkdownStreamEvent = operit_link::fromCoreValue(chunk.value).unwrap();
+            if event.eventType == "chunk" {
+                break event;
+            }
+        };
         assert_eq!(
             event.chatId,
             "chat-message-stream:real-chat-live-route-test"

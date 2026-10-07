@@ -472,9 +472,9 @@ MessageParseResult parseMessageContent(String content) {
   for (var index = 0; index < matches.length; index++) {
     final match = matches[index].match;
     final startIndex = match.start;
-    final id = match.group(1)!;
-    final filename = match.group(2)!;
-    final type = match.group(3)!;
+    final id = decodeChatXmlText(match.group(1)!);
+    final filename = decodeChatXmlText(match.group(2)!);
+    final type = decodeChatXmlText(match.group(3)!);
     final size = _parseLong(match.group(4));
     final attachmentContent = decodeChatXmlText(match.group(5) ?? '');
     final attachment = AttachmentData(
