@@ -790,20 +790,26 @@ Map<String, String> _rustupProxyEnvironmentFromCargo(File cargo) {
   }
   final cargoHome = binDir.parent;
   final root = cargoHome.parent;
-  final derived = <String, String>{'CARGO_HOME': cargoHome.path};
+  // Distro rustup shims (for example /usr/bin/cargo next to /usr/bin/rustup)
+  // resolve to system directories; deriving CARGO_HOME from them poisons the
+  // environment with paths like /usr. Only trust a full rustup-managed layout
+  // where the sibling rustup home also exists.
   for (final name in <String>['rustup', '.rustup']) {
     final rustupHome = Directory.fromUri(root.uri.resolve('$name/'));
     if (!rustupHome.existsSync()) {
       continue;
     }
-    derived['RUSTUP_HOME'] = rustupHome.path;
+    final derived = <String, String>{
+      'CARGO_HOME': cargoHome.path,
+      'RUSTUP_HOME': rustupHome.path,
+    };
     final toolchain = _rustupDefaultToolchain(rustupHome);
     if (toolchain != null) {
       derived['RUSTUP_TOOLCHAIN'] = toolchain;
     }
-    break;
+    return derived;
   }
-  return derived;
+  return const <String, String>{};
 }
 
 String? _rustupDefaultToolchain(Directory rustupHome) {
