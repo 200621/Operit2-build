@@ -21,7 +21,9 @@ impl TuiLanguage {
             .getCurrentLanguage()
             .map_err(|error| error.to_string())?;
         let language_code = LocaleUtils::getCurrentLanguage(context, &saved_language)?;
-        Self::from_language_code(&language_code)
+        // Startup must tolerate unsupported system/saved locales; only the
+        // explicit `/language` command reports them as errors.
+        Ok(Self::from_language_code(&language_code).unwrap_or(Self::English))
     }
 
     pub(super) fn from_language_code(language_code: &str) -> Result<Self, String> {
@@ -29,7 +31,7 @@ impl TuiLanguage {
         match resolved.as_str() {
             LanguageCodes::ENGLISH => Ok(Self::English),
             LanguageCodes::CHINESE => Ok(Self::Chinese),
-            _ => Ok(Self::English),
+            _ => Err(format!("unsupported language: {language_code}")),
         }
     }
 

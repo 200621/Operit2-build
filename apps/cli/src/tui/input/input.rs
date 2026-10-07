@@ -186,7 +186,11 @@ impl OperitTui {
             .unwrap_or("")
             .trim_end()
             .to_ascii_lowercase();
-        !current.is_empty() && current != suggestions[index].name()
+        let name = suggestions[index].name();
+        // Enter only completes while the buffer is still a prefix of the
+        // suggestion; once values follow (e.g. `/new character Alice `),
+        // remaining option suggestions must not swallow the submission.
+        !current.is_empty() && current != name && name.starts_with(&current)
     }
 
     /// Moves the command suggestion selection up by one row.
