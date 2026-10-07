@@ -383,7 +383,7 @@ impl SystemToolPrompts {
     }
 
     #[allow(non_snake_case)]
-    pub fn generateToolsPromptEn(
+    pub async fn generateToolsPromptEn(
         chat_id: Option<String>,
         has_backend_image_recognition: bool,
         include_memory_tools: bool,
@@ -410,10 +410,11 @@ impl SystemToolPrompts {
             tool_visibility,
             hook_metadata,
         )
+        .await
     }
 
     #[allow(non_snake_case)]
-    pub fn generateToolsPromptEnForHost(
+    pub async fn generateToolsPromptEnForHost(
         chat_id: Option<String>,
         has_backend_image_recognition: bool,
         include_memory_tools: bool,
@@ -449,10 +450,11 @@ impl SystemToolPrompts {
             tool_visibility,
             hook_metadata,
         )
+        .await
     }
 
     #[allow(non_snake_case)]
-    pub fn generateToolsPromptCn(
+    pub async fn generateToolsPromptCn(
         chat_id: Option<String>,
         has_backend_image_recognition: bool,
         include_memory_tools: bool,
@@ -479,10 +481,11 @@ impl SystemToolPrompts {
             tool_visibility,
             hook_metadata,
         )
+        .await
     }
 
     #[allow(non_snake_case)]
-    pub fn generateToolsPromptCnForHost(
+    pub async fn generateToolsPromptCnForHost(
         chat_id: Option<String>,
         has_backend_image_recognition: bool,
         include_memory_tools: bool,
@@ -517,6 +520,7 @@ impl SystemToolPrompts {
             tool_visibility,
             hook_metadata,
         )
+        .await
     }
 
     #[allow(non_snake_case)]
@@ -679,7 +683,7 @@ fn applyToolVisibility(
         .collect()
 }
 
-fn compose_tool_prompt(
+async fn compose_tool_prompt(
     chat_id: Option<String>,
     use_english: bool,
     include_memory_tools: bool,
@@ -714,7 +718,8 @@ fn compose_tool_prompt(
         available_tools,
         metadata,
         on_hook_timeout: None,
-    });
+    })
+    .await;
     let mut prompt = before_context
         .tool_prompt
         .clone()
@@ -723,7 +728,8 @@ fn compose_tool_prompt(
         stage: "filter_tool_prompt_items".to_string(),
         tool_prompt: Some(prompt),
         ..before_context
-    });
+    })
+    .await;
     prompt = filter_context
         .tool_prompt
         .clone()
@@ -732,7 +738,8 @@ fn compose_tool_prompt(
         stage: "after_compose_tool_prompt".to_string(),
         tool_prompt: Some(prompt),
         ..filter_context
-    });
+    })
+    .await;
     let after_available_tools = after_context.available_tools.clone();
     after_context
         .tool_prompt

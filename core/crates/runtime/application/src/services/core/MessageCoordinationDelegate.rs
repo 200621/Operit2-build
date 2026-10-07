@@ -1097,7 +1097,9 @@ impl MessageCoordinationDelegate {
                     chatId: chatId.clone(),
                     roleCardId: CharacterCardManager::DEFAULT_CHARACTER_CARD_ID.to_string(),
                 },
-            ) {
+            )
+            .await
+        {
             Ok(content) => content,
             Err(error) => {
                 self.messageProcessingDelegate

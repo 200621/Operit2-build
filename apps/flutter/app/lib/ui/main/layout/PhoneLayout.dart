@@ -180,10 +180,9 @@ class _PhoneLayoutState extends State<PhoneLayout>
         ),
       ),
       drawerContent: RepaintBoundary(
-        // Only the phone drawer content avoids the system navigation bar;
-        // keep its glass background edge-to-edge and other layouts unchanged.
+        // Keep drawer controls within the system insets while its background
+        // extends beneath both system bars.
         child: SafeArea(
-          top: false,
           left: false,
           right: false,
           child: ValueListenableBuilder<DrawerConversationState>(
@@ -327,7 +326,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
                 // Preserve the drawer subtree when the dismiss barrier changes.
                 key: const ValueKey<String>('phoneDrawerLayer'),
                 left: 0,
-                top: MediaQuery.paddingOf(context).top,
+                top: 0,
                 bottom: 0,
                 width: widget.drawerWidth,
                 child: Transform.translate(

@@ -21,14 +21,25 @@ pub struct MessageProcessingExecution<TController> {
     pub stream: MutableSharedStreamImpl<String>,
 }
 
-pub trait MessageProcessingPlugin {
+pub trait MessageProcessingPlugin: Send + Sync {
     fn id(&self) -> &str;
 
     #[allow(non_snake_case)]
-    fn createExecutionIfMatched(
-        &self,
-        params: &MessageProcessingHookParams,
-    ) -> Option<MessageProcessingExecution<Box<dyn MessageProcessingController + Send + Sync>>>;
+    fn createExecutionIfMatched<'a>(
+        &'a self,
+        params: &'a MessageProcessingHookParams,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<
+                        MessageProcessingExecution<
+                            Box<dyn MessageProcessingController + Send + Sync>,
+                        >,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
 }
 
 pub struct MessageProcessingPluginRegistry;
@@ -63,7 +74,7 @@ impl MessageProcessingPluginRegistry {
     }
 
     #[allow(non_snake_case)]
-    pub fn createExecutionIfMatched(
+    pub async fn createExecutionIfMatched(
         params: MessageProcessingHookParams,
     ) -> Option<MessageProcessingExecution<Box<dyn MessageProcessingController + Send + Sync>>>
     {
@@ -85,7 +96,7 @@ impl MessageProcessingPluginRegistry {
         );
         for plugin in plugins {
             let pluginId = plugin.id().to_string();
-            let execution = plugin.createExecutionIfMatched(&params);
+            let execution = plugin.createExecutionIfMatched(&params).await;
             if execution.is_some() {
                 ChainLogger::info(
                     PLUGIN_CHAIN,

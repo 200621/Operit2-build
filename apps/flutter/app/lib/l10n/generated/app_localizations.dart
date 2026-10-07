@@ -6163,6 +6163,24 @@ abstract class AppLocalizations {
   /// **'Runtime root and workspace root are required.'**
   String get settingsDataStorageRootsRequired;
 
+  /// No description provided for @storageDirectoryTermuxUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'Termux\'s document provider is not supported for local storage paths. Choose a directory in shared storage (such as Download or Documents) instead of Termux\'s private directory.'**
+  String get storageDirectoryTermuxUnsupported;
+
+  /// No description provided for @storageDirectoryProviderUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'The selected directory cannot be resolved to a supported local storage path. Choose a directory in shared storage (such as Download or Documents), or enter a local path that this app can access.'**
+  String get storageDirectoryProviderUnsupported;
+
+  /// No description provided for @storageDirectorySelectionFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not select a directory: {error}'**
+  String storageDirectorySelectionFailed(String error);
+
   /// No description provided for @settingsDataStorageConfirmTitle.
   ///
   /// In en, this message translates to:

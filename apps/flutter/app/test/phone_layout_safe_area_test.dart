@@ -7,8 +7,9 @@ import 'package:operit2/ui/main/components/DrawerConversationState.dart';
 import 'package:operit2/ui/main/layout/PhoneLayout.dart';
 import 'package:operit2/ui/main/navigation/AppNavigationModels.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
+import 'package:operit2/ui/theme/OperitGlassSurface.dart';
 
-/// Verifies the phone drawer keeps its actions above system navigation controls.
+/// Verifies edge-to-edge drawer backgrounds with safely inset controls.
 void main() {
   for (final animated in <bool>[true, false]) {
     for (final bottomInset in <double>[0, 24, 48, 80]) {
@@ -17,8 +18,11 @@ void main() {
         (tester) async {
           tester.view.physicalSize = const Size(400, 800);
           tester.view.devicePixelRatio = 1;
-          tester.view.padding = FakeViewPadding(bottom: bottomInset);
-          tester.view.viewPadding = FakeViewPadding(bottom: bottomInset);
+          tester.view.padding = FakeViewPadding(top: 24, bottom: bottomInset);
+          tester.view.viewPadding = FakeViewPadding(
+            top: 24,
+            bottom: bottomInset,
+          );
           addTearDown(tester.view.resetPhysicalSize);
           addTearDown(tester.view.resetDevicePixelRatio);
           addTearDown(tester.view.resetPadding);
@@ -77,7 +81,20 @@ void main() {
           drawerOpen.value = true;
           await tester.pumpAndSettle();
 
-          void expectActionsAboveNavigationBar(double inset) {
+          /// Checks surface coverage without moving drawer content under bars.
+          void expectActionsAboveNavigationBar(double inset, double topInset) {
+            final surface = find.descendant(
+              of: find.byKey(const ValueKey<String>('phoneDrawerLayer')),
+              matching: find.byType(OperitGlassSurface),
+            );
+            // The spring can settle with a subpixel horizontal translation.
+            expect(tester.getSize(surface), const Size(300, 800));
+            expect(tester.getRect(surface).top, closeTo(0, 0.1));
+            expect(tester.getRect(surface).bottom, closeTo(800, 0.1));
+            expect(
+              tester.getRect(find.byType(DrawerContent)).top,
+              closeTo(topInset, 0.1),
+            );
             expect(
               tester.getRect(find.byType(DrawerContent)).bottom,
               closeTo(800 - inset, 0.1),
@@ -92,7 +109,7 @@ void main() {
             }
           }
 
-          expectActionsAboveNavigationBar(bottomInset);
+          expectActionsAboveNavigationBar(bottomInset, 24);
           await tester.tap(find.text('包管理'));
           await tester.tap(find.text('设置'));
           await tester.pumpAndSettle();
@@ -104,10 +121,13 @@ void main() {
           // Switching system navigation modes must update the mounted drawer.
           final drawerState = tester.state(find.byType(DrawerContent));
           final updatedInset = bottomInset == 48 ? 24.0 : 48.0;
-          tester.view.padding = FakeViewPadding(bottom: updatedInset);
-          tester.view.viewPadding = FakeViewPadding(bottom: updatedInset);
+          tester.view.padding = FakeViewPadding(top: 36, bottom: updatedInset);
+          tester.view.viewPadding = FakeViewPadding(
+            top: 36,
+            bottom: updatedInset,
+          );
           await tester.pumpAndSettle();
-          expectActionsAboveNavigationBar(updatedInset);
+          expectActionsAboveNavigationBar(updatedInset, 36);
           expect(tester.state(find.byType(DrawerContent)), same(drawerState));
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox.shrink());

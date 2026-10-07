@@ -100,7 +100,7 @@ impl ToolPkgXmlRenderBridge {
 
     /// Renders one XML block through registered ToolPkg hooks.
     #[allow(non_snake_case)]
-    pub fn renderRegisteredXml(
+    pub async fn renderRegisteredXml(
         tagName: String,
         xmlContent: String,
         chatId: Option<String>,
@@ -108,13 +108,13 @@ impl ToolPkgXmlRenderBridge {
         let Some(runtime) = XML_RENDER_RUNTIME.get() else {
             return Value::Null;
         };
-        renderXml(runtime, tagName, xmlContent, chatId)
+        renderXml(runtime, tagName, xmlContent, chatId).await
     }
 }
 
 /// Invokes matching XML render hooks and returns the first handled result.
 #[allow(non_snake_case)]
-fn renderXml(
+async fn renderXml(
     runtime: &ToolPkgBridgeRuntime,
     tagName: String,
     xmlContent: String,
@@ -147,22 +147,24 @@ fn renderXml(
                 ("function", hook.functionName.clone()),
             ],
         );
-        let result = manager.runToolPkgMainHook(
-            &hook.containerPackageName,
-            &hook.functionName,
-            TOOLPKG_EVENT_XML_RENDER,
-            None,
-            Some(&hook.pluginId),
-            hook.functionSource.as_deref(),
-            serde_json::json!({
-                "xmlContent": xmlContent,
-                "tagName": tagName,
-                "chatId": chatId.clone(),
-            }),
-            None,
-            None,
-            None,
-        );
+        let result = manager
+            .runToolPkgMainHook(
+                &hook.containerPackageName,
+                &hook.functionName,
+                TOOLPKG_EVENT_XML_RENDER,
+                None,
+                Some(&hook.pluginId),
+                hook.functionSource.as_deref(),
+                serde_json::json!({
+                    "xmlContent": xmlContent,
+                    "tagName": tagName,
+                    "chatId": chatId.clone(),
+                }),
+                None,
+                None,
+                None,
+            )
+            .await;
         let decoded = match result {
             Ok(raw) => decodeToolPkgHookResult(raw),
             Err(error) => {

@@ -15,6 +15,7 @@ import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../core/snapshot/SnapshotImportUploader.dart';
 import '../../../l10n/generated/app_localizations.dart';
+import '../../common/StorageDirectorySelectionError.dart';
 import '../../common/DeviceSpaceDiscoveryPanel.dart';
 import '../../common/OperitLogoMark.dart';
 import '../../common/RuntimeBootstrapScreen.dart';
@@ -683,28 +684,36 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
     );
   }
 
-  /// Lets the user select the runtime data directory.
-  Future<void> _selectRuntimeRoot() async {
-    final path = await OperitFolderAccess.pickDirectory();
-    if (!mounted || path == null || path.trim().isEmpty) {
-      return;
-    }
-    _runtimeRootController.text = path.trim();
-    setState(() {
-      _setupError = null;
-    });
-  }
+  /// Selects a new runtime root directory.
+  Future<void> _selectRuntimeRoot() =>
+      _selectStorageRoot(_runtimeRootController);
 
-  /// Lets the user select the workspace data directory.
-  Future<void> _selectWorkspaceRoot() async {
-    final path = await OperitFolderAccess.pickDirectory();
-    if (!mounted || path == null || path.trim().isEmpty) {
-      return;
+  /// Selects a new workspace root directory.
+  Future<void> _selectWorkspaceRoot() =>
+      _selectStorageRoot(_workspaceRootController);
+
+  /// Keeps picker failures in the storage UI instead of the unhandled zone.
+  Future<void> _selectStorageRoot(TextEditingController controller) async {
+    try {
+      final path = await OperitFolderAccess.pickDirectory();
+      if (!mounted || path == null || path.trim().isEmpty) {
+        return;
+      }
+      setState(() {
+        controller.text = path.trim();
+        _setupError = null;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _setupError = storageDirectorySelectionErrorMessage(
+          AppLocalizations.of(context)!,
+          error,
+        );
+      });
     }
-    _workspaceRootController.text = path.trim();
-    setState(() {
-      _setupError = null;
-    });
   }
 
   /// Clears storage errors after either editable path changes.
@@ -2379,7 +2388,15 @@ class _AiSetupStoragePage extends StatelessWidget {
               ],
               if (errorText != null) ...<Widget>[
                 const SizedBox(height: 12),
-                CommonNetworkErrorView(errorText: errorText!),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    errorText!,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: colorScheme.error,
+                    ),
+                  ),
+                ),
               ],
             ],
           ),

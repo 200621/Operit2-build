@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use operit_host_api::HostEnvironmentDescriptor;
 use operit_host_api::HostManager::HostManager;
@@ -22,7 +22,7 @@ use operit_tools::tools::ToolRegistration::registerAllTools;
 use operit_tools::tools::ToolResultDataClasses::{stringResultData, ToolResultData};
 use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::{
-    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutionManager, ToolExecutor,
+    AsyncToolExecutor, RegisteredToolExecutor, ToolInvocationFuture, AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutionManager, ToolExecutor,
     ToolParameter, ToolValidationResult,
 };
 use operit_util::ChainLogger::{self, TOOL_CHAIN};
@@ -55,11 +55,63 @@ pub enum ToolRegistrationVisibility {
 #[derive(Clone)]
 pub struct AIToolHandler {
     inner: Arc<Mutex<AIToolHandlerState>>,
-    executorAvailability: Arc<Condvar>,
+    executorAvailability: Arc<tokio::sync::Notify>,
+}
+
+/// Returns a taken executor on normal completion, cancellation or panic unwinding.
+struct ToolExecutorLease {
+    name: String,
+    executor: Option<RegisteredToolExecutor>,
+    state: Arc<Mutex<AIToolHandlerState>>,
+    available: Arc<tokio::sync::Notify>,
+}
+
+impl std::ops::Deref for ToolExecutorLease {
+    type Target = RegisteredToolExecutor;
+    /// Borrows the executor while its registry lease remains owned.
+    fn deref(&self) -> &Self::Target {
+        self.executor
+            .as_ref()
+            .expect("tool executor lease must remain owned")
+    }
+}
+
+impl std::ops::DerefMut for ToolExecutorLease {
+    /// Mutably borrows the executor while its registry lease remains owned.
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.executor
+            .as_mut()
+            .expect("tool executor lease must remain owned")
+    }
+}
+
+impl Drop for ToolExecutorLease {
+    /// Restores the exact executor and wakes queued invocations after releasing the registry lock.
+    fn drop(&mut self) {
+        let executor = self
+            .executor
+            .take()
+            .expect("tool executor lease must remain owned");
+        {
+            let mut state = self.state.lock().expect("AIToolHandler mutex poisoned");
+            assert!(
+                state.executingTools.remove(&self.name),
+                "tool must remain marked executing"
+            );
+            assert!(
+                state
+                    .availableTools
+                    .insert(self.name.clone(), executor)
+                    .is_none(),
+                "tool executor must not be replaced during execution"
+            );
+        }
+        self.available.notify_waiters();
+    }
 }
 
 pub struct AIToolHandlerState {
-    availableTools: BTreeMap<String, Box<dyn ToolExecutor>>,
+    availableTools: BTreeMap<String, RegisteredToolExecutor>,
     executingTools: BTreeSet<String>,
     toolVisibility: BTreeMap<String, ToolRegistrationVisibility>,
     unavailableBuiltinTools: BTreeMap<BuiltinToolName, String>,
@@ -143,7 +195,7 @@ impl AIToolHandler {
                 toolPermissionSystem: ToolPermissionSystem::getInstance(),
                 packageManager: None,
             })),
-            executorAvailability: Arc::new(Condvar::new()),
+            executorAvailability: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -260,7 +312,7 @@ impl AIToolHandler {
 
     /// Returns the first hook decision for a tool call before execution begins.
     #[allow(non_snake_case)]
-    pub fn checkToolInterception(&self, tool: &AITool) -> AIToolHookDecision {
+    pub async fn checkToolInterception(&self, tool: &AITool) -> AIToolHookDecision {
         let hooks = self
             .inner
             .lock()
@@ -268,7 +320,7 @@ impl AIToolHandler {
             .hooks
             .clone();
         for hook in hooks {
-            match hook.onToolCallIntercept(tool) {
+            match hook.onToolCallInterceptAsync(tool).await {
                 AIToolHookDecision::Allow => {}
                 decision @ AIToolHookDecision::Block(_) => return decision,
             }
@@ -429,10 +481,10 @@ impl AIToolHandler {
 
     /// Registers one statically declared built-in tool with explicit visibility.
     #[allow(non_snake_case)]
-    pub fn registerBuiltinTool(
+    pub fn registerBuiltinTool<E: Into<RegisteredToolExecutor>>(
         &mut self,
         name: BuiltinToolName,
-        executor: Box<dyn ToolExecutor>,
+        executor: E,
         visibility: ToolRegistrationVisibility,
     ) {
         let toolName = name.as_str().to_string();
@@ -447,7 +499,10 @@ impl AIToolHandler {
         );
         guard.availableTools.insert(
             toolName.clone(),
-            Box::new(ContractCheckedBuiltinToolExecutor { name, executor }),
+            RegisteredToolExecutor::Asynchronous(Box::new(ContractCheckedBuiltinToolExecutor {
+                name,
+                executor: executor.into(),
+            })),
         );
         guard.toolVisibility.insert(toolName, visibility);
     }
@@ -484,9 +539,28 @@ impl AIToolHandler {
             "Built-in tools must use registerBuiltinTool: {name}"
         );
         let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
-        guard.availableTools.insert(name.clone(), executor);
+        guard
+            .availableTools
+            .insert(name.clone(), RegisteredToolExecutor::Synchronous(executor));
         guard.toolVisibility.insert(name, visibility);
     }
+
+    /// Registers a public tool with an explicitly asynchronous execution contract.
+    pub fn registerAsyncTool(&mut self, name: String, executor: Box<dyn AsyncToolExecutor>) {
+        assert!(
+            BuiltinToolName::from_name(&name).is_none(),
+            "Built-in tools must use their typed registration"
+        );
+        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+        guard
+            .availableTools
+            .insert(name.clone(), RegisteredToolExecutor::Asynchronous(executor));
+        guard
+            .toolVisibility
+            .insert(name, ToolRegistrationVisibility::PUBLIC);
+    }
+
+
 
     /// Returns the configured visibility for one tool.
     #[allow(non_snake_case)]
@@ -541,38 +615,40 @@ impl AIToolHandler {
     }
 
     /// Acquires one named executor, waiting for an in-flight invocation of that same tool to finish.
-    fn takeToolExecutorForExecution(&self, toolName: &str) -> Option<Box<dyn ToolExecutor>> {
-        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+    async fn takeToolExecutorForExecution(&self, toolName: &str) -> Option<ToolExecutorLease> {
         loop {
-            if let Some(executor) = guard.availableTools.remove(toolName) {
-                assert!(
-                    guard.executingTools.insert(toolName.to_string()),
-                    "Tool executor was already marked executing: {toolName}"
-                );
-                return Some(executor);
+            let notified = self.executorAvailability.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+                if let Some(executor) = guard.availableTools.remove(toolName) {
+                    assert!(
+                        guard.executingTools.insert(toolName.to_owned()),
+                        "Tool executor was already marked executing: {toolName}"
+                    );
+                    return Some(ToolExecutorLease {
+                        name: toolName.to_owned(),
+                        executor: Some(executor),
+                        state: self.inner.clone(),
+                        available: self.executorAvailability.clone(),
+                    });
+                }
+                if !guard.executingTools.contains(toolName) {
+                    return None;
+                }
             }
-            if !guard.executingTools.contains(toolName) {
-                return None;
-            }
-            guard = self
-                .executorAvailability
-                .wait(guard)
-                .expect("AIToolHandler mutex poisoned while waiting for tool executor");
+            notified.await;
         }
     }
 
     /// Restores one completed executor and wakes calls queued for the same tool name.
-    fn restoreToolExecutorAfterExecution(&self, toolName: String, executor: Box<dyn ToolExecutor>) {
-        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
-        assert!(
-            guard.executingTools.remove(&toolName),
-            "Tool executor was not marked executing: {toolName}"
+    fn restoreToolExecutorAfterExecution(&self, toolName: String, executor: ToolExecutorLease) {
+        assert_eq!(
+            toolName, executor.name,
+            "the restored tool must own this lease"
         );
-        assert!(
-            guard.availableTools.insert(toolName, executor).is_none(),
-            "Tool executor was unexpectedly registered while executing"
-        );
-        self.executorAvailability.notify_all();
+        drop(executor);
     }
 
     /// Ensures default or package tools are registered, then reports whether a tool exists.
@@ -677,7 +753,7 @@ impl AIToolHandler {
                     ))),
                 );
             } else {
-                self.registerTool(
+                self.registerAsyncTool(
                     toolName,
                     Box::new(PackageToolExecutor::new(
                         toolPackage.clone(),
@@ -920,7 +996,7 @@ impl AIToolHandler {
             return None;
         }
 
-        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name) else {
+        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name).await else {
             ChainLogger::warn(
                 TOOL_CHAIN,
                 "tool.stream.not_registered",
@@ -953,7 +1029,7 @@ impl AIToolHandler {
                                             ("effect", format!("{:?}", accessSpec.effect)),
                                         ],
                                     );
-                                    executor.invokeAndStream(tool)
+                                    executor.invokeAndStreamAsync(tool).await
                                 }
                                 Err(errorResult) => vec![errorResult],
                             }
@@ -971,7 +1047,7 @@ impl AIToolHandler {
                             ("access", "direct".to_string()),
                         ],
                     );
-                    executor.invokeAndStream(tool)
+                    executor.invokeAndStreamAsync(tool).await
                 }
             }
         } else {
@@ -1070,7 +1146,7 @@ impl AIToolHandler {
 
     /// Resolves and directly executes a non-AI tool request through the registered tool chain.
     #[allow(non_snake_case)]
-    pub fn executeTool(&mut self, tool: AITool) -> ToolResult {
+    pub async fn executeTool(&mut self, tool: AITool) -> ToolResult {
         ChainLogger::info(
             TOOL_CHAIN,
             "tool.execute.request",
@@ -1080,7 +1156,7 @@ impl AIToolHandler {
             ],
         );
         self.notifyToolCallRequested(&tool);
-        let interception = self.checkToolInterception(&tool);
+        let interception = self.checkToolInterception(&tool).await;
         if let AIToolHookDecision::Block(_) = interception {
             let result = Self::toolInterceptionResult(&tool, interception);
             self.notifyToolExecutionResult(&tool, &result);
@@ -1088,7 +1164,7 @@ impl AIToolHandler {
             return result;
         }
         self.getToolExecutorOrActivate(&tool.name);
-        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name) else {
+        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name).await else {
             let notFoundResult = ToolResult {
                 toolName: tool.name.clone(),
                 success: false,
@@ -1131,7 +1207,7 @@ impl AIToolHandler {
             "tool.execute.start",
             &[("tool", tool.name.clone())],
         );
-        let collected = executor.invokeAndStream(&tool);
+        let collected = executor.invokeAndStreamAsync(&tool).await;
         if collected.is_empty() {
             ChainLogger::error(
                 TOOL_CHAIN,
@@ -1191,7 +1267,7 @@ impl AIToolHandler {
 
     #[allow(non_snake_case)]
     /// Removes all registered executors and returns their ownership to the caller.
-    pub fn takeExecutors(&mut self) -> BTreeMap<String, Box<dyn ToolExecutor>> {
+    pub fn takeExecutors(&mut self) -> BTreeMap<String, RegisteredToolExecutor> {
         let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
         if !guard.defaultToolsRegistered {
             drop(guard);
@@ -1203,7 +1279,7 @@ impl AIToolHandler {
 
     #[allow(non_snake_case)]
     /// Restores a previously removed executor registry.
-    pub fn restoreExecutors(&mut self, executors: BTreeMap<String, Box<dyn ToolExecutor>>) {
+    pub fn restoreExecutors(&mut self, executors: BTreeMap<String, RegisteredToolExecutor>) {
         self.inner
             .lock()
             .expect("AIToolHandler mutex poisoned")
@@ -1310,45 +1386,51 @@ impl JsExecutionHost for AIToolHandler {
     }
 
     /// Executes an SDK JavaScript tool request through the registered Operit tool chain.
-    fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult {
-        let tool = AITool {
-            name: request.qualified_tool_name(),
-            parameters: request
-                .parameters
-                .into_iter()
-                .map(|(name, value)| ToolParameter {
-                    name,
-                    value: match value {
-                        serde_json::Value::Null => String::new(),
-                        serde_json::Value::String(value) => value,
-                        value => value.to_string(),
-                    },
-                })
-                .collect(),
-        };
-        let mut handler = self.clone();
-        let result = handler.executeTool(tool);
-        let data = match result.result {
-            ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
-            ToolResultData::StringResultData(data) => {
-                JsToolCallResultData::Value(serde_json::Value::String(data.value))
+    fn execute_tool_call(
+        &self,
+        request: JsToolCallRequest,
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsToolCallResult> {
+        let host = self.clone();
+        Box::pin(async move {
+            let tool = AITool {
+                name: request.qualified_tool_name(),
+                parameters: request
+                    .parameters
+                    .into_iter()
+                    .map(|(name, value)| ToolParameter {
+                        name,
+                        value: match value {
+                            serde_json::Value::Null => String::new(),
+                            serde_json::Value::String(value) => value,
+                            value => value.to_string(),
+                        },
+                    })
+                    .collect(),
+            };
+            let mut handler = host;
+            let result = handler.executeTool(tool).await;
+            let data = match result.result {
+                ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
+                ToolResultData::StringResultData(data) => {
+                    JsToolCallResultData::Value(serde_json::Value::String(data.value))
+                }
+                ToolResultData::BooleanResultData(data) => {
+                    JsToolCallResultData::Value(serde_json::Value::Bool(data.value))
+                }
+                ToolResultData::IntResultData(data) => JsToolCallResultData::Value(
+                    serde_json::Value::Number(serde_json::Number::from(data.value)),
+                ),
+                data => JsToolCallResultData::Value(
+                    serde_json::from_str(&data.toJson())
+                        .expect("ToolResultData JSON conversion must succeed"),
+                ),
+            };
+            JsToolCallResult {
+                success: result.success,
+                data,
+                error: result.error,
             }
-            ToolResultData::BooleanResultData(data) => {
-                JsToolCallResultData::Value(serde_json::Value::Bool(data.value))
-            }
-            ToolResultData::IntResultData(data) => JsToolCallResultData::Value(
-                serde_json::Value::Number(serde_json::Number::from(data.value)),
-            ),
-            data => JsToolCallResultData::Value(
-                serde_json::from_str(&data.toJson())
-                    .expect("ToolResultData JSON conversion must succeed"),
-            ),
-        };
-        JsToolCallResult {
-            success: result.success,
-            data,
-            error: result.error,
-        }
+        })
     }
 
     /// Returns the current host language.
@@ -1593,13 +1675,43 @@ pub struct FnToolExecutor {
     pub effect: ToolEffect,
 }
 
+/// Executes a proxy whose nested package invocation returns an asynchronous result.
+pub struct AsyncFnToolExecutor {
+    pub invoke: Arc<
+        dyn Fn(AITool) -> operit_plugin_sdk::javascript::JsExecutionCompletion<ToolResult>
+            + Send
+            + Sync,
+    >,
+    pub validate: Arc<dyn Fn(&AITool) -> ToolValidationResult + Send + Sync>,
+    pub effect: ToolEffect,
+}
+
+impl AsyncToolExecutor for AsyncFnToolExecutor {
+    /// Validates the proxy request before beginning execution.
+    fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
+        (self.validate)(tool)
+    }
+    /// Declares the proxy's access effect.
+    fn accessSpec(&self, _tool: &AITool) -> Result<ToolAccessSpec, String> {
+        Ok(ToolAccessSpec {
+            effect: self.effect,
+            boundary: ToolBoundary::None,
+        })
+    }
+    /// Awaits the nested invocation on its registered asynchronous path.
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        let invocation = (self.invoke)(tool.clone());
+        Box::pin(async move { vec![invocation.await] })
+    }
+}
+
 /// Enforces the registered name and successful result contract for one built-in executor.
 struct ContractCheckedBuiltinToolExecutor {
     name: BuiltinToolName,
-    executor: Box<dyn ToolExecutor>,
+    executor: RegisteredToolExecutor,
 }
 
-impl ToolExecutor for ContractCheckedBuiltinToolExecutor {
+impl AsyncToolExecutor for ContractCheckedBuiltinToolExecutor {
     /// Validates parameters only for the exact built-in name bound during registration.
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
         assert_eq!(
@@ -1621,33 +1733,35 @@ impl ToolExecutor for ContractCheckedBuiltinToolExecutor {
     }
 
     /// Verifies every successful result emitted by the wrapped built-in executor.
-    fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult> {
-        assert_eq!(
-            tool.name,
-            self.name.as_str(),
-            "Built-in executor received a different tool name"
-        );
-        let results = self.executor.invokeAndStream(tool);
-        for result in &results {
-            if self.name != BuiltinToolName::PackageProxy {
-                assert_eq!(
-                    result.toolName,
-                    self.name.as_str(),
-                    "Built-in executor emitted a result for a different tool name"
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(
+                tool.name,
+                self.name.as_str(),
+                "Built-in executor received a different tool name"
+            );
+            let results = self.executor.invokeAndStreamAsync(tool).await;
+            for result in &results {
+                if self.name != BuiltinToolName::PackageProxy {
+                    assert_eq!(
+                        result.toolName,
+                        self.name.as_str(),
+                        "Built-in executor emitted a result for a different tool name"
+                    );
+                }
+                assert!(
+                    !result.success || self.name.accepts_runtime_result(&result.result),
+                    "Built-in executor emitted an incompatible successful result: {}",
+                    self.name
+                );
+                assert!(
+                    result.success || result.error.is_some(),
+                    "Built-in executor emitted a failed result without an error: {}",
+                    self.name
                 );
             }
-            assert!(
-                !result.success || self.name.accepts_runtime_result(&result.result),
-                "Built-in executor emitted an incompatible successful result: {}",
-                self.name
-            );
-            assert!(
-                result.success || result.error.is_some(),
-                "Built-in executor emitted a failed result without an error: {}",
-                self.name
-            );
-        }
-        results
+            results
+        })
     }
 }
 

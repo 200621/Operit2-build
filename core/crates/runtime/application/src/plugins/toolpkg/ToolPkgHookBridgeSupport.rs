@@ -37,3 +37,43 @@ impl ToolPkgBridgeRuntime {
         self.host_manager.clone()
     }
 }
+
+/// Enqueues notifications in order on one Host-owned asynchronous consumer.
+pub fn scheduleToolPkgNotification(
+    task_name: &'static str,
+    task: impl FnOnce() -> operit_plugin_sdk::javascript::JsExecutionFuture<()> + Send + 'static,
+) {
+    type Notification =
+        Box<dyn FnOnce() -> operit_plugin_sdk::javascript::JsExecutionFuture<()> + Send>;
+    static QUEUE: std::sync::OnceLock<
+        Result<tokio::sync::mpsc::UnboundedSender<Notification>, String>,
+    > = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Notification>();
+        operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost()
+            .scheduleHostRuntimeAsyncTask(
+                "operit-toolpkg-notifications",
+                Box::new(move || {
+                    Box::pin(async move {
+                        while let Some(notification) = receiver.recv().await {
+                            notification().await;
+                        }
+                    })
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(sender)
+    });
+    let result = match queue {
+        Ok(sender) => sender
+            .send(Box::new(task))
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.clone()),
+    };
+    if let Err(error) = result {
+        operit_util::AppLogger::AppLogger::e(
+            "ToolPkgHookBridge",
+            &format!("enqueue {task_name} failed: {error}"),
+        );
+    }
+}

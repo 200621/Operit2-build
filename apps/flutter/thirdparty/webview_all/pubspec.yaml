@@ -47,7 +47,8 @@ dependencies:
     path: ../webview_flutter_platform_interface
   webview_all_windows:
     path: ../webview_all_windows
-  webview_all_linux: ^1.2.1
+  webview_all_linux:
+    path: ../webview_all_linux
   webview_all_ohos:
     path: ../webview_all_ohos
   webview_all_web:

@@ -143,7 +143,7 @@ impl AIMessageManager {
 
     #[allow(non_snake_case)]
     /// Builds user message content with processed text, attachments, workspace, and reply context.
-    pub fn buildUserMessageContent(
+    pub async fn buildUserMessageContent(
         request: BuildUserMessageContentRequest,
     ) -> Result<String, AiServiceError> {
         let promptInputStartTime = messageTimingNow();
@@ -153,7 +153,8 @@ impl AIMessageManager {
             chat_id: request.chatId.clone(),
             role_card_id: request.roleCardId.clone(),
             on_hook_timeout: request.onHookTimeout.clone(),
-        });
+        })
+        .await;
         logMessageTiming(
             "buildUserMessageContent.processUserInput",
             promptInputStartTime,
@@ -284,7 +285,8 @@ impl AIMessageManager {
                 max_tokens: request.maxTokens,
                 token_usage_threshold: request.tokenUsageThreshold,
             },
-        );
+        )
+        .await;
         if let Some(pluginExecution) = pluginExecution {
             ChainLogger::info(
                 PLUGIN_CHAIN,

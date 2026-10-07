@@ -1298,10 +1298,9 @@ packages:
   webview_all_linux:
     dependency: "direct dev"
     description:
-      name: webview_all_linux
-      sha256: "7330af208db409d1c240ff08a4c7df647a204db536a4415a33b36f7b722acec9"
-      url: "https://pub.dev"
-    source: hosted
+      path: "../thirdparty/webview_all_linux"
+      relative: true
+    source: path
     version: "1.4.4"
   webview_all_ohos:
     dependency: "direct overridden"
@@ -1339,7 +1338,7 @@ packages:
     source: path
     version: "2.15.1"
   webview_flutter_wkwebview:
-    dependency: "direct overridden"
+    dependency: "direct dev"
     description:
       path: "../thirdparty/webview_flutter_wkwebview"
       relative: true

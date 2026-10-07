@@ -394,6 +394,7 @@ class OwnerSystemCapabilityChannel(
     private fun systemExecutePrivilegedCommand(params: JSONObject): Map<String, String> {
         val target =
             when (params.getString("target")) {
+                "root", "root_auto" -> AndroidPrivilegedCommandTarget.RootAuto
                 "root_libsu" -> AndroidPrivilegedCommandTarget.RootLibsu
                 "root_exec" -> AndroidPrivilegedCommandTarget.RootExec
                 "shizuku" -> AndroidPrivilegedCommandTarget.Shizuku
@@ -405,6 +406,7 @@ class OwnerSystemCapabilityChannel(
                 target = target,
                 command = params.getString("command"),
                 timeoutMillis = params.getLong("timeoutMillis"),
+                rootSettings = AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
             )
         return mapOf(
             "resultJson" to
@@ -419,6 +421,7 @@ class OwnerSystemCapabilityChannel(
     /** Verifies the existing host authorization for one privileged command transport. */
     private fun requirePrivilegedCommandAuthorization(target: AndroidPrivilegedCommandTarget) {
         when (target) {
+            AndroidPrivilegedCommandTarget.RootAuto,
             AndroidPrivilegedCommandTarget.RootLibsu,
             AndroidPrivilegedCommandTarget.RootExec -> check(
                 AndroidPrivilegeAuthorization.isRootAuthorized(activity),
@@ -2087,8 +2090,9 @@ class OwnerSystemCapabilityChannel(
     private fun captureScreenshotWithRoot(file: File) {
         val result =
             AndroidPrivilegedCommandExecutor.execute(
-                target = AndroidPrivilegedCommandTarget.RootLibsu,
+                target = AndroidPrivilegedCommandTarget.RootAuto,
                 command = "/system/bin/screencap -p ${shellQuote(file.absolutePath)}",
+                rootSettings = AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
             )
         if (result.exitCode != 0) {
             file.delete()

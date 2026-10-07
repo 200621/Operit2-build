@@ -18,6 +18,7 @@ import '../../../../core/proxy/generated/CoreProxyModels.g.dart';
 import '../../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../../core/snapshot/SnapshotImportUploader.dart';
 import '../../../../l10n/generated/app_localizations.dart';
+import '../../../common/StorageDirectorySelectionError.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../components/SettingsControlStyles.dart';
@@ -1523,27 +1524,35 @@ class _StorageLocationEditDialogState
   }
 
   /// Selects a new runtime root directory.
-  Future<void> _selectRuntimeRoot() async {
-    final path = await OperitFolderAccess.pickDirectory();
-    if (!mounted || path == null || path.trim().isEmpty) {
-      return;
-    }
-    setState(() {
-      _runtimeRootController.text = path.trim();
-      _errorText = null;
-    });
-  }
+  Future<void> _selectRuntimeRoot() =>
+      _selectStorageRoot(_runtimeRootController);
 
   /// Selects a new workspace root directory.
-  Future<void> _selectWorkspaceRoot() async {
-    final path = await OperitFolderAccess.pickDirectory();
-    if (!mounted || path == null || path.trim().isEmpty) {
-      return;
+  Future<void> _selectWorkspaceRoot() =>
+      _selectStorageRoot(_workspaceRootController);
+
+  /// Keeps picker failures in the storage UI instead of the unhandled zone.
+  Future<void> _selectStorageRoot(TextEditingController controller) async {
+    try {
+      final path = await OperitFolderAccess.pickDirectory();
+      if (!mounted || path == null || path.trim().isEmpty) {
+        return;
+      }
+      setState(() {
+        controller.text = path.trim();
+        _errorText = null;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorText = storageDirectorySelectionErrorMessage(
+          AppLocalizations.of(context)!,
+          error,
+        );
+      });
     }
-    setState(() {
-      _workspaceRootController.text = path.trim();
-      _errorText = null;
-    });
   }
 
   /// Returns the explicitly entered runtime and workspace roots.

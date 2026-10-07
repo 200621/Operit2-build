@@ -187,13 +187,14 @@ macro_rules! prompt_bridge {
                 $id
             }
 
-            fn on_event(&self, context: &PromptHookContext) -> Option<PromptHookMutation> {
-                dispatch_prompt_hooks(
+            /// Awaits the ToolPkg mutation on the Host-owned execution boundary.
+            fn on_event_async<'a>(&'a self, context: &'a PromptHookContext) -> operit_providers::chat::hooks::PromptHookRegistry::PromptHookFuture<'a> {
+                Box::pin(async move { dispatch_prompt_hooks(
                     &self.runtime,
                     $hooks.get_or_init(|| Mutex::new(Vec::new())),
                     $event,
                     context,
-                )
+                ).await })
             }
         }
     };
@@ -249,7 +250,7 @@ prompt_bridge!(
     TOOLPKG_EVENT_PROMPT_ESTIMATE_FINALIZE
 );
 
-fn dispatch_prompt_hooks(
+async fn dispatch_prompt_hooks(
     runtime: &ToolPkgBridgeRuntime,
     hooks: &Mutex<Vec<ToolPkgPromptHookRegistration>>,
     event: &str,
@@ -289,19 +290,21 @@ fn dispatch_prompt_hooks(
                 ("function", hook.functionName.clone()),
             ],
         );
-        let raw = package_manager.runToolPkgMainHookWithTimeoutMillis(
-            &hook.containerPackageName,
-            &hook.functionName,
-            event,
-            Some(&current.stage),
-            Some(&hook.hookId),
-            hook.functionSource.as_deref(),
-            prompt_context_to_value(&current),
-            None,
-            None,
-            None,
-            timeoutMillis,
-        );
+        let raw = package_manager
+            .runToolPkgMainHookWithTimeoutMillis(
+                &hook.containerPackageName,
+                &hook.functionName,
+                event,
+                Some(&current.stage),
+                Some(&hook.hookId),
+                hook.functionSource.as_deref(),
+                prompt_context_to_value(&current),
+                None,
+                None,
+                None,
+                timeoutMillis,
+            )
+            .await;
         let hookTimedOut = raw
             .as_ref()
             .err()

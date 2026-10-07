@@ -197,7 +197,7 @@ pub trait ToolPkgHookDispatcher: Send + Sync {
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
-    ) -> Result<Option<String>, String>;
+    ) -> crate::javascript::JsExecutionCompletion<Result<Option<String>, String>>;
 }
 
 /// Decodes a hook output as JSON when the output contains valid JSON.

@@ -4,7 +4,6 @@
 
 import 'local_resource.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -350,6 +349,24 @@ abstract class PlatformWebViewController extends PlatformInterface {
     throw UnimplementedError(
       'setZoomFactor is not implemented on the current platform',
     );
+  }
+
+  /// Whether application paint scaling must be replaced by native content zoom.
+  ///
+  /// Native overlays that cannot map transformed input should return true and
+  /// implement [setApplicationZoomFactor]. Composited platform views keep the
+  /// default: Flutter scales their content and maps pointer coordinates, so
+  /// applying the same scale to their page zoom would zoom the content twice.
+  bool get requiresNativeApplicationZoom => false;
+
+  /// Applies the embedding application's zoom after native viewport scaling
+  /// has been removed to keep input coordinates aligned.
+  ///
+  /// Platforms needing this compensation should combine [zoomFactor] with the
+  /// page zoom requested through [setZoomFactor], without replacing it. Other
+  /// platforms retain their existing paint scaling and can ignore this value.
+  Future<void> setApplicationZoomFactor(double zoomFactor) {
+    return Future<void>.value();
   }
 
   /// Set the current background color of this view.

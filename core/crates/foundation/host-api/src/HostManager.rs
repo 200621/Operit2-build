@@ -65,7 +65,14 @@ pub fn defaultServiceDiscoveryHost() -> crate::HostResult<Arc<dyn ServiceDiscove
 }
 
 /// Command callback used by hosts that expose core operations as argv-style calls.
-pub type CoreCommandExecutor = Arc<dyn Fn(Vec<String>) -> Result<String, String> + Send + Sync>;
+pub type CoreCommandExecutor = Arc<
+    dyn Fn(
+            Vec<String>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'static>,
+        > + Send
+        + Sync,
+>;
 
 /// Registers the HTTP host shared by services that are not passed an explicit context.
 #[allow(non_snake_case)]

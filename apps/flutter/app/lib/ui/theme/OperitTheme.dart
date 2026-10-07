@@ -512,6 +512,8 @@ class OperitThemeController {
           _suppressThemeAnimation = true;
           try {
             await setThemeMode(nextMode);
+            // Paint the target theme before revealing it through the circle.
+            await WidgetsBinding.instance.endOfFrame;
           } finally {
             _suppressThemeAnimation = false;
           }
@@ -1628,6 +1630,7 @@ ColorScheme _seedColorScheme(
   );
 }
 
+/// Keeps system bars transparent so inset surfaces remain visible beneath them.
 SystemUiOverlayStyle _systemUiOverlayStyle(ColorScheme colorScheme) {
   final iconBrightness = colorScheme.brightness == Brightness.dark
       ? Brightness.light
@@ -1636,7 +1639,10 @@ SystemUiOverlayStyle _systemUiOverlayStyle(ColorScheme colorScheme) {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: iconBrightness,
     statusBarBrightness: colorScheme.brightness,
-    systemNavigationBarColor: colorScheme.surface,
+    systemStatusBarContrastEnforced: false,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
     systemNavigationBarIconBrightness: iconBrightness,
+    systemNavigationBarContrastEnforced: false,
   );
 }

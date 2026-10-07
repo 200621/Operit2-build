@@ -1,4 +1,5 @@
 use crossterm::event::MouseEvent;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -54,6 +55,11 @@ impl TranscriptSelectionState {
         matches!((self.anchor, self.cursor), (Some(anchor), Some(cursor)) if anchor == cursor)
     }
 
+    /// Whether a press-drag gesture is currently in progress.
+    pub(super) fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
     pub(super) fn clear(&mut self) {
         self.anchor = None;
         self.cursor = None;
@@ -83,7 +89,8 @@ impl TranscriptSelectionState {
         Some(selected)
     }
 
-    fn normalized_range(&self) -> Option<(TranscriptPosition, TranscriptPosition)> {
+    /// Returns the normalized (start ≤ end) selection range when non-empty.
+    pub(super) fn normalized_range(&self) -> Option<(TranscriptPosition, TranscriptPosition)> {
         let anchor = self.anchor?;
         let cursor = self.cursor?;
         if anchor == cursor {
@@ -277,6 +284,145 @@ fn selection_style(style: Style) -> Style {
     style.bg(theme::SELECTION_BG).fg(theme::SELECTION_TEXT)
 }
 
+/// Captures the rendered cell symbols of a popup's content area, one row per
+/// visual line with trailing blank cells trimmed.
+pub(super) fn popup_rows_from_buffer(buffer: &Buffer, area: Rect) -> Vec<Vec<String>> {
+    let mut rows = Vec::with_capacity(area.height as usize);
+    for y in area.y..area.bottom() {
+        let mut row = Vec::with_capacity(area.width as usize);
+        for x in area.x..area.right() {
+            row.push(buffer[(x, y)].symbol().to_string());
+        }
+        while row
+            .last()
+            .is_some_and(|cell| cell.is_empty() || cell == " ")
+        {
+            row.pop();
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Joins the selected cell range across popup rows; rows are newline separated.
+pub(super) fn popup_selected_text(
+    rows: &[Vec<String>],
+    selection: &TranscriptSelectionState,
+) -> Option<String> {
+    let (start, end) = selection.normalized_range()?;
+    let mut selected = String::new();
+    for line_index in start.line..=end.line {
+        let row = rows.get(line_index)?;
+        if line_index > start.line {
+            selected.push('\n');
+        }
+        let start_column = if line_index == start.line {
+            start.column.min(row.len())
+        } else {
+            0
+        };
+        let end_column = if line_index == end.line {
+            end.column.min(row.len())
+        } else {
+            row.len()
+        };
+        for cell in row.iter().take(end_column).skip(start_column) {
+            selected.push_str(cell);
+        }
+    }
+    Some(selected)
+}
+
+/// Restyles the selected cell range of a popup with the transcript selection colors.
+pub(super) fn apply_popup_selection_highlight(
+    buffer: &mut Buffer,
+    area: Rect,
+    selection: &TranscriptSelectionState,
+) {
+    let Some((start, end)) = selection.normalized_range() else {
+        return;
+    };
+    for line_index in start.line..=end.line {
+        let Ok(row_offset) = u16::try_from(line_index) else {
+            continue;
+        };
+        if row_offset >= area.height {
+            continue;
+        }
+        let y = area.y + row_offset;
+        let start_column = if line_index == start.line {
+            start.column
+        } else {
+            0
+        };
+        let end_column = if line_index == end.line {
+            end.column
+        } else {
+            area.width as usize
+        };
+        let start_column = (start_column as u16).min(area.width);
+        let end_column = (end_column as u16).min(area.width);
+        if start_column >= end_column {
+            continue;
+        }
+        let row = Rect {
+            x: area.x + start_column,
+            y,
+            width: end_column - start_column,
+            height: 1,
+        };
+        buffer.set_style(row, selection_style(Style::default()));
+    }
+}
+
+/// Maps a pointer inside a popup's content area to a cell position.
+pub(super) fn mouse_popup_position(
+    column: u16,
+    row: u16,
+    area: Rect,
+    rows: &[Vec<String>],
+) -> Option<TranscriptPosition> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    if column < area.x
+        || column >= area.x.saturating_add(area.width)
+        || row < area.y
+        || row >= area.y.saturating_add(area.height)
+    {
+        return None;
+    }
+    let line = usize::from(row - area.y);
+    let row_cells = rows.get(line)?;
+    let cell = usize::from(column - area.x);
+    Some(TranscriptPosition {
+        line,
+        column: cell.min(row_cells.len()),
+    })
+}
+
+/// Like [`mouse_popup_position`] but clamps outside pointers to the popup edges,
+/// matching transcript drag behavior.
+pub(super) fn mouse_popup_drag_position(
+    column: u16,
+    row: u16,
+    area: Rect,
+    rows: &[Vec<String>],
+) -> Option<TranscriptPosition> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let max_x = area.x.saturating_add(area.width).saturating_sub(1);
+    let max_y = area.y.saturating_add(area.height).saturating_sub(1);
+    let line = usize::from(row.clamp(area.y, max_y) - area.y);
+    let row_cells = rows.get(line)?;
+    let cell = usize::from(column.clamp(area.x, max_x) - area.x);
+    Some(TranscriptPosition {
+        line,
+        column: cell.min(row_cells.len()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +445,68 @@ mod tests {
         assert_eq!(
             selection.selected_text(&lines).as_deref(),
             Some("D:/Code/prog/assistance2/apps/cli")
+        );
+    }
+
+    #[test]
+    fn popup_rows_snapshot_and_copy_cell_ranges() {
+        let area = Rect {
+            x: 2,
+            y: 3,
+            width: 6,
+            height: 2,
+        };
+        let mut buffer = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
+        buffer[(2, 3)].set_symbol("a");
+        buffer[(3, 3)].set_symbol("b");
+        buffer[(4, 3)].set_symbol("中");
+        buffer[(2, 4)].set_symbol("x");
+        buffer[(3, 4)].set_symbol("y");
+
+        let rows = popup_rows_from_buffer(&buffer, area);
+        assert_eq!(rows[0], vec!["a", "b", "中"]);
+        assert_eq!(rows[1], vec!["x", "y"]);
+
+        let mut selection = TranscriptSelectionState::default();
+        selection.begin(TranscriptPosition { line: 0, column: 2 });
+        selection.end(TranscriptPosition {
+            line: 1,
+            column: 2,
+        });
+        assert_eq!(
+            popup_selected_text(&rows, &selection).as_deref(),
+            Some("中\nxy")
+        );
+    }
+
+    #[test]
+    fn popup_mouse_positions_clamp_to_row_content() {
+        let area = Rect {
+            x: 1,
+            y: 1,
+            width: 5,
+            height: 2,
+        };
+        let rows = vec![vec!["a".to_string(), "b".to_string()], Vec::new()];
+        assert!(mouse_popup_position(0, 1, area, &rows).is_none());
+        assert_eq!(
+            mouse_popup_position(4, 2, area, &rows),
+            Some(TranscriptPosition {
+                line: 1,
+                column: 0
+            })
+        );
+        assert_eq!(
+            mouse_popup_drag_position(99, 99, area, &rows),
+            Some(TranscriptPosition {
+                line: 1,
+                column: 0
+            })
         );
     }
 }

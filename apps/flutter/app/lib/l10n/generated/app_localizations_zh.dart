@@ -3271,6 +3271,19 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsDataStorageRootsRequired => '运行时目录和工作区目录都不能为空。';
 
   @override
+  String get storageDirectoryTermuxUnsupported =>
+      '不支持将 Termux 文档提供器中的目录用作本地存储路径。请选择共享存储中的目录（如 Download 或 Documents），而不是 Termux 私有目录。';
+
+  @override
+  String get storageDirectoryProviderUnsupported =>
+      '无法将所选目录解析为支持的本地存储路径。请选择共享存储中的目录（如 Download 或 Documents），或手动输入本应用有权限访问的本地路径。';
+
+  @override
+  String storageDirectorySelectionFailed(String error) {
+    return '选择目录失败：$error';
+  }
+
+  @override
   String get settingsDataStorageConfirmTitle => '更改储存路径';
 
   @override

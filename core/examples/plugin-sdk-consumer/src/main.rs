@@ -32,8 +32,10 @@ impl JsExecutionEngine for ExampleExecutionEngine {
         _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         _dispatch_intermediate_on_main: bool,
         _timeout_sec: u64,
-    ) -> JsExecutionResult<Option<String>> {
-        Ok(Some(format!("executed:{function_name}")))
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>>
+    {
+        let result = (|| Ok(Some(format!("executed:{function_name}"))))();
+        Box::pin(std::future::ready(result))
     }
 
     /// Executes one JavaScript function with an exact millisecond deadline in the example runtime.
@@ -46,8 +48,10 @@ impl JsExecutionEngine for ExampleExecutionEngine {
         _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         _dispatch_intermediate_on_main: bool,
         _timeout_millis: u64,
-    ) -> JsExecutionResult<Option<String>> {
-        Ok(Some(format!("executed:{function_name}")))
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>>
+    {
+        let result = (|| Ok(Some(format!("executed:{function_name}"))))();
+        Box::pin(std::future::ready(result))
     }
 
     /// Executes one JavaScript function through the example asynchronous contract.
@@ -82,8 +86,10 @@ impl JsExecutionEngine for ExampleExecutionEngine {
         _runtime_options: &BTreeMap<String, Value>,
         _env_overrides: &BTreeMap<String, String>,
         _text_resources: Arc<BTreeMap<String, String>>,
-    ) -> JsExecutionResult<Option<String>> {
-        Ok(Some(r#"{"tree":{"type":"Text"}}"#.to_string()))
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>>
+    {
+        let result = (|| Ok(Some(r#"{"tree":{"type":"Text"}}"#.to_string())))();
+        Box::pin(std::future::ready(result))
     }
 
     /// Renders one Compose DSL script through the example asynchronous contract.
@@ -105,8 +111,10 @@ impl JsExecutionEngine for ExampleExecutionEngine {
         _runtime_options: &BTreeMap<String, Value>,
         _env_overrides: &BTreeMap<String, String>,
         _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> JsExecutionResult<Option<String>> {
-        Ok(Some(format!("action:{action_id}")))
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>>
+    {
+        let result = (|| Ok(Some(format!("action:{action_id}"))))();
+        Box::pin(std::future::ready(result))
     }
 
     /// Dispatches one Compose DSL action through the example asynchronous contract.

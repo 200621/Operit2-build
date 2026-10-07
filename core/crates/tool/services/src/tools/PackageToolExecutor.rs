@@ -9,7 +9,7 @@ use crate::tools::ToolJsRuntime::{JsPackageExecutor, PackageManagerJsRuntime};
 use crate::tools::ToolResultDataClasses::stringResultData;
 use crate::ConversationMarkupManager::ToolResult;
 use crate::ToolExecutionManager::{
-    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutor, ToolValidationResult,
+    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, AsyncToolExecutor, ToolInvocationFuture, ToolValidationResult,
 };
 
 #[derive(Clone)]
@@ -41,7 +41,7 @@ impl PackageToolExecutor {
 
     /// Invokes a package tool by its package-qualified tool name.
     #[allow(non_snake_case)]
-    pub fn invoke(&self, tool: &AITool) -> ToolResult {
+    pub async fn invoke(&self, tool: &AITool) -> ToolResult {
         let parts = tool.name.split(':').collect::<Vec<_>>();
         if parts.len() != 2 {
             return failedToolResult(
@@ -80,12 +80,13 @@ impl PackageToolExecutor {
         let request = packageToolCallRequest(tool);
         let result = self
             .packageExecutor
-            .execute_package_tool(&packageTool.script, &request);
+            .execute_package_tool(&packageTool.script, &request)
+            .await;
         packageToolResult(result)
     }
 }
 
-impl ToolExecutor for PackageToolExecutor {
+impl AsyncToolExecutor for PackageToolExecutor {
     /// Validates the package-qualified name and required parameters.
     #[allow(non_snake_case)]
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
@@ -157,25 +158,28 @@ impl ToolExecutor for PackageToolExecutor {
 
     /// Invokes a package tool and returns every emitted result.
     #[allow(non_snake_case)]
-    fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult> {
-        let toolName = tool.name.split(':').last().unwrap_or_default();
-        let Some(packageTool) = self
-            .toolPackage
-            .tools
-            .iter()
-            .find(|item| item.name.ends_with(toolName))
-        else {
-            return vec![failedToolResult(
-                tool,
-                "Tool not found in package for streaming".to_string(),
-            )];
-        };
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        Box::pin(async move {
+            let toolName = tool.name.split(':').last().unwrap_or_default();
+            let Some(packageTool) = self
+                .toolPackage
+                .tools
+                .iter()
+                .find(|item| item.name.ends_with(toolName))
+            else {
+                return vec![failedToolResult(
+                    tool,
+                    "Tool not found in package for streaming".to_string(),
+                )];
+            };
 
-        let request = packageToolCallRequest(tool);
-        let result = self
-            .packageExecutor
-            .execute_package_tool(&packageTool.script, &request);
-        vec![packageToolResult(result)]
+            let request = packageToolCallRequest(tool);
+            let result = self
+                .packageExecutor
+                .execute_package_tool(&packageTool.script, &request)
+                .await;
+            vec![packageToolResult(result)]
+        })
     }
 }
 

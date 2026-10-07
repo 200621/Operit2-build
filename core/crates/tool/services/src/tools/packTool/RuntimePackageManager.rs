@@ -1624,7 +1624,7 @@ impl RuntimePackageManager {
 
     #[allow(non_snake_case)]
     /// Executes one enabled ToolPkg chat message context-menu item.
-    pub fn invokeToolPkgChatMessageMenuItem(
+    pub async fn invokeToolPkgChatMessageMenuItem(
         &self,
         containerPackageName: &str,
         itemId: &str,
@@ -1668,7 +1668,7 @@ impl RuntimePackageManager {
             None,
             None,
             None,
-        )
+        ).await
     }
 
     #[allow(non_snake_case)]
@@ -1716,7 +1716,7 @@ impl RuntimePackageManager {
 
     #[allow(non_snake_case)]
     /// Executes one slash command contributed by an enabled ToolPkg package.
-    pub fn executeToolPkgCoreCommand(
+    pub async fn executeToolPkgCoreCommand(
         &self,
         commandName: &str,
         args: &[String],
@@ -1766,7 +1766,7 @@ impl RuntimePackageManager {
                 None,
                 None,
                 None,
-            )?
+            ).await?
             .ok_or_else(|| format!("plugin command /{normalizedName} returned no result"))?;
         serde_json::from_str::<ToolPkgCoreCommandExecutionResult>(&raw).map_err(|error| {
             format!("plugin command /{normalizedName} returned an invalid result: {error}")
@@ -4299,7 +4299,7 @@ impl RuntimePackageManager {
         executionContextKey: Option<&str>,
         runtimeKind: Option<&str>,
         onIntermediateResult: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String> {
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
         self.runToolPkgMainHookWithTimeoutMillis(
             containerPackageName,
             functionName,
@@ -4330,7 +4330,7 @@ impl RuntimePackageManager {
         runtimeKind: Option<&str>,
         onIntermediateResult: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
         timeoutMillis: u64,
-    ) -> Result<Option<String>, String> {
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
         self.toolPkgManager().dispatchToolPkgHook(
             &self.getEnabledPackageNames(),
             ToolPkgHookInvocation {

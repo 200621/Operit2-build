@@ -667,6 +667,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                 key: _mentionPopupTargetKey,
                 child: _InputSurface(
                   color: colorScheme.surfaceContainer,
+                  floating: themePreferenceSnapshot.chatInputFloating,
                   shape: inputCardShape,
                   borderRadius: inputCardBorderRadius,
                   transparentSurface:
@@ -933,8 +934,10 @@ EdgeInsetsGeometry _agentInputSurfaceMargin(bool floating) {
 }
 
 class _InputSurface extends StatelessWidget {
+  /// Creates a surface with inset content or an inset floating card.
   const _InputSurface({
     required this.color,
+    required this.floating,
     required this.shape,
     required this.borderRadius,
     required this.child,
@@ -944,6 +947,7 @@ class _InputSurface extends StatelessWidget {
   });
 
   final Color color;
+  final bool floating;
   final ShapeBorder shape;
   final BorderRadius borderRadius;
   final Widget child;
@@ -959,6 +963,7 @@ class _InputSurface extends StatelessWidget {
       child: SizedBox(
         width: width,
         child: DecoratedBox(
+          key: const ValueKey<String>('chat.input.surface'),
           decoration: ShapeDecoration(
             color: effectiveColor,
             shape: shape,
@@ -979,7 +984,13 @@ class _InputSurface extends StatelessWidget {
                     ),
                   ],
           ),
-          child: child,
+          child: SafeArea(
+            top: false,
+            left: false,
+            right: false,
+            bottom: !floating,
+            child: child,
+          ),
         ),
       ),
     );
@@ -1022,7 +1033,13 @@ class _InputSurface extends StatelessWidget {
     } else {
       surface = decorated;
     }
-    return Padding(padding: margin, child: surface);
+    return SafeArea(
+      top: false,
+      left: false,
+      right: false,
+      bottom: floating,
+      child: Padding(padding: margin, child: surface),
+    );
   }
 }
 

@@ -207,8 +207,8 @@ impl ProviderRuntimeSupport for TestRuntimeSupport {
         _runtimeContextKey: Option<String>,
         _executionKind: Option<String>,
         _onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String> {
-        Err("test runtime does not execute package hooks".to_string())
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
+        Box::pin(async move { Err("test runtime does not execute package hooks".to_string()) })
     }
 
     /// Does not decode package hook output in the test runtime.

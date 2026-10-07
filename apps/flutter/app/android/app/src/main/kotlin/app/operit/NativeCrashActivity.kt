@@ -19,6 +19,8 @@ import android.widget.TextView
 class NativeCrashActivity : Activity() {
     companion object {
         private const val extraDetails = "app.operit.extra.CRASH_DETAILS"
+        private const val missingDetails =
+            "Crash details are unavailable. The crash screen was opened without a diagnostic report."
 
         /** Starts the dedicated crash process with a complete diagnostic report. */
         fun start(context: Context, details: String) {
@@ -30,10 +32,21 @@ class NativeCrashActivity : Activity() {
         }
     }
 
+    private var details = missingDetails
+
+    /** Preserves the report when Android recreates the crash Activity. */
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(extraDetails, details)
+        super.onSaveInstanceState(outState)
+    }
+
     /** Creates the native crash layout without requiring a running Flutter engine. */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val details = requireNotNull(intent.getStringExtra(extraDetails))
+        // A diagnostic screen must also work when its launch extras are absent.
+        details = savedInstanceState?.getString(extraDetails)
+            ?: intent?.getStringExtra(extraDetails)
+            ?: missingDetails
         title = "Operit2 has stopped"
         val padding = (24 * resources.displayMetrics.density).toInt()
         val content = LinearLayout(this).apply {

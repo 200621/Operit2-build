@@ -13,6 +13,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use serde::Deserialize;
@@ -53,8 +54,9 @@ use super::scrollbar::{
     pointer_hits_scrollbar, scroll_position_for_pointer, scrollbar_hit_part, ScrollbarHit,
 };
 use super::selection::{
-    mouse_drag_transcript_position, mouse_transcript_position, TranscriptCopyLine,
-    TranscriptSelectionState,
+    apply_popup_selection_highlight, mouse_drag_transcript_position, mouse_popup_drag_position,
+    mouse_popup_position, mouse_transcript_position, popup_rows_from_buffer, popup_selected_text,
+    TranscriptCopyLine, TranscriptSelectionState,
 };
 use super::transcript::TranscriptRenderCache;
 use super::typewriter::TypewriterState;
@@ -127,6 +129,13 @@ pub(super) struct OperitTui {
     pub(super) transcript_area: Rect,
     pub(super) transcript_copy_lines: Vec<TranscriptCopyLine>,
     pub(super) transcript_selection: TranscriptSelectionState,
+    pub(super) popup_selection: TranscriptSelectionState,
+    /// Content rect of the topmost modal popup, recorded during render.
+    pub(super) popup_selection_rect: Option<Rect>,
+    pub(super) popup_copy_rows: Vec<Vec<String>>,
+    /// Long-lived clipboard owner. On Linux the clipboard is served by this
+    /// process, so a short-lived instance loses the contents when dropped.
+    clipboard: Option<arboard::Clipboard>,
     pub(super) scrollbar_hovered: bool,
     pub(super) scrollbar_pressed: bool,
     pub(super) scrollbar_dragging: bool,
@@ -505,6 +514,10 @@ impl OperitTui {
             transcript_area: Rect::default(),
             transcript_copy_lines: Vec::new(),
             transcript_selection: TranscriptSelectionState::default(),
+            popup_selection: TranscriptSelectionState::default(),
+            popup_selection_rect: None,
+            popup_copy_rows: Vec::new(),
+            clipboard: None,
             scrollbar_hovered: false,
             scrollbar_pressed: false,
             scrollbar_dragging: false,
@@ -746,6 +759,58 @@ impl OperitTui {
         if self.compose.editor.is_some() {
             return Ok(());
         }
+        if let Some(area) = self.popup_selection_rect {
+            let inside = mouse.column >= area.x
+                && mouse.column < area.x.saturating_add(area.width)
+                && mouse.row >= area.y
+                && mouse.row < area.y.saturating_add(area.height);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) if inside => {
+                    self.scrollbar_pressed = false;
+                    self.scrollbar_dragging = false;
+                    self.transcript_selection.clear();
+                    if let Some(position) =
+                        mouse_popup_position(mouse.column, mouse.row, area, &self.popup_copy_rows)
+                    {
+                        self.popup_selection.begin(position);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Drag(MouseButton::Left) if self.popup_selection.is_dragging() => {
+                    if let Some(position) = mouse_popup_drag_position(
+                        mouse.column,
+                        mouse.row,
+                        area,
+                        &self.popup_copy_rows,
+                    ) {
+                        self.popup_selection.drag_to(position);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Up(MouseButton::Left) if self.popup_selection.is_dragging() => {
+                    match mouse_popup_drag_position(
+                        mouse.column,
+                        mouse.row,
+                        area,
+                        &self.popup_copy_rows,
+                    ) {
+                        Some(position) => self.popup_selection.end(position),
+                        None => self.popup_selection.clear(),
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Right) if inside => {
+                    self.popup_selection.clear();
+                    return Ok(());
+                }
+                // Presses outside the popup discard its selection and keep the
+                // scrollbar/transcript behavior below.
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.popup_selection.clear();
+                }
+                _ => {}
+            }
+        }
         if !overlay {
             let area = super::scrollbar::split_transcript_inner(self.transcript_area).content;
             let inside = mouse.column >= area.x
@@ -898,17 +963,38 @@ impl OperitTui {
         if text.is_empty() {
             return false;
         }
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => match clipboard.set_text(text) {
-                Ok(()) => {
-                    self.status_message = self.text().selection_copied().to_string();
-                    true
-                }
+        self.copy_text_to_clipboard(text)
+    }
+
+    /// Copies the current modal popup selection, if any.
+    fn copy_popup_selection(&mut self) -> bool {
+        let Some(text) = popup_selected_text(&self.popup_copy_rows, &self.popup_selection) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        self.copy_text_to_clipboard(text)
+    }
+
+    fn copy_text_to_clipboard(&mut self, text: String) -> bool {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
                 Err(error) => {
                     self.status_message = self.text().copy_failed(&error.to_string());
-                    true
+                    return true;
                 }
-            },
+            }
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return false;
+        };
+        match clipboard.set_text(text) {
+            Ok(()) => {
+                self.status_message = self.text().selection_copied().to_string();
+                true
+            }
             Err(error) => {
                 self.status_message = self.text().copy_failed(&error.to_string());
                 true
@@ -916,8 +1002,39 @@ impl OperitTui {
         }
     }
 
+    /// Snapshots the topmost popup's rendered cells and paints the live selection
+    /// highlight; called once per frame after all overlays have rendered.
+    pub(super) fn finish_popup_selection(&mut self, buffer: &mut Buffer) {
+        let Some(area) = self
+            .popup_selection_rect
+            .filter(|area| area.width > 0 && area.height > 0)
+        else {
+            self.popup_selection_rect = None;
+            if !self.popup_copy_rows.is_empty() {
+                self.popup_copy_rows.clear();
+            }
+            self.popup_selection.clear();
+            return;
+        };
+        let rows = popup_rows_from_buffer(buffer, area);
+        // Content changed under the selection (refilter, list move, …) — drop it.
+        if rows != self.popup_copy_rows {
+            self.popup_selection.clear();
+        }
+        self.popup_copy_rows = rows;
+        apply_popup_selection_highlight(buffer, area, &self.popup_selection);
+    }
+
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), String> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return Ok(());
+        }
+
+        // Popup selection copies win over popup key routing.
+        if matches!(key.code, KeyCode::Char('c'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.copy_popup_selection()
+        {
             return Ok(());
         }
 

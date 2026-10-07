@@ -63,7 +63,7 @@ impl ToolPkgJsAiProviderService {
     }
 
     #[allow(non_snake_case)]
-    fn invokeProviderFunction(
+    async fn invokeProviderFunction(
         &self,
         functionName: &str,
         functionSource: Option<&str>,
@@ -94,6 +94,7 @@ impl ToolPkgJsAiProviderService {
                 Some("provider".to_string()),
                 onIntermediateResult,
             )
+            .await
             .map_err(AiServiceError::RequestFailed)?;
         self.runtimeContext
             .support()
@@ -202,13 +203,15 @@ impl AIService for ToolPkgJsAiProviderService {
     }
 
     async fn get_models_list(&self) -> Result<Vec<ModelOption>, AiServiceError> {
-        let decoded = self.invokeProviderFunction(
-            &self.provider.listModelsFunctionName,
-            self.provider.listModelsFunctionSource.as_deref(),
-            TOOLPKG_EVENT_AI_PROVIDER_LIST_MODELS,
-            self.buildBasePayload(),
-            None,
-        )?;
+        let decoded = self
+            .invokeProviderFunction(
+                &self.provider.listModelsFunctionName,
+                self.provider.listModelsFunctionSource.as_deref(),
+                TOOLPKG_EVENT_AI_PROVIDER_LIST_MODELS,
+                self.buildBasePayload(),
+                None,
+            )
+            .await?;
         self.ensureNoFatalError(&decoded)?;
         Ok(parseModelOptions(&decoded))
     }
@@ -267,39 +270,41 @@ impl AIService for ToolPkgJsAiProviderService {
         let token_counts = self.tokenCounts.clone();
         let on_non_fatal_error = request.on_non_fatal_error.clone();
         let runtime_support = self.runtimeContext.shared_support();
-        let decoded = self.invokeProviderFunction(
-            &self.provider.sendMessageFunctionName,
-            self.provider.sendMessageFunctionSource.as_deref(),
-            TOOLPKG_EVENT_AI_PROVIDER_SEND_MESSAGE,
-            payload,
-            Some(Arc::new(move |raw| {
-                let Some(decoded) = runtime_support.decodeToolPkgHookResult(Some(raw)) else {
-                    return;
-                };
-                if let Some(usage) = extractUsage(
-                    &decoded,
-                    &token_counts.lock().expect("token mutex poisoned"),
-                ) {
-                    let mut counts = token_counts.lock().expect("token mutex poisoned");
-                    counts.input = usage.input;
-                    counts.cachedInput = usage.cachedInput;
-                    counts.output = usage.output;
-                }
-                if let Some(error) = extractNonFatalError(&decoded) {
-                    if let Some(callback) = &on_non_fatal_error {
-                        callback(error);
+        let decoded = self
+            .invokeProviderFunction(
+                &self.provider.sendMessageFunctionName,
+                self.provider.sendMessageFunctionSource.as_deref(),
+                TOOLPKG_EVENT_AI_PROVIDER_SEND_MESSAGE,
+                payload,
+                Some(Arc::new(move |raw| {
+                    let Some(decoded) = runtime_support.decodeToolPkgHookResult(Some(raw)) else {
+                        return;
+                    };
+                    if let Some(usage) = extractUsage(
+                        &decoded,
+                        &token_counts.lock().expect("token mutex poisoned"),
+                    ) {
+                        let mut counts = token_counts.lock().expect("token mutex poisoned");
+                        counts.input = usage.input;
+                        counts.cachedInput = usage.cachedInput;
+                        counts.output = usage.output;
                     }
-                }
-                for chunk in extractMessageChunks(&decoded) {
-                    if !chunk.is_empty() {
-                        *has_intermediate_text_chunk_for_callback
-                            .lock()
-                            .expect("intermediate chunk mutex poisoned") = true;
-                        stream_for_intermediate.emit(chunk);
+                    if let Some(error) = extractNonFatalError(&decoded) {
+                        if let Some(callback) = &on_non_fatal_error {
+                            callback(error);
+                        }
                     }
-                }
-            })),
-        )?;
+                    for chunk in extractMessageChunks(&decoded) {
+                        if !chunk.is_empty() {
+                            *has_intermediate_text_chunk_for_callback
+                                .lock()
+                                .expect("intermediate chunk mutex poisoned") = true;
+                            stream_for_intermediate.emit(chunk);
+                        }
+                    }
+                })),
+            )
+            .await?;
         self.ensureNoFatalError(&decoded)?;
         self.applyUsage(&decoded);
         if let Some(error) = extractNonFatalError(&decoded) {
@@ -324,13 +329,15 @@ impl AIService for ToolPkgJsAiProviderService {
     }
 
     async fn test_connection(&self) -> Result<String, AiServiceError> {
-        let decoded = self.invokeProviderFunction(
-            &self.provider.testConnectionFunctionName,
-            self.provider.testConnectionFunctionSource.as_deref(),
-            TOOLPKG_EVENT_AI_PROVIDER_TEST_CONNECTION,
-            self.buildBasePayload(),
-            None,
-        )?;
+        let decoded = self
+            .invokeProviderFunction(
+                &self.provider.testConnectionFunctionName,
+                self.provider.testConnectionFunctionSource.as_deref(),
+                TOOLPKG_EVENT_AI_PROVIDER_TEST_CONNECTION,
+                self.buildBasePayload(),
+                None,
+            )
+            .await?;
         self.ensureNoFatalError(&decoded)?;
         parseConnectionMessage(&decoded)
     }
@@ -351,13 +358,15 @@ impl AIService for ToolPkgJsAiProviderService {
                 Value::Array(available_tools.iter().map(serializeToolPrompt).collect()),
             );
         }
-        let decoded = self.invokeProviderFunction(
-            &self.provider.calculateInputTokensFunctionName,
-            self.provider.calculateInputTokensFunctionSource.as_deref(),
-            TOOLPKG_EVENT_AI_PROVIDER_CALCULATE_INPUT_TOKENS,
-            payload,
-            None,
-        )?;
+        let decoded = self
+            .invokeProviderFunction(
+                &self.provider.calculateInputTokensFunctionName,
+                self.provider.calculateInputTokensFunctionSource.as_deref(),
+                TOOLPKG_EVENT_AI_PROVIDER_CALCULATE_INPUT_TOKENS,
+                payload,
+                None,
+            )
+            .await?;
         self.ensureNoFatalError(&decoded)?;
         parseTokenCount(&decoded)
     }

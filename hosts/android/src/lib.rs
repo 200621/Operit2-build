@@ -13,6 +13,7 @@ use operit_host_api::RuntimeStorageHost;
 mod audio_playback;
 mod bluetooth;
 mod filesystem;
+mod document_filesystem;
 mod http;
 #[cfg(target_os = "android")]
 mod local_inference;

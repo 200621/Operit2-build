@@ -99,6 +99,8 @@ pub(super) fn newTestJsEngineState(
 
 #[derive(Default)]
 struct TestPluginConfigExecutionHost {
+    gatedToolCalls: Arc<Mutex<Vec<tokio::sync::oneshot::Sender<JsToolCallResult>>>>,
+    gatedToolStarted: Arc<tokio::sync::Notify>,
     toolPkgTextResourceReads: AtomicUsize,
     registrationConfigReads: AtomicUsize,
     packageManagerLock: Mutex<()>,
@@ -138,37 +140,64 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
     }
 
     /// Executes the System sleep call used by the JavaScript worker regression test.
-    fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult {
-        if request.tool_name == "get_device_location" {
-            return JsToolCallResult {
-                success: false,
-                data: JsToolCallResultData::Value(Value::Null),
-                error: Some(
-                    "Error getting location information: location permission denied".to_string(),
-                ),
-            };
-        }
-        if request.tool_name != "sleep" {
-            panic!(
-                "Unexpected tool execution in JavaScript engine test: {}",
-                request.tool_name
-            );
-        }
-        let requestedMs = request
-            .parameters
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .expect("System.sleep must forward duration_ms to the host");
-        #[cfg(not(target_arch = "wasm32"))]
-        std::thread::sleep(Duration::from_millis(requestedMs));
-        JsToolCallResult {
-            success: true,
-            data: JsToolCallResultData::Value(serde_json::json!({
-                "requestedMs": requestedMs,
-                "sleptMs": requestedMs,
-            })),
-            error: None,
-        }
+    fn execute_tool_call(
+        &self,
+        request: JsToolCallRequest,
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsToolCallResult> {
+        let gatedToolCalls = self.gatedToolCalls.clone();
+        let gatedToolStarted = self.gatedToolStarted.clone();
+        Box::pin(async move {
+            if request.tool_name == "gate" {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                gatedToolCalls.lock().unwrap().push(sender);
+                gatedToolStarted.notify_one();
+                return receiver
+                    .await
+                    .expect("test must finish the gated Host call");
+            }
+            if request.tool_name == "get_device_location" {
+                return JsToolCallResult {
+                    success: false,
+                    data: JsToolCallResultData::Value(Value::Null),
+                    error: Some(
+                        "Error getting location information: location permission denied"
+                            .to_string(),
+                    ),
+                };
+            }
+            if request.tool_name != "sleep" {
+                panic!(
+                    "Unexpected tool execution in JavaScript engine test: {}",
+                    request.tool_name
+                );
+            }
+            let requestedMs = request
+                .parameters
+                .get("duration_ms")
+                .and_then(Value::as_u64)
+                .expect("System.sleep must forward duration_ms to the host");
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost()
+                .scheduleDelayedHostRuntimeTask(
+                    "test-tool-delay",
+                    requestedMs,
+                    Box::new(move || {
+                        let _ = sender.send(());
+                    }),
+                )
+                .expect("Host must schedule the requested test delay");
+            receiver
+                .await
+                .expect("Host must complete the requested test delay");
+            JsToolCallResult {
+                success: true,
+                data: JsToolCallResultData::Value(serde_json::json!({
+                    "requestedMs": requestedMs,
+                    "sleptMs": requestedMs,
+                })),
+                error: None,
+            }
+        })
     }
 
     /// Returns the language used by the plugin config test.
@@ -366,8 +395,8 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
 }
 
 /// Verifies failed structured tool envelopes reject with their message instead of leaking JSON.
-#[test]
-fn structured_tool_failure_rejects_with_message() {
+#[tokio::test(flavor = "current_thread")]
+async fn structured_tool_failure_rejects_with_message() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let output = engine
         .execute_script_function(
@@ -389,6 +418,7 @@ fn structured_tool_failure_rejects_with_message() {
             2,
             None,
         )
+        .await
         .expect("location tool failure must be handled by JavaScript");
     assert_eq!(
         output.as_deref(),
@@ -409,8 +439,8 @@ fn testParams() -> BTreeMap<String, Value> {
 
 /// Verifies a synchronous loop is interrupted and does not pin the worker afterward.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn synchronous_timeout_interrupts_quickjs_worker() {
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_timeout_interrupts_quickjs_worker() {
     let engine = newTestToolPkgRegistrationEngine();
     let params = testParams();
     let started = Instant::now();
@@ -425,6 +455,7 @@ fn synchronous_timeout_interrupts_quickjs_worker() {
             1,
             None,
         )
+        .await
         .expect_err("synchronous loop must time out");
 
     assert_eq!(error.kind, JsExecutionErrorKind::Timeout);
@@ -441,6 +472,7 @@ fn synchronous_timeout_interrupts_quickjs_worker() {
             2,
             None,
         )
+        .await
         .expect("worker must accept execution after an interrupt");
 
     assert_eq!(output.as_deref(), Some("\"ready\""));
@@ -449,23 +481,25 @@ fn synchronous_timeout_interrupts_quickjs_worker() {
 
 /// Verifies a host System sleep call returns control to the JavaScript worker for later calls.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn system_sleep_host_call_releases_quickjs_worker() {
+#[tokio::test(flavor = "current_thread")]
+async fn system_sleep_host_call_releases_quickjs_worker() {
     ensure_test_runtime_root();
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let params = testParams();
 
     let sleepOutput = expect_js_output(
-        engine.execute_script_function_with_timeout_millis(
-            "exports.sleep = function() { return Tools.System.sleep(37); };",
-            "sleep",
-            &params,
-            &BTreeMap::new(),
-            None,
-            true,
-            250,
-            None,
-        ),
+        engine
+            .execute_script_function_with_timeout_millis(
+                "exports.sleep = function() { return Tools.System.sleep(37); };",
+                "sleep",
+                &params,
+                &BTreeMap::new(),
+                None,
+                true,
+                250,
+                None,
+            )
+            .await,
         "System.sleep host call",
     );
     let sleepPayload = serde_json::from_str::<Value>(&sleepOutput)
@@ -484,6 +518,7 @@ fn system_sleep_host_call_releases_quickjs_worker() {
             2,
             None,
         )
+        .await
         .expect("worker must accept execution after a System.sleep host call");
 
     assert_eq!(nextOutput.as_deref(), Some("\"ready\""));
@@ -491,8 +526,8 @@ fn system_sleep_host_call_releases_quickjs_worker() {
 }
 
 /// Verifies a pending tool call cannot block already-ready JavaScript promise work.
-#[test]
-fn async_tool_call_yields_to_ready_javascript_promise() {
+#[tokio::test(flavor = "current_thread")]
+async fn async_tool_call_yields_to_ready_javascript_promise() {
     ensure_test_runtime_root();
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let params = testParams();
@@ -515,6 +550,7 @@ fn async_tool_call_yields_to_ready_javascript_promise() {
             2,
             None,
         )
+        .await
         .expect("ready JavaScript promise must win the tool-call race");
 
     assert_eq!(output.as_deref(), Some("\"ready\""));
@@ -526,8 +562,8 @@ fn async_tool_call_yields_to_ready_javascript_promise() {
 }
 
 /// Verifies the host tool catalog bridge returns structured schemas to package JavaScript.
-#[test]
-fn tool_catalog_bridge_returns_structured_response() {
+#[tokio::test(flavor = "current_thread")]
+async fn tool_catalog_bridge_returns_structured_response() {
     ensure_test_runtime_root();
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let output = engine
@@ -541,6 +577,7 @@ fn tool_catalog_bridge_returns_structured_response() {
             2,
             None,
         )
+        .await
         .expect("tool catalog bridge must complete");
 
     assert_eq!(output.as_deref(), Some(r#"{"tools":[]}"#));
@@ -548,8 +585,8 @@ fn tool_catalog_bridge_returns_structured_response() {
 }
 
 /// Verifies JavaScript timers race independently from pending Host tool work.
-#[test]
-fn javascript_timer_can_win_race_against_async_tool_call() {
+#[tokio::test(flavor = "current_thread")]
+async fn javascript_timer_can_win_race_against_async_tool_call() {
     ensure_test_runtime_root();
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let params = testParams();
@@ -574,6 +611,7 @@ fn javascript_timer_can_win_race_against_async_tool_call() {
             2,
             None,
         )
+        .await
         .expect("JavaScript timer must complete while the Host tool is pending");
 
     assert_eq!(output.as_deref(), Some("\"timeout\""));
@@ -640,8 +678,8 @@ fn clearing_timer_from_another_call_releases_timer_owner_reference() {
 
 /// Verifies an asynchronous callback failure cleans its call state before the next request.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn failed_async_callback_does_not_poison_quickjs_engine() {
+#[tokio::test(flavor = "current_thread")]
+async fn failed_async_callback_does_not_poison_quickjs_engine() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let params = testParams();
     let error = engine
@@ -666,6 +704,7 @@ fn failed_async_callback_does_not_poison_quickjs_engine() {
             2,
             None,
         )
+        .await
         .expect_err("timer callback failure must reject its request");
 
     assert_eq!(error.kind, JsExecutionErrorKind::Runtime);
@@ -681,6 +720,7 @@ fn failed_async_callback_does_not_poison_quickjs_engine() {
             2,
             None,
         )
+        .await
         .expect("the next request must run after an asynchronous callback failure");
 
     assert_eq!(output.as_deref(), Some("\"ready\""));
@@ -1070,8 +1110,8 @@ fn runtime_context_with_context_runs_local_main_runner() {
 
 /// Verifies cross-runtime ToolPkg IPC leaves the source QuickJS worker and resolves by callback.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn toolpkg_ipc_cross_runtime_dispatch_is_asynchronous() {
+#[tokio::test(flavor = "current_thread")]
+async fn toolpkg_ipc_cross_runtime_dispatch_is_asynchronous() {
     ensure_test_runtime_root();
     let host = Arc::new(TestPluginConfigExecutionHost::default());
     let engine = newTestIpcEngine(host.clone());
@@ -1094,16 +1134,18 @@ fn toolpkg_ipc_cross_runtime_dispatch_is_asynchronous() {
         Value::String("ui".to_string()),
     );
 
-    let output = engine.execute_script_function(
-        script,
-        "remote_ipc",
-        &params,
-        &BTreeMap::new(),
-        None,
-        true,
-        2,
-        None,
-    );
+    let output = engine
+        .execute_script_function(
+            script,
+            "remote_ipc",
+            &params,
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await;
 
     assert_eq!(
         expect_js_output(output, "cross-runtime ToolPkg IPC"),
@@ -1191,54 +1233,64 @@ fn workflowIpcFixture() -> (
 
 /// AI tools share the main engine, but their awaited IPC must still load a cold main service.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn workflow_list_cold_main_same_engine_ipc_completes() {
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_list_cold_main_same_engine_ipc_completes() {
     let (engine, host, tools, params) = workflowIpcFixture();
     let started = Instant::now();
-    let result = engine.execute_script_function_with_timeout_millis(
-        &tools,
-        "list",
-        &params,
-        &BTreeMap::new(),
-        None,
-        true,
-        2_000,
-        None,
-    );
+    let result = engine
+        .execute_script_function_with_timeout_millis(
+            &tools,
+            "list",
+            &params,
+            &BTreeMap::new(),
+            None,
+            true,
+            2_000,
+            None,
+        )
+        .await;
     let output = expect_js_output(result, "cold workflow:list same-engine IPC");
     let snapshot: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(snapshot["workflows"], serde_json::json!([]));
     assert_eq!(snapshot["runs"], serde_json::json!([]));
     // A warmed main module must remain usable on subsequent calls as well.
-    let again = engine.execute_script_function_with_timeout_millis(
-        &tools, "list", &params, &BTreeMap::new(), None, true, 2_000, None,
-    );
+    let again = engine
+        .execute_script_function_with_timeout_millis(
+            &tools,
+            "list",
+            &params,
+            &BTreeMap::new(),
+            None,
+            true,
+            2_000,
+            None,
+        )
+        .await;
     host.toolPkgIpcTarget.lock().unwrap().take();
-    let again: Value = serde_json::from_str(&expect_js_output(again, "repeated workflow:list")).unwrap();
+    let again: Value =
+        serde_json::from_str(&expect_js_output(again, "repeated workflow:list")).unwrap();
     assert_eq!(again, snapshot);
     assert!(started.elapsed() < Duration::from_secs(2));
     engine.destroy();
 }
 
-/// Async callers must also release the state between polls, not hold it across await.
+/// Event-driven callers release the state so nested same-engine IPC can finish.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn workflow_list_async_same_engine_ipc_completes() {
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_list_async_same_engine_ipc_completes() {
     let (engine, host, tools, params) = workflowIpcFixture();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result = runtime.block_on(engine.execute_script_function_async(
-        tools,
-        "list".to_string(),
-        params,
-        BTreeMap::new(),
-        None,
-        true,
-        2_000,
-        None,
-    ));
+    let result = engine
+        .execute_script_function_async(
+            tools,
+            "list".to_string(),
+            params,
+            BTreeMap::new(),
+            None,
+            true,
+            2_000,
+            None,
+        )
+        .await;
     host.toolPkgIpcTarget.lock().unwrap().take();
     let output = expect_js_output(result, "async workflow:list same-engine IPC");
     let snapshot: Value = serde_json::from_str(&output).unwrap();
@@ -1248,16 +1300,15 @@ fn workflow_list_async_same_engine_ipc_completes() {
 
 /// Another call can finish while the first awaits a host tool, without borrowing its env/progress.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn pending_call_releases_state_and_preserves_call_context() {
+#[tokio::test(flavor = "current_thread")]
+async fn pending_call_releases_state_and_preserves_call_context() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let waiting = engine.clone();
-    let (sent, received) = std::sync::mpsc::channel();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let callback = Arc::new(move |value: String| {
         sent.send(value).unwrap();
     });
-    let first = std::thread::spawn(move || {
-        waiting.execute_script_function(
+    let first = tokio::spawn(waiting.execute_script_function(
         r#"exports.first = async function() {
             globalThis.firstFinished = false;
             NativeInterface.sendCallIntermediateResult(globalThis.__operitCurrentCallId, 'waiting');
@@ -1269,53 +1320,48 @@ fn pending_call_releases_state_and_preserves_call_context() {
         "first", &testParams(),
         &BTreeMap::from([("CALL_OWNER".to_string(), "first".to_string())]),
         Some(callback), true, 2, None,
-    )
-    });
-    assert_eq!(
-        received.recv_timeout(Duration::from_secs(1)).unwrap(),
-        "waiting"
-    );
+    ));
+    assert_eq!(received.recv().await.unwrap(), "waiting");
     let output = engine.execute_script_function(
         r#"exports.second = function() { return { owner: getEnv('CALL_OWNER'), firstFinished: globalThis.firstFinished }; };"#,
         "second", &testParams(),
         &BTreeMap::from([("CALL_OWNER".to_string(), "second".to_string())]),
         None, true, 2, None,
-    );
+    ).await;
     assert_eq!(
         expect_js_output(output, "interleaved second call"),
         r#"{"owner":"second","firstFinished":false}"#
     );
     assert_eq!(
-        expect_js_output(first.join().unwrap(), "interleaved first call"),
+        expect_js_output(first.await.unwrap(), "interleaved first call"),
         "\"first\""
     );
-    assert_eq!(
-        received.recv_timeout(Duration::from_secs(1)).unwrap(),
-        "first"
-    );
+    assert_eq!(received.recv().await.unwrap(), "first");
     engine.destroy();
 }
 
 /// Per-call overrides must keep writes made before an await, rather than restoring an old snapshot.
 #[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn call_environment_updates_survive_state_turns() {
+#[tokio::test(flavor = "current_thread")]
+async fn call_environment_updates_survive_state_turns() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
-    let output = engine.execute_script_function(
-        r#"exports.update = async function() {
+    let output = engine
+        .execute_script_function(
+            r#"exports.update = async function() {
             NativeInterface.setEnv('CALL_OWNER', 'updated');
             NativeInterface.setEnvs(JSON.stringify({ SECOND: 'second' }));
             await Tools.System.sleep(5);
             return { owner: getEnv('CALL_OWNER'), second: getEnv('SECOND') };
         };"#,
-        "update",
-        &testParams(),
-        &BTreeMap::from([("CALL_OWNER".to_string(), "original".to_string())]),
-        None,
-        true,
-        2,
-        None,
-    );
+            "update",
+            &testParams(),
+            &BTreeMap::from([("CALL_OWNER".to_string(), "original".to_string())]),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await;
     assert_eq!(
         expect_js_output(output, "environment across state turns"),
         r#"{"owner":"updated","second":"second"}"#
@@ -1471,9 +1517,9 @@ fn execute_inline_hook_function_source() {
     );
 }
 
-#[test]
+#[tokio::test(flavor = "current_thread")]
 /// Verifies Compose rendering waits for the CommonJS module to initialize lexical bindings.
-fn compose_dsl_default_export_can_capture_later_lexical_constants() {
+async fn compose_dsl_default_export_can_capture_later_lexical_constants() {
     ensure_test_runtime_root();
     let engine = newTestToolPkgRegistrationEngine();
     let script = r#"
@@ -1503,12 +1549,14 @@ fn compose_dsl_default_export_can_capture_later_lexical_constants() {
     );
 
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(
-            script,
-            &params,
-            &BTreeMap::new(),
-            Arc::new(BTreeMap::new()),
-        ),
+        engine
+            .execute_compose_dsl_script(
+                script,
+                &params,
+                &BTreeMap::new(),
+                Arc::new(BTreeMap::new()),
+            )
+            .await,
         "compose lexical initialization render result",
     );
     let parsed = serde_json::from_str::<Value>(&raw).expect("compose render json");
@@ -1521,8 +1569,8 @@ fn compose_dsl_default_export_can_capture_later_lexical_constants() {
 }
 
 /// Ensures Compose render and actions resolve package modules from the page snapshot without host reentry.
-#[test]
-fn compose_dsl_resource_snapshot_avoids_host_reentry_for_render_and_action() {
+#[tokio::test(flavor = "current_thread")]
+async fn compose_dsl_resource_snapshot_avoids_host_reentry_for_render_and_action() {
     ensure_test_runtime_root();
     let executionHost = Arc::new(TestPluginConfigExecutionHost::default());
     let engine = newTestJsEngine(executionHost.clone());
@@ -1556,7 +1604,9 @@ fn compose_dsl_resource_snapshot_avoids_host_reentry_for_render_and_action() {
     )]));
 
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(script, &params, &BTreeMap::new(), textResources),
+        engine
+            .execute_compose_dsl_script(script, &params, &BTreeMap::new(), textResources)
+            .await,
         "compose resource snapshot render result",
     );
     let rendered = serde_json::from_str::<Value>(&raw).expect("compose render json");
@@ -1566,7 +1616,9 @@ fn compose_dsl_resource_snapshot_avoids_host_reentry_for_render_and_action() {
         .expect("compose snapshot action id");
 
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None),
+        engine
+            .execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None)
+            .await,
         "compose resource snapshot action result",
     );
     let action = serde_json::from_str::<Value>(&actionRaw).expect("compose action json");
@@ -1580,8 +1632,8 @@ fn compose_dsl_resource_snapshot_avoids_host_reentry_for_render_and_action() {
     );
 }
 
-#[test]
-fn compose_dsl_action_uses_rendered_runtime() {
+#[tokio::test(flavor = "current_thread")]
+async fn compose_dsl_action_uses_rendered_runtime() {
     let engine = newTestToolPkgRegistrationEngine();
     let script = r#"
         exports.default = function(ctx) {
@@ -1605,12 +1657,14 @@ fn compose_dsl_action_uses_rendered_runtime() {
         Value::String("compose_route".to_string()),
     );
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(
-            script,
-            &params,
-            &BTreeMap::new(),
-            Arc::new(BTreeMap::new()),
-        ),
+        engine
+            .execute_compose_dsl_script(
+                script,
+                &params,
+                &BTreeMap::new(),
+                Arc::new(BTreeMap::new()),
+            )
+            .await,
         "compose render result",
     );
     let parsed = serde_json::from_str::<Value>(&raw).expect("compose render json");
@@ -1619,15 +1673,17 @@ fn compose_dsl_action_uses_rendered_runtime() {
         .expect("action id");
 
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None),
+        engine
+            .execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None)
+            .await,
         "compose action result",
     );
     let actionParsed = serde_json::from_str::<Value>(&actionRaw).expect("compose action json");
     assert_eq!(actionParsed["actionResult"], 1);
 }
 
-#[test]
-fn compose_dsl_action_updates_runtime_options_state_store() {
+#[tokio::test(flavor = "current_thread")]
+async fn compose_dsl_action_updates_runtime_options_state_store() {
     let engine = newTestToolPkgRegistrationEngine();
     let script = r#"
         exports.default = function(ctx) {
@@ -1650,12 +1706,14 @@ fn compose_dsl_action_updates_runtime_options_state_store() {
         Value::String("compose_route".to_string()),
     );
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(
-            script,
-            &params,
-            &BTreeMap::new(),
-            Arc::new(BTreeMap::new()),
-        ),
+        engine
+            .execute_compose_dsl_script(
+                script,
+                &params,
+                &BTreeMap::new(),
+                Arc::new(BTreeMap::new()),
+            )
+            .await,
         "compose render result",
     );
     let parsed = serde_json::from_str::<Value>(&raw).expect("compose render json");
@@ -1667,13 +1725,15 @@ fn compose_dsl_action_updates_runtime_options_state_store() {
     params.insert("memo".to_string(), parsed["memo"].clone());
 
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(
-            &actionId,
-            Some(Value::Bool(true)),
-            &params,
-            &BTreeMap::new(),
-            None,
-        ),
+        engine
+            .execute_compose_dsl_action(
+                &actionId,
+                Some(Value::Bool(true)),
+                &params,
+                &BTreeMap::new(),
+                None,
+            )
+            .await,
         "compose action result",
     );
     let actionParsed = serde_json::from_str::<Value>(&actionRaw).expect("compose action json");
@@ -1683,8 +1743,8 @@ fn compose_dsl_action_updates_runtime_options_state_store() {
 }
 
 /// Verifies that the final DSL tree is rendered after an asynchronous toggle action settles.
-#[test]
-fn compose_dsl_async_toggle_action_renders_settled_state() {
+#[tokio::test(flavor = "current_thread")]
+async fn compose_dsl_async_toggle_action_renders_settled_state() {
     let engine = newTestToolPkgRegistrationEngine();
     let script = r#"
         exports.default = function(ctx) {
@@ -1709,12 +1769,14 @@ fn compose_dsl_async_toggle_action_renders_settled_state() {
         Value::String("compose_async_toggle_route".to_string()),
     );
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(
-            script,
-            &params,
-            &BTreeMap::new(),
-            Arc::new(BTreeMap::new()),
-        ),
+        engine
+            .execute_compose_dsl_script(
+                script,
+                &params,
+                &BTreeMap::new(),
+                Arc::new(BTreeMap::new()),
+            )
+            .await,
         "compose async toggle render result",
     );
     let rendered = serde_json::from_str::<Value>(&raw).expect("compose async toggle render json");
@@ -1726,13 +1788,15 @@ fn compose_dsl_async_toggle_action_renders_settled_state() {
     params.insert("memo".to_string(), rendered["memo"].clone());
 
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(
-            &actionId,
-            Some(Value::Bool(true)),
-            &params,
-            &BTreeMap::new(),
-            None,
-        ),
+        engine
+            .execute_compose_dsl_action(
+                &actionId,
+                Some(Value::Bool(true)),
+                &params,
+                &BTreeMap::new(),
+                None,
+            )
+            .await,
         "compose async toggle action result",
     );
     let action =
@@ -1742,8 +1806,8 @@ fn compose_dsl_async_toggle_action_renders_settled_state() {
     assert_eq!(action["tree"]["props"]["checked"], true);
 }
 
-#[test]
-fn compose_dsl_action_can_access_bootstrap_globals() {
+#[tokio::test(flavor = "current_thread")]
+async fn compose_dsl_action_can_access_bootstrap_globals() {
     let engine = newTestToolPkgRegistrationEngine();
     let script = r#"
         exports.default = function(ctx) {
@@ -1767,12 +1831,14 @@ fn compose_dsl_action_can_access_bootstrap_globals() {
         Value::String("compose_route".to_string()),
     );
     let raw = expect_js_output(
-        engine.execute_compose_dsl_script(
-            script,
-            &params,
-            &BTreeMap::new(),
-            Arc::new(BTreeMap::new()),
-        ),
+        engine
+            .execute_compose_dsl_script(
+                script,
+                &params,
+                &BTreeMap::new(),
+                Arc::new(BTreeMap::new()),
+            )
+            .await,
         "compose render result",
     );
     let parsed = serde_json::from_str::<Value>(&raw).expect("compose render json");
@@ -1781,7 +1847,9 @@ fn compose_dsl_action_can_access_bootstrap_globals() {
         .expect("action id");
 
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None),
+        engine
+            .execute_compose_dsl_action(actionId, None, &params, &BTreeMap::new(), None)
+            .await,
         "compose action result",
     );
     let actionParsed = serde_json::from_str::<Value>(&actionRaw).expect("compose action json");
@@ -2260,8 +2328,8 @@ fn compose_timer_state_change_reaches_intermediate_render_after_action_completio
 }
 
 /// Verifies the real extra-info Compose screen resolves its parent shared module.
-#[test]
-fn render_message_insert_compose_dsl_screen() {
+#[tokio::test(flavor = "current_thread")]
+async fn render_message_insert_compose_dsl_screen() {
     ensure_test_runtime_root();
     let repoRoot = testRepositoryRoot();
     let distRoot = repoRoot.join("plugins/packages/external/message_insert/dist");
@@ -2283,12 +2351,9 @@ fn render_message_insert_compose_dsl_screen() {
         Value::String("dist/ui/index.ui.js".to_string()),
     );
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
-    let output = engine.execute_compose_dsl_script(
-        &script,
-        &params,
-        &BTreeMap::new(),
-        Arc::new(textResources),
-    );
+    let output = engine
+        .execute_compose_dsl_script(&script, &params, &BTreeMap::new(), Arc::new(textResources))
+        .await;
     let raw = expect_js_output(output, "message_insert compose render");
     let rendered = serde_json::from_str::<Value>(&raw).expect("message_insert compose render JSON");
     assert!(rendered["tree"].is_object());
@@ -2296,8 +2361,8 @@ fn render_message_insert_compose_dsl_screen() {
 }
 
 /// Verifies the real message-insert master switch renders the immediate local state change.
-#[test]
-fn message_insert_compose_master_switch_updates_before_async_persistence() {
+#[tokio::test(flavor = "current_thread")]
+async fn message_insert_compose_master_switch_updates_before_async_persistence() {
     ensure_test_runtime_root();
     let repoRoot = testRepositoryRoot();
     let distRoot = repoRoot.join("plugins/packages/external/message_insert/dist");
@@ -2329,7 +2394,9 @@ fn message_insert_compose_master_switch_updates_before_async_persistence() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
     let resources = Arc::new(textResources);
     let renderedRaw = expect_js_output(
-        engine.execute_compose_dsl_script(&script, &params, &BTreeMap::new(), resources),
+        engine
+            .execute_compose_dsl_script(&script, &params, &BTreeMap::new(), resources)
+            .await,
         "message_insert compose render",
     );
     let rendered = serde_json::from_str::<Value>(&renderedRaw).expect("rendered JSON");
@@ -2339,13 +2406,15 @@ fn message_insert_compose_master_switch_updates_before_async_persistence() {
     actionParams.insert("state".to_string(), rendered["state"].clone());
     actionParams.insert("memo".to_string(), rendered["memo"].clone());
     let actionRaw = expect_js_output(
-        engine.execute_compose_dsl_action(
-            &actionId,
-            Some(Value::Bool(true)),
-            &actionParams,
-            &BTreeMap::new(),
-            None,
-        ),
+        engine
+            .execute_compose_dsl_action(
+                &actionId,
+                Some(Value::Bool(true)),
+                &actionParams,
+                &BTreeMap::new(),
+                None,
+            )
+            .await,
         "message_insert master toggle action",
     );
     let action = serde_json::from_str::<Value>(&actionRaw).expect("action JSON");
@@ -2643,24 +2712,41 @@ fn registration_config_directory_works_before_installation_without_reentering_ma
 }
 
 /// Clears registration-only configuration routing before the engine executes a runtime function.
-#[test]
-fn registration_config_context_does_not_leak_into_runtime_execution() {
+#[tokio::test(flavor = "current_thread")]
+async fn registration_config_context_does_not_leak_into_runtime_execution() {
     let host = Arc::new(TestPluginConfigExecutionHost::default());
     let engine = newTestJsEngine(host.clone());
     let mut params = testParams();
-    params.insert("toolPkgId".to_string(), Value::String("first_import".to_string()));
-    params.insert("__operit_registration_config_scope".to_string(), Value::String("space".to_string()));
+    params.insert(
+        "toolPkgId".to_string(),
+        Value::String("first_import".to_string()),
+    );
+    params.insert(
+        "__operit_registration_config_scope".to_string(),
+        Value::String("space".to_string()),
+    );
     engine.execute_toolpkg_main_registration_function(
         "const path = ToolPkg.getConfigDir(); exports.registerToolPkg = function() { return true; };",
         "registerToolPkg", &params,
     ).expect("space registration configuration");
-    let output = engine.execute_script_function(
-        "exports.read_config = function() { return ToolPkg.getConfigDir(); };",
-        "read_config", &params, &BTreeMap::new(), None, true, 2, None,
-    ).expect("runtime configuration must use the installed-owner callback")
+    let output = engine
+        .execute_script_function(
+            "exports.read_config = function() { return ToolPkg.getConfigDir(); };",
+            "read_config",
+            &params,
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await
+        .expect("runtime configuration must use the installed-owner callback")
         .expect("runtime configuration result");
-    assert_eq!(serde_json::from_str::<String>(&output).unwrap(),
-        "/app/data/extensions/device/plugins/configs/first_import");
+    assert_eq!(
+        serde_json::from_str::<String>(&output).unwrap(),
+        "/app/data/extensions/device/plugins/configs/first_import"
+    );
     assert_eq!(host.registrationConfigReads.load(Ordering::Relaxed), 1);
 }
 
@@ -2804,4 +2890,154 @@ fn probe_async_function_declaration_inside_iife() {
     assert!(output
         .expect("async function declaration probe execution")
         .is_some());
+}
+
+
+
+/// Reads session ownership on the affine executor without driving JavaScript work.
+async fn executionSessionCounts(engine: &super::JsEngine) -> (usize, usize) {
+    let output = engine
+        .worker
+        .runtimeHost
+        .executeHostJavaScriptRuntimeStateAsyncTask(
+            engine.worker.stateHandle,
+            1_000,
+            Box::new(|state, _interrupt| {
+                Box::pin(async move {
+                    let state = state
+                        .downcast_mut::<JsEngineState>()
+                        .expect("test engine state");
+                    Ok(Box::new((
+                        state.pendingScriptExecutions.len(),
+                        state.detachedCallContexts.len(),
+                    ))
+                        as operit_host_api::HostJavaScriptRuntimeStateOutput)
+                })
+            }),
+        )
+        .await
+        .expect("Host must inspect the test state");
+    *output
+        .downcast::<(usize, usize)>()
+        .expect("session count output")
+}
+
+/// Finishes a deliberately suspended tool without a delay or polling loop.
+fn finishGatedTool(host: &TestPluginConfigExecutionHost) {
+    host.gatedToolCalls
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("one gated tool must be pending")
+        .send(JsToolCallResult {
+            success: true,
+            ..JsToolCallResult::default()
+        })
+        .expect("gated tool must still own its receiver");
+}
+
+/// Primary completion releases the request while a detached Promise retains its original context.
+#[tokio::test(flavor = "current_thread")]
+async fn completion_retains_detached_promise_context_until_host_event() {
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let engine = newTestJsEngine(host.clone());
+    let (sender, mut progress) = tokio::sync::mpsc::unbounded_channel();
+    let output = engine.execute_script_function(
+        r#"exports.main = function() {
+            globalThis.detachedRuns = 0;
+            toolCall('gate', {}).then(function() {
+                globalThis.detachedRuns++;
+                sendIntermediateResult({ owner: getEnv('CALL_OWNER'), runs: globalThis.detachedRuns });
+            });
+            return 'primary';
+        };"#, "main", &testParams(),
+        &BTreeMap::from([("CALL_OWNER".to_string(), "original".to_string())]),
+        Some(Arc::new(move |value| { sender.send(value).unwrap(); })), true, 2, None,
+    ).await;
+    assert_eq!(
+        expect_js_output(output, "primary completion"),
+        "\"primary\""
+    );
+    host.gatedToolStarted.notified().await;
+    assert_eq!(executionSessionCounts(&engine).await, (0, 1));
+    let output = engine
+        .execute_script_function(
+            "exports.next = function() { return getEnv('CALL_OWNER'); };",
+            "next",
+            &testParams(),
+            &BTreeMap::from([("CALL_OWNER".to_string(), "next".to_string())]),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await;
+    assert_eq!(expect_js_output(output, "next request"), "\"next\"");
+    finishGatedTool(&host);
+    let resumed: Value =
+        serde_json::from_str(&progress.recv().await.expect("detached progress")).unwrap();
+    assert_eq!(resumed, serde_json::json!({"owner": "original", "runs": 1}));
+    assert_eq!(executionSessionCounts(&engine).await, (0, 0));
+    assert!(
+        progress.try_recv().is_err(),
+        "continuation must execute exactly once"
+    );
+    engine.destroy();
+}
+
+/// Destruction completes a pending request rather than leaving its caller suspended.
+#[tokio::test(flavor = "current_thread")]
+async fn destruction_completes_pending_request() {
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let engine = newTestJsEngine(host.clone());
+    let request = tokio::spawn(engine.execute_script_function(
+        "exports.main = async function() { return await toolCall('gate', {}); };",
+        "main",
+        &testParams(),
+        &BTreeMap::new(),
+        None,
+        true,
+        2,
+        None,
+    ));
+    host.gatedToolStarted.notified().await;
+    assert_eq!(executionSessionCounts(&engine).await, (1, 0));
+    engine.destroy();
+    let error = request
+        .await
+        .unwrap()
+        .expect_err("destroyed state must complete with an error");
+    assert_eq!(error.kind, JsExecutionErrorKind::WorkerUnavailable);
+    finishGatedTool(&host);
+}
+
+/// A CPU-bound Promise continuation obeys the original request deadline, not a polling interval.
+#[tokio::test(flavor = "current_thread")]
+async fn promise_continuation_respects_execution_interrupt() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let started = Instant::now();
+    let error = engine.execute_script_function_with_timeout_millis(
+        "exports.main = async function() { await new Promise(function(resolve) { setTimeout(resolve, 1); }); while (true) {} };",
+        "main", &testParams(), &BTreeMap::new(), None, true, 40, None,
+    ).await.expect_err("CPU-bound continuation must time out");
+    assert_eq!(error.kind, JsExecutionErrorKind::Timeout);
+    let output = engine
+        .execute_script_function(
+            "exports.next = function() { return 'usable'; };",
+            "next",
+            &testParams(),
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await;
+    assert_eq!(
+        expect_js_output(output, "post-timeout request"),
+        "\"usable\""
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(executionSessionCounts(&engine).await, (0, 0));
+    engine.destroy();
 }

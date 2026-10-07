@@ -166,7 +166,7 @@ pub trait ProviderRuntimeSupport: Send + Sync {
         runtimeContextKey: Option<String>,
         executionKind: Option<String>,
         onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>>;
 
     /// Decodes a tool package hook result.
     fn decodeToolPkgHookResult(&self, raw: Option<String>) -> Option<Value>;

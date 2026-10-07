@@ -449,6 +449,7 @@ class _ClassicChatInputSectionState extends State<ClassicChatInputSection>
                 key: _mentionPopupTargetKey,
                 child: _ClassicInputSurface(
                   color: colorScheme.surface,
+                  floating: snapshot.chatInputFloating,
                   shape: surfaceShape,
                   borderRadius: borderRadius,
                   transparentSurface: snapshot.transparentSurfaceEnabled,
@@ -834,8 +835,10 @@ class _ClassicInputBody extends StatelessWidget {
 }
 
 class _ClassicInputSurface extends StatelessWidget {
+  /// Creates a surface with inset content or an inset floating card.
   const _ClassicInputSurface({
     required this.color,
+    required this.floating,
     required this.shape,
     required this.borderRadius,
     required this.transparentSurface,
@@ -845,6 +848,7 @@ class _ClassicInputSurface extends StatelessWidget {
   });
 
   final Color color;
+  final bool floating;
   final ShapeBorder shape;
   final BorderRadius borderRadius;
   final bool transparentSurface;
@@ -859,6 +863,7 @@ class _ClassicInputSurface extends StatelessWidget {
     final decorated = SizedBox(
       width: width,
       child: DecoratedBox(
+        key: const ValueKey<String>('chat.input.surface'),
         decoration: ShapeDecoration(
           color: effectiveColor,
           shape: shape,
@@ -872,7 +877,13 @@ class _ClassicInputSurface extends StatelessWidget {
                   ),
                 ],
         ),
-        child: child,
+        child: SafeArea(
+          top: false,
+          left: false,
+          right: false,
+          bottom: !floating,
+          child: child,
+        ),
       ),
     );
     final Widget surface;
@@ -914,7 +925,13 @@ class _ClassicInputSurface extends StatelessWidget {
     } else {
       surface = decorated;
     }
-    return Padding(padding: margin, child: surface);
+    return SafeArea(
+      top: false,
+      left: false,
+      right: false,
+      bottom: floating,
+      child: Padding(padding: margin, child: surface),
+    );
   }
 }
 
@@ -1110,14 +1127,20 @@ class _ClassicAttachmentPanelItemButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: <Widget>[
-              Icon(item.icon, size: 16, color: enabled ? iconColor : disabledColor),
+              Icon(
+                item.icon,
+                size: 16,
+                color: enabled ? iconColor : disabledColor,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   item.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: textStyle?.copyWith(color: enabled ? textColor : disabledColor),
+                  style: textStyle?.copyWith(
+                    color: enabled ? textColor : disabledColor,
+                  ),
                 ),
               ),
             ],

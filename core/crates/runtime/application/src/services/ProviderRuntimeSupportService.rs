@@ -297,7 +297,8 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
         runtimeContextKey: Option<String>,
         executionKind: Option<String>,
         onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>>
+    {
         let package_manager = self.tool_handler.getOrCreatePackageManager();
         let manager = package_manager
             .lock()

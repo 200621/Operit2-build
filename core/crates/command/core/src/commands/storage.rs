@@ -14,12 +14,35 @@ pub fn run_storage_command(
 ) -> Result<(), String> {
     match args.get(0).map(String::as_str) {
         Some("paths") if args.len() == 1 => print_storage_paths(application, output),
+        Some("mounts") => run_mount_command(application, &args[1..], output),
         Some("migrate") => migrate_storage_roots(application, &args[1..], output),
         _ => {
             print_storage_usage(output);
             Ok(())
         }
     }
+}
+
+/// Registers native folders or platform resource backends without adding VFS special cases.
+fn run_mount_command(application: &OperitApplication, args: &[String], output: &mut CoreCommandOutput) -> Result<(), String> {
+    let config = storage_root_config(application)?;
+    let registry = operit_tools::files::MountRegistry::MountRegistry::new(&config.runtime_root);
+    match args.first().map(String::as_str) {
+        Some("list") if args.len() == 1 => {
+            output.setJsonStdout(serde_json::json!({"mounts": registry.list()?}));
+        }
+        Some("add") if args.len() == 5 => {
+            let mount = registry.register(&args[1], &args[2], &args[3], &args[4])?;
+            output.push_stdout_line(mount.vfsPath());
+            output.setJsonStdout(serde_json::json!({"path": mount.vfsPath(), "mount": mount}));
+        }
+        Some("remove") if args.len() == 2 => {
+            registry.remove(&args[1])?;
+            output.setJsonStdout(serde_json::json!({"removed": args[1]}));
+        }
+        _ => return Err("usage: storage mounts list | add <namespace> <backend> <root> <name> | remove <vfs-path>".into()),
+    }
+    Ok(())
 }
 
 /// Prints the active runtime and workspace root directories.
@@ -220,6 +243,9 @@ fn copy_storage_entry(source: &Path, target: &Path) -> Result<(), String> {
 fn print_storage_usage(output: &mut CoreCommandOutput) {
     let lines = vec![
         "operit2 storage paths",
+        "operit2 storage mounts list",
+        "operit2 storage mounts add <namespace> <backend> <root> <name>",
+        "operit2 storage mounts remove <vfs-path>",
         "operit2 storage migrate --runtime <path> --workspace <path>",
     ];
     for line in &lines {

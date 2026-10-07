@@ -61,6 +61,9 @@ impl OperitTui {
         self.render_footer(frame, root[2]);
         self.render_command_popup(frame, main[1]);
 
+        // Overlays record the topmost popup content rect for mouse selection.
+        self.popup_selection_rect = None;
+
         if let Some(editor) = &self.compose.editor {
             let area = centered_rect(80, 25, frame.area());
             frame.render_widget(Clear, area);
@@ -86,6 +89,7 @@ impl OperitTui {
 
         if self.show_config_popup {
             self.config_ui.render(frame, self.text());
+            self.popup_selection_rect = self.config_ui.selection_rect;
         }
 
         if self.show_help {
@@ -110,6 +114,8 @@ impl OperitTui {
         if self.approval_bridge.current().is_some() {
             self.render_approval_modal(frame);
         }
+
+        self.finish_popup_selection(frame.buffer_mut());
     }
 
     fn render_header(&mut self, frame: &mut Frame, area: Rect) {
@@ -470,7 +476,7 @@ impl OperitTui {
         );
     }
 
-    fn render_model_chooser(&self, frame: &mut Frame) {
+    fn render_model_chooser(&mut self, frame: &mut Frame) {
         let popup = centered_rect(84, 70, frame.area());
         frame.render_widget(Clear, popup);
 
@@ -483,6 +489,7 @@ impl OperitTui {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT));
         let inner = block.inner(popup);
+        self.popup_selection_rect = Some(inner);
         frame.render_widget(block, popup);
 
         let areas = Layout::default()
@@ -572,7 +579,7 @@ impl OperitTui {
         frame.render_stateful_widget(list, areas[2], &mut state);
     }
 
-    fn render_list_popup(&self, frame: &mut Frame) {
+    fn render_list_popup(&mut self, frame: &mut Frame) {
         let popup = centered_rect(60, 70, frame.area());
         frame.render_widget(Clear, popup);
 
@@ -581,6 +588,7 @@ impl OperitTui {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT));
         let inner = block.inner(popup);
+        self.popup_selection_rect = Some(inner);
         frame.render_widget(block, popup);
 
         let areas = Layout::default()
@@ -643,9 +651,10 @@ impl OperitTui {
         frame.render_stateful_widget(list, areas[2], &mut state);
     }
 
-    fn render_help_modal(&self, frame: &mut Frame) {
+    fn render_help_modal(&mut self, frame: &mut Frame) {
         let popup = centered_rect(72, 60, frame.area());
         frame.render_widget(Clear, popup);
+        self.popup_selection_rect = Some(Block::default().borders(Borders::ALL).inner(popup));
         let lines = self
             .text()
             .help_lines()
@@ -672,13 +681,14 @@ impl OperitTui {
         frame.render_widget(help, popup);
     }
 
-    fn render_startup_install_prompt(&self, frame: &mut Frame) {
+    fn render_startup_install_prompt(&mut self, frame: &mut Frame) {
         let Some(prompt) = self.startup_install_prompt.as_ref() else {
             return;
         };
         let text = self.text();
         let popup = centered_rect(82, 52, frame.area());
         frame.render_widget(Clear, popup);
+        self.popup_selection_rect = Some(Block::default().borders(Borders::ALL).inner(popup));
         let lines = match &prompt.state {
             StartupInstallState::Ready => {
                 let yes_style = if prompt.install_selected {
@@ -760,7 +770,7 @@ impl OperitTui {
         frame.render_widget(modal, popup);
     }
 
-    fn render_startup_workspace_prompt(&self, frame: &mut Frame) {
+    fn render_startup_workspace_prompt(&mut self, frame: &mut Frame) {
         let Some(prompt) = self.startup_workspace_prompt.as_ref() else {
             return;
         };
@@ -788,6 +798,7 @@ impl OperitTui {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT_DIM));
         let inner = modal_block.inner(popup);
+        self.popup_selection_rect = Some(inner);
         frame.render_widget(modal_block, popup);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -811,7 +822,7 @@ impl OperitTui {
         frame.render_widget(actions, chunks[1]);
     }
 
-    fn render_startup_update_prompt(&self, frame: &mut Frame) {
+    fn render_startup_update_prompt(&mut self, frame: &mut Frame) {
         let Some(prompt) = self.startup_update_prompt.as_ref() else {
             return;
         };
@@ -997,10 +1008,11 @@ impl OperitTui {
                     .border_style(Style::default().fg(theme::ACCENT_DIM)),
             )
             .wrap(Wrap { trim: false });
+        self.popup_selection_rect = Some(Block::default().borders(Borders::ALL).inner(popup));
         frame.render_widget(modal, popup);
     }
 
-    fn render_approval_modal(&self, frame: &mut Frame) {
+    fn render_approval_modal(&mut self, frame: &mut Frame) {
         let Some(request) = self.approval_bridge.current() else {
             return;
         };
@@ -1024,6 +1036,7 @@ impl OperitTui {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT_DIM));
         let inner = modal_block.inner(popup);
+        self.popup_selection_rect = Some(inner);
         frame.render_widget(modal_block, popup);
         let chunks = Layout::default()
             .direction(Direction::Vertical)

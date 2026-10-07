@@ -117,9 +117,9 @@ class WorkspaceTabContent extends StatelessWidget {
           onOpenFile: onOpenFile,
           onSelectCurrentDirectory: onBindWorkspace,
           onPickLocalDirectory: () async {
-            final path = await OperitFolderAccess.pickDirectory();
-            if (path != null && path.trim().isNotEmpty) {
-              await onBindWorkspace(path.trim());
+            final source = await OperitFolderAccess.pickWorkspaceDirectory();
+            if (source != null) {
+              await onBindWorkspace(source.encode());
             }
           },
         );

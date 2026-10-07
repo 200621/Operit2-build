@@ -440,25 +440,27 @@ fn triggerRefresh(
     let paramsCacheKeyForRefresh = paramsCacheKey.to_string();
     let taskRuntime = runtime.clone();
     launchTask(&runtime, "operit-toolpkg-input-refresh", move || {
-        let resolved = loadSpecs(&taskRuntime, &paramsForRefresh);
-        *INPUT_MENU_SPECS_CACHE
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .expect("toolpkg input menu specs mutex poisoned") = resolved;
-        HAS_LOADED_ONCE.store(true, Ordering::SeqCst);
-        LAST_HOOK_REGISTRY_VERSION.store(registryVersion, Ordering::SeqCst);
-        *LAST_PARAMS_CACHE_KEY
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .expect("toolpkg input menu params cache mutex poisoned") =
-            Some(paramsCacheKeyForRefresh);
-        REFRESH_FLAG.store(false, Ordering::SeqCst);
-        InputMenuTogglePluginRegistry::notifyChanged();
+        Box::pin(async move {
+            let resolved = loadSpecs(&taskRuntime, &paramsForRefresh).await;
+            *INPUT_MENU_SPECS_CACHE
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .expect("toolpkg input menu specs mutex poisoned") = resolved;
+            HAS_LOADED_ONCE.store(true, Ordering::SeqCst);
+            LAST_HOOK_REGISTRY_VERSION.store(registryVersion, Ordering::SeqCst);
+            *LAST_PARAMS_CACHE_KEY
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("toolpkg input menu params cache mutex poisoned") =
+                Some(paramsCacheKeyForRefresh);
+            REFRESH_FLAG.store(false, Ordering::SeqCst);
+            InputMenuTogglePluginRegistry::notifyChanged();
+        })
     });
 }
 
 #[allow(non_snake_case)]
-fn loadSpecs(
+async fn loadSpecs(
     runtime: &ToolPkgBridgeRuntime,
     params: &InputMenuToggleHookParams,
 ) -> Vec<InputMenuSpec> {
@@ -470,22 +472,24 @@ fn loadSpecs(
     let mut resolved = Vec::new();
     let manager = runtime.package_manager();
     for hook in registeredHooks {
-        let result = manager.runToolPkgMainHook(
-            &hook.containerPackageName,
-            &hook.functionName,
-            TOOLPKG_EVENT_INPUT_MENU_TOGGLE,
-            None,
-            Some(&hook.pluginId),
-            hook.functionSource.as_deref(),
-            serde_json::json!({
-                "action": "create",
-                "chatId": params.chatId,
-                "runtime": params.runtime,
-            }),
-            None,
-            None,
-            None,
-        );
+        let result = manager
+            .runToolPkgMainHook(
+                &hook.containerPackageName,
+                &hook.functionName,
+                TOOLPKG_EVENT_INPUT_MENU_TOGGLE,
+                None,
+                Some(&hook.pluginId),
+                hook.functionSource.as_deref(),
+                serde_json::json!({
+                    "action": "create",
+                    "chatId": params.chatId,
+                    "runtime": params.runtime,
+                }),
+                None,
+                None,
+                None,
+            )
+            .await;
         let value = match result {
             Ok(output) => decodeToolPkgHookResult(output),
             Err(error) => {
@@ -608,32 +612,48 @@ fn runInputMenuToggleHook(
     spec: &InputMenuSpec,
     params: &InputMenuToggleHookParams,
 ) {
-    let manager = runtime.package_manager();
-    if let Err(error) = manager.runToolPkgMainHook(
-        &spec.containerPackageName,
-        &spec.functionName,
-        TOOLPKG_EVENT_INPUT_MENU_TOGGLE,
-        None,
-        Some(&spec.pluginId),
-        spec.functionSource.as_deref(),
-        serde_json::json!({
-            "action": "toggle",
-            "toggleId": spec.id,
-            "chatId": params.chatId,
-            "runtime": params.runtime,
-        }),
-        None,
-        None,
-        None,
-    ) {
-        AppLogger::e(
-            TAG,
-            &format!(
-                "ToolPkg input menu toggle hook failed: {}:{} {}",
-                spec.containerPackageName, spec.pluginId, error
-            ),
-        );
-    }
+    let runtime = runtime.to_owned();
+    let spec = spec.to_owned();
+    let params = params.to_owned();
+    super::ToolPkgHookBridgeSupport::scheduleToolPkgNotification(
+        "operit-toolpkg-notification",
+        move || {
+            Box::pin(async move {
+                let runtime = &runtime;
+                let spec = &spec;
+                let params = &params;
+                let manager = runtime.package_manager();
+                if let Err(error) = manager
+                    .runToolPkgMainHook(
+                        &spec.containerPackageName,
+                        &spec.functionName,
+                        TOOLPKG_EVENT_INPUT_MENU_TOGGLE,
+                        None,
+                        Some(&spec.pluginId),
+                        spec.functionSource.as_deref(),
+                        serde_json::json!({
+                            "action": "toggle",
+                            "toggleId": spec.id,
+                            "chatId": params.chatId,
+                            "runtime": params.runtime,
+                        }),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    AppLogger::e(
+                        TAG,
+                        &format!(
+                            "ToolPkg input menu toggle hook failed: {}:{} {}",
+                            spec.containerPackageName, spec.pluginId, error
+                        ),
+                    );
+                }
+            })
+        },
+    );
 }
 
 #[allow(non_snake_case)]
@@ -644,23 +664,25 @@ fn launchToggle(
 ) {
     let taskRuntime = runtime.clone();
     launchTask(&runtime, "operit-toolpkg-input-toggle", move || {
-        runInputMenuToggleHook(&taskRuntime, &spec, &params);
-        let registryVersion = HOOK_REGISTRY_VERSION.load(Ordering::SeqCst);
-        let paramsCacheKey = buildCacheKey(&params);
-        triggerRefresh(taskRuntime, &params, registryVersion, &paramsCacheKey);
+        Box::pin(async move {
+            runInputMenuToggleHook(&taskRuntime, &spec, &params);
+            let registryVersion = HOOK_REGISTRY_VERSION.load(Ordering::SeqCst);
+            let paramsCacheKey = buildCacheKey(&params);
+            triggerRefresh(taskRuntime, &params, registryVersion, &paramsCacheKey);
+        })
     });
 }
 
 #[allow(non_snake_case)]
 fn launchTask<F>(runtime: &ToolPkgBridgeRuntime, taskName: &str, task: F)
 where
-    F: FnOnce() + Send + 'static,
+    F: FnOnce() -> operit_plugin_sdk::javascript::JsExecutionFuture<()> + Send + 'static,
 {
     runtime
         .host_manager()
         .hostRuntimeTaskSchedulerHost
         .as_ref()
         .expect("HostRuntimeTaskSchedulerHost is required for ToolPkg input menu tasks")
-        .scheduleHostRuntimeTask(taskName, Box::new(task))
+        .scheduleHostRuntimeAsyncTask(taskName, Box::new(task))
         .expect("host runtime task scheduler must schedule ToolPkg input menu task");
 }

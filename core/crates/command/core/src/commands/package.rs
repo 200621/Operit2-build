@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Runs package management commands.
-pub fn run_package_command(
+pub async fn run_package_command(
     application: &OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -107,7 +107,7 @@ pub fn run_package_command(
                     .expect("package manager mutex poisoned");
                 guard.usePackage(&package_name);
             }
-            tool::exec_tool(tool_handler, tool_name, params_json, output)
+            tool::exec_tool(tool_handler, tool_name, params_json, output).await
         }
         _ => {
             print_package_usage(output);

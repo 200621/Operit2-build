@@ -231,7 +231,8 @@ pub(crate) fn render_core_proxy_dispatch(objects: &[SourceObject]) -> String {
         .iter()
         .find(|object| object.schema_key == "application")
         .expect("application object must be generated")
-        .object_id.clone();
+        .object_id
+        .clone();
     output.push_str(&format!("    if request.target == {application_id:?} && request.methodName == \"runCoreCommand\" {{\n"));
     output.push_str(
         "        let mut __core_args = operit_rslink_runtime::object_args(request.args)?;\n",
@@ -250,7 +251,7 @@ pub(crate) fn render_core_proxy_dispatch(objects: &[SourceObject]) -> String {
     output.push_str("            \"core-proxy-command\",\n");
     output.push_str("            Box::new(move || Box::pin(async move {\n");
     output.push_str("                let mut application = application.lock().await;\n");
-    output.push_str("                let output = operit_command_core::run_core_command(&mut application, &args)\n");
+    output.push_str("                let output = operit_command_core::run_core_command(&mut application, &args).await\n");
     output.push_str("                    .map_err(operit_link::CoreLinkError::command);\n");
     output.push_str("                let _ = commandSender.send(output);\n");
     output.push_str("            })),\n");

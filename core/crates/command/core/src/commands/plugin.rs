@@ -5,7 +5,7 @@ use operit_tools::tools::AIToolHandler::AIToolHandler;
 use std::collections::BTreeSet;
 
 /// Runs ToolPkg plugin management commands.
-pub fn run_plugin_command(
+pub async fn run_plugin_command(
     application: &OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -23,7 +23,7 @@ pub fn run_plugin_command(
         }
         "list" => list_plugins(tool_handler, output),
         "commands" => list_plugin_commands(tool_handler, output),
-        "exec" => execute_plugin_command(tool_handler, &args[1..], output),
+        "exec" => execute_plugin_command(tool_handler, &args[1..], output).await,
         "more" => list_more_plugins(tool_handler, output),
         "show" => {
             let name = args
@@ -89,7 +89,7 @@ fn list_plugin_commands(
 }
 
 /// Executes one slash command registered by an enabled ToolPkg plugin.
-fn execute_plugin_command(
+async fn execute_plugin_command(
     tool_handler: AIToolHandler,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -102,8 +102,9 @@ fn execute_plugin_command(
         .lock()
         .expect("package manager mutex poisoned")
         .clone();
-    let result =
-        manager.executeToolPkgCoreCommand(command_name, &args[1..], output.isJsonMode())?;
+    let result = manager
+        .executeToolPkgCoreCommand(command_name, &args[1..], output.isJsonMode())
+        .await?;
     if output.isJsonMode() {
         output.setJsonStdout(result.json.ok_or_else(|| {
             format!("plugin command /{command_name} did not return a JSON result")

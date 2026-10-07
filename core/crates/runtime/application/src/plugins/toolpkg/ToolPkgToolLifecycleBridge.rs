@@ -62,61 +62,70 @@ impl AIToolHook for ToolLifecycleBridge {
         );
     }
 
-    fn onToolCallIntercept(&self, tool: &AITool) -> AIToolHookDecision {
-        let payload = build_base_payload(tool);
-        let manager = self.runtime.package_manager();
-        let hooks = TOOL_LIFECYCLE_HOOKS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .expect("toolpkg tool lifecycle hook mutex poisoned")
-            .clone();
-        for hook in hooks {
-            let result = manager.runToolPkgMainHook(
-                &hook.containerPackageName,
-                &hook.functionName,
-                TOOLPKG_EVENT_TOOL_LIFECYCLE,
-                Some("tool_call_intercept"),
-                Some(&hook.hookId),
-                hook.functionSource.as_deref(),
-                payload.clone(),
-                None,
-                None,
-                None,
-            );
-            let decoded = match result {
-                Ok(raw) => operit_plugin_sdk::toolpkg::ToolPkgHooks::decodeToolPkgHookResult(raw),
-                Err(error) => {
-                    ChainLogger::error(
-                        PLUGIN_CHAIN,
-                        "plugin.toolpkg.tool_lifecycle.intercept.error",
-                        &[("error", error)],
-                    );
-                    return AIToolHookDecision::Block(
-                        "ToolPkg tool lifecycle intercept failed.".to_string(),
-                    );
-                }
-            };
-            if let Some(Value::Object(object)) = decoded {
-                match object
-                    .get("action")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                {
-                    Some("block") => {
-                        let reason = object
-                            .get("reason")
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.trim().is_empty())
-                            .unwrap_or("ToolPkg tool lifecycle hook blocked the tool call.");
-                        return AIToolHookDecision::Block(reason.to_string());
+    fn onToolCallInterceptAsync<'a>(
+        &'a self,
+        tool: &'a AITool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AIToolHookDecision> + Send + 'a>> {
+        Box::pin(async move {
+            let payload = build_base_payload(tool);
+            let manager = self.runtime.package_manager();
+            let hooks = TOOL_LIFECYCLE_HOOKS
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .expect("toolpkg tool lifecycle hook mutex poisoned")
+                .clone();
+            for hook in hooks {
+                let result = manager
+                    .runToolPkgMainHook(
+                        &hook.containerPackageName,
+                        &hook.functionName,
+                        TOOLPKG_EVENT_TOOL_LIFECYCLE,
+                        Some("tool_call_intercept"),
+                        Some(&hook.hookId),
+                        hook.functionSource.as_deref(),
+                        payload.clone(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                let decoded = match result {
+                    Ok(raw) => {
+                        operit_plugin_sdk::toolpkg::ToolPkgHooks::decodeToolPkgHookResult(raw)
                     }
-                    Some("allow") | None => {}
-                    Some(_) => {}
+                    Err(error) => {
+                        ChainLogger::error(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.tool_lifecycle.intercept.error",
+                            &[("error", error)],
+                        );
+                        return AIToolHookDecision::Block(
+                            "ToolPkg tool lifecycle intercept failed.".to_string(),
+                        );
+                    }
+                };
+                if let Some(Value::Object(object)) = decoded {
+                    match object
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .map(|value| value.trim().to_ascii_lowercase())
+                        .as_deref()
+                    {
+                        Some("block") => {
+                            let reason = object
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.trim().is_empty())
+                                .unwrap_or("ToolPkg tool lifecycle hook blocked the tool call.");
+                            return AIToolHookDecision::Block(reason.to_string());
+                        }
+                        Some("allow") | None => {}
+                        Some(_) => {}
+                    }
                 }
             }
-        }
-        AIToolHookDecision::Allow
+            AIToolHookDecision::Allow
+        })
     }
 
     fn onToolPermissionChecked(&self, tool: &AITool, granted: bool, reason: Option<&str>) {
@@ -185,55 +194,69 @@ fn build_base_payload(tool: &AITool) -> Value {
 }
 
 fn deliver(runtime: &ToolPkgBridgeRuntime, eventName: &str, eventPayload: Value) {
-    let snapshot = TOOL_LIFECYCLE_HOOKS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .expect("toolpkg tool lifecycle hook mutex poisoned")
-        .clone();
-    let manager = runtime.package_manager();
-    for hook in snapshot {
-        ChainLogger::info(
-            PLUGIN_CHAIN,
-            "plugin.toolpkg.tool_lifecycle.run.start",
-            &[
-                ("event", eventName.to_string()),
-                ("package", hook.containerPackageName.clone()),
-                ("hookId", hook.hookId.clone()),
-                ("function", hook.functionName.clone()),
-            ],
-        );
-        match manager.runToolPkgMainHook(
-            &hook.containerPackageName,
-            &hook.functionName,
-            TOOLPKG_EVENT_TOOL_LIFECYCLE,
-            Some(eventName),
-            Some(&hook.hookId),
-            hook.functionSource.as_deref(),
-            eventPayload.clone(),
-            None,
-            None,
-            None,
-        ) {
-            Ok(_) => ChainLogger::info(
-                PLUGIN_CHAIN,
-                "plugin.toolpkg.tool_lifecycle.run.done",
-                &[
-                    ("event", eventName.to_string()),
-                    ("package", hook.containerPackageName.clone()),
-                    ("hookId", hook.hookId.clone()),
-                ],
-            ),
-            Err(error) => ChainLogger::error(
-                PLUGIN_CHAIN,
-                "plugin.toolpkg.tool_lifecycle.run.error",
-                &[
-                    ("event", eventName.to_string()),
-                    ("package", hook.containerPackageName.clone()),
-                    ("hookId", hook.hookId.clone()),
-                    ("function", hook.functionName.clone()),
-                    ("error", error),
-                ],
-            ),
-        }
-    }
+    let runtime = runtime.to_owned();
+    let eventName = eventName.to_owned();
+    super::ToolPkgHookBridgeSupport::scheduleToolPkgNotification(
+        "operit-toolpkg-notification",
+        move || {
+            Box::pin(async move {
+                let runtime = &runtime;
+                let eventName = &eventName;
+                let snapshot = TOOL_LIFECYCLE_HOOKS
+                    .get_or_init(|| Mutex::new(Vec::new()))
+                    .lock()
+                    .expect("toolpkg tool lifecycle hook mutex poisoned")
+                    .clone();
+                let manager = runtime.package_manager();
+                for hook in snapshot {
+                    ChainLogger::info(
+                        PLUGIN_CHAIN,
+                        "plugin.toolpkg.tool_lifecycle.run.start",
+                        &[
+                            ("event", eventName.to_string()),
+                            ("package", hook.containerPackageName.clone()),
+                            ("hookId", hook.hookId.clone()),
+                            ("function", hook.functionName.clone()),
+                        ],
+                    );
+                    match manager
+                        .runToolPkgMainHook(
+                            &hook.containerPackageName,
+                            &hook.functionName,
+                            TOOLPKG_EVENT_TOOL_LIFECYCLE,
+                            Some(eventName),
+                            Some(&hook.hookId),
+                            hook.functionSource.as_deref(),
+                            eventPayload.clone(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => ChainLogger::info(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.tool_lifecycle.run.done",
+                            &[
+                                ("event", eventName.to_string()),
+                                ("package", hook.containerPackageName.clone()),
+                                ("hookId", hook.hookId.clone()),
+                            ],
+                        ),
+                        Err(error) => ChainLogger::error(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.tool_lifecycle.run.error",
+                            &[
+                                ("event", eventName.to_string()),
+                                ("package", hook.containerPackageName.clone()),
+                                ("hookId", hook.hookId.clone()),
+                                ("function", hook.functionName.clone()),
+                                ("error", error),
+                            ],
+                        ),
+                    }
+                }
+            })
+        },
+    );
 }

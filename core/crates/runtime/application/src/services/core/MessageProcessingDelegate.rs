@@ -970,7 +970,7 @@ impl MessageProcessingDelegate {
 
     /// Builds the user message payload used by group orchestration turns.
     #[allow(non_snake_case)]
-    pub fn buildUserMessageContentForGroupOrchestration(
+    pub async fn buildUserMessageContentForGroupOrchestration(
         &self,
         request: BuildUserMessageContentForGroupOrchestrationRequest,
     ) -> Result<String, operit_providers::chat::llmprovider::AIService::AiServiceError> {
@@ -985,11 +985,12 @@ impl MessageProcessingDelegate {
             chatProviderIdOverride: None,
             chatModelIdOverride: None,
         })
+        .await
     }
 
     /// Builds model-ready user message content with attachments, workspace, and reply context.
     #[allow(non_snake_case)]
-    pub fn buildUserMessageContentForSend(
+    pub async fn buildUserMessageContentForSend(
         &self,
         request: BuildUserMessageContentForSendRequest,
     ) -> Result<String, operit_providers::chat::llmprovider::AIService::AiServiceError> {
@@ -1059,7 +1060,8 @@ impl MessageProcessingDelegate {
                 chatId: Some(request.chatId.clone()),
                 roleCardId: Some(request.roleCardId),
                 onHookTimeout: Some(onHookTimeout),
-            })?;
+            })
+            .await?;
         logMessageTiming(
             "delegate.buildUserMessageContent",
             buildUserMessageStartTime,
@@ -1352,8 +1354,8 @@ impl MessageProcessingDelegate {
         let turnId = self.beginChatTurn(chatId.clone(), request.turnOptions.clone());
         self.startChatExecution(chatId.clone());
 
-        let finalMessageContent =
-            match self.buildUserMessageContentForSend(BuildUserMessageContentForSendRequest {
+        let finalMessageContent = match self
+            .buildUserMessageContentForSend(BuildUserMessageContentForSendRequest {
                 messageText: originalMessageText.clone(),
                 proxySenderNameOverride: request.proxySenderNameOverride.clone(),
                 attachments: request.attachments.clone(),
@@ -1363,26 +1365,28 @@ impl MessageProcessingDelegate {
                 roleCardId: request.roleCardId.clone(),
                 chatProviderIdOverride: request.chatProviderIdOverride.clone(),
                 chatModelIdOverride: request.chatModelIdOverride.clone(),
-            }) {
-                Ok(content) => content,
-                Err(error) => {
-                    ChainLogger::error(
-                        SEND_CHAIN,
-                        "send.processing.build_user_content.error",
-                        &[("chatId", chatId.clone()), ("error", error.to_string())],
+            })
+            .await
+        {
+            Ok(content) => content,
+            Err(error) => {
+                ChainLogger::error(
+                    SEND_CHAIN,
+                    "send.processing.build_user_content.error",
+                    &[("chatId", chatId.clone()), ("error", error.to_string())],
+                );
+                if self.cleanupRuntimeAfterTurn(chatId.clone(), turnId) {
+                    self.finishChatExecutionForTurn(
+                        chatId.clone(),
+                        turnId,
+                        InputProcessingState::Error {
+                            message: error.to_string(),
+                        },
                     );
-                    if self.cleanupRuntimeAfterTurn(chatId.clone(), turnId) {
-                        self.finishChatExecutionForTurn(
-                            chatId.clone(),
-                            turnId,
-                            InputProcessingState::Error {
-                                message: error.to_string(),
-                            },
-                        );
-                    }
-                    return Err(error);
                 }
-            };
+                return Err(error);
+            }
+        };
         let shouldAddUserMessageToChat = request.turnOptions.persistTurn
             && !request.suppressUserMessageInHistory
             && !(request.isAutoContinuation

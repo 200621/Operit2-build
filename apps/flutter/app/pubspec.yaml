@@ -113,6 +113,8 @@ dev_dependencies:
   webview_all_linux: ^1.4.0
   webview_all_web: ^1.2.1
   webview_flutter_platform_interface: ^2.15.1
+  webview_flutter_wkwebview:
+    path: ../thirdparty/webview_flutter_wkwebview
   ffi: ^2.2.0
   flutter_test:
     sdk: flutter
@@ -125,6 +127,8 @@ dev_dependencies:
   flutter_lints: ^6.0.0
 
 dependency_overrides:
+  webview_all_linux:
+    path: ../thirdparty/webview_all_linux
   image_picker_ios:
     path: ../thirdparty/image_picker_ios
   dynamic_color:

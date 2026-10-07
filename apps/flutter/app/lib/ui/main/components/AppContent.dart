@@ -378,12 +378,13 @@ class _AppContentState extends State<AppContent> {
           ],
         );
         // Scaffold avoids the keyboard, but not system navigation controls.
-        // Protect every retained page (and workspace attachment) at this shared
-        // boundary. The top bar already handles the status-bar padding above;
-        // regular SafeArea padding also disappears when the keyboard consumes
-        // it, so we do not add a second bottom gap above the IME.
+        // Pages that own the bottom inset can extend their surfaces beneath
+        // system controls. Other pages keep the shared safe boundary. The top
+        // bar already handles the status-bar padding above, and Scaffold owns
+        // the keyboard inset.
         return SafeArea(
           top: false,
+          bottom: !widget.currentScreen.handlesBottomSafeArea,
           child: SizedBox.expand(
             child: mainLayoutController.decorate(context, frame),
           ),

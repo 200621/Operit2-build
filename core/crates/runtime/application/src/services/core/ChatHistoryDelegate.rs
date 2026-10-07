@@ -2169,8 +2169,33 @@ impl ChatHistoryDelegate {
         chatId: String,
         folderPath: String,
     ) -> Result<operit_model::Workspace::Workspace, String> {
+        let selection = folderPath.trim();
+        let source = if let Some(json) = selection.strip_prefix(operit_tools::files::MountRegistry::MOUNT_SOURCE_PREFIX) {
+            Some(serde_json::from_str::<operit_tools::files::MountRegistry::MountSource>(json)
+                .map_err(|e| format!("Invalid workspace mount source: {e}"))?)
+        } else if selection.starts_with("content://") {
+            // Keep compatibility with callers that submit a raw authorized tree URI.
+            Some(operit_tools::files::MountRegistry::MountSource {
+                namespace: "/mnt/android/documents".into(), backend: "android_documents".into(),
+                root: selection.into(), name: "Documents".into(),
+            })
+        } else { None };
+        let (folderPath, mountedName) = match source {
+            Some(source) => {
+                let host = operit_store::RuntimeStorageHost::defaultRuntimeStorageHost();
+                let root = host.runtimeRootDir().ok_or("Runtime storage root is not configured for document mounts")?;
+                let mount = operit_tools::files::MountRegistry::MountRegistry::new(&root).register(
+                    &source.namespace, &source.backend, &source.root, &source.name,
+                )?;
+                (mount.vfsPath(), Some(mount.name))
+            }
+            None => (folderPath, None),
+        };
         let folderPath = PathMapper::normalizeWorkspaceBindingPath(&folderPath)?;
-        let folderName = operit_model::Workspace::Workspace::folderNameFromPath(&folderPath)?;
+        let folderName = match mountedName {
+            Some(name) => name,
+            None => operit_model::Workspace::Workspace::folderNameFromPath(&folderPath)?,
+        };
         let workspace = match self
             .chatHistoryManager
             .getWorkspaceForChat(&chatId)

@@ -25,9 +25,11 @@ class ThemeCircularRevealHost extends StatefulWidget {
     return context.findAncestorStateOfType<ThemeCircularRevealHostState>();
   }
 
-  /// Distance from [origin] to the bottom-right corner of [size].
+  /// Returns the distance to the farthest corner so the circle covers the screen.
   static double maxRadius({required Offset origin, required Size size}) {
-    return (Offset(size.width, size.height) - origin).distance;
+    final dx = math.max(origin.dx, size.width - origin.dx);
+    final dy = math.max(origin.dy, size.height - origin.dy);
+    return Offset(dx, dy).distance;
   }
 
   /// Soft edge width so the expanding circle does not look like a hard cut.
@@ -133,6 +135,12 @@ class ThemeCircularRevealHostState extends State<ThemeCircularRevealHost>
     _busy = true;
     ui.Image? image;
     try {
+      // Capture the painted tap frame before applying the next theme.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !originContext.mounted) {
+        _busy = false;
+        return;
+      }
       final pixelRatio = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 2.0);
       final capture = ThemeCircularRevealHost.debugCaptureFrame;
       if (capture != null) {
@@ -197,27 +205,20 @@ class ThemeCircularRevealHostState extends State<ThemeCircularRevealHost>
                   child: AnimatedBuilder(
                     animation: _progress,
                     builder: (context, child) {
-                      final progress = _progress.value;
-                      final fade = progress < 0.88
-                          ? 1.0
-                          : (1.0 - (progress - 0.88) / 0.12).clamp(0.0, 1.0);
-                      return Opacity(
-                        opacity: fade,
-                        child: ShaderMask(
-                          blendMode: BlendMode.dstOut,
-                          shaderCallback: (bounds) {
-                            return _revealShader(
-                              origin: _origin,
-                              radius: ThemeCircularRevealHost.animatedRadius(
-                                progress: progress,
-                                maxRadius: _maxRadius,
-                                feather: _feather,
-                              ),
+                      return ShaderMask(
+                        blendMode: BlendMode.dstOut,
+                        shaderCallback: (bounds) {
+                          return _revealShader(
+                            origin: _origin,
+                            radius: ThemeCircularRevealHost.animatedRadius(
+                              progress: _progress.value,
+                              maxRadius: _maxRadius,
                               feather: _feather,
-                            );
-                          },
-                          child: child,
-                        ),
+                            ),
+                            feather: _feather,
+                          );
+                        },
+                        child: child,
                       );
                     },
                     child: SizedBox.expand(
@@ -237,6 +238,7 @@ class ThemeCircularRevealHostState extends State<ThemeCircularRevealHost>
   }
 }
 
+/// Builds the soft circular mask that reveals only the area reached by expansion.
 ui.Shader _revealShader({
   required Offset origin,
   required double radius,

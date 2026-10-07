@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade as AxumUpgrade},
-        FromRequestParts, State, ConnectInfo,
+        ConnectInfo, FromRequestParts, State,
     },
     response::IntoResponse,
     Router,
@@ -21,7 +21,9 @@ fn error(e: impl std::fmt::Display) -> HostError {
 #[async_trait]
 impl HttpServerHost for NativeHttpServerHost {
     /// Declares the WebSocket upgrades supplied by the native HTTP server.
-    fn supportsWebSocketUpgrade(&self) -> bool { true }
+    fn supportsWebSocketUpgrade(&self) -> bool {
+        true
+    }
 
     /// Binds the Host-owned HTTP and WebSocket server socket.
     async fn bind(&self, address: &str) -> HostResult<Arc<dyn HttpServerListener>> {
@@ -48,7 +50,10 @@ impl HttpServerListener for Listener {
             .ok_or_else(|| error("Listener already served"))?;
         axum::serve(
             listener,
-            Router::new().fallback(dispatch).with_state(handler).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            Router::new()
+                .fallback(dispatch)
+                .with_state(handler)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown)
         .await

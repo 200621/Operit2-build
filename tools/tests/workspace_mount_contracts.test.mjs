@@ -73,3 +73,37 @@ test('Rust regression cases cover picker paths and repeated normalization', () =
   assert.match(regression, /PathMapper::normalizeWorkspaceBindingPath\(&normalized\)\.unwrap\(\)/);
   assert.match(regression, /PathMapper::canonicalizeVfsPath\(&normalized\)\.unwrap\(\)/);
 });
+
+/** Root is an explicit Android OS path, not the VFS root or a plugin alias. */
+test('Android root is mapped to slash and remains bindable', () => {
+  const mapper = source(mapperPath);
+  const resolve = section(mapper, '[ROOT_MNT, MNT_ANDROID, MNT_ANDROID_ROOT, rest @ ..] => {', '[ROOT_MNT, MNT_LINUX, rest @ ..] => {');
+  assert.match(resolve, /androidRootMounted\(\)/);
+  assert.match(resolve, /joinUnixPhysical\("\/", rest\)/);
+  assert.match(mapper, /directoryEntry\(MNT_ANDROID_ROOT\)/);
+  const binding = section(mapper, 'fn normalizeWorkspaceBindingVfsPath(', 'fn normalizeWindowsHostWorkspacePath(');
+  assert.match(binding, /\[ROOT_MNT, MNT_ANDROID, MNT_ANDROID_ROOT, rest @ \.\.\]/);
+});
+
+/** Catalog backends remain generic rather than hardcoding Termux into the mapper. */
+test('persistent mounts use an opaque generic host resource contract', () => {
+  const catalog = source('core/crates/tool/services/src/files/MountRegistry.rs');
+  assert.match(catalog, /pub backend: String/);
+  assert.match(catalog, /pub root: String/);
+  assert.match(catalog, /config\/vfs_mounts\.json/);
+  assert.match(catalog, /file\.sync_all\(\)/);
+  assert.match(catalog, /fs::rename\(&temporary, &self\.catalog\)/);
+  const mapper = source(mapperPath);
+  assert.match(mapper, /FileSystemResource \{/);
+  assert.doesNotMatch(mapper.split('#[cfg(test)]')[0], /com\.termux\.documents/);
+});
+
+/** Workspace capabilities do not leak into APIs that require actual OS paths. */
+test('terminal commands reject resource-backed working directories', () => {
+  const mapper = source(mapperPath);
+  assert.match(mapper, /pub fn nativePath\(&self\) -> Result<String, String>/);
+  const terminal = source('core/crates/runtime/application/src/services/RuntimeTerminalService.rs');
+  assert.match(terminal, /\.and_then\(\|path\| path\.nativePath\(\)\)/);
+  const command = source('core/crates/command/core/src/commands/workspace.rs');
+  assert.match(command, /resolvePath\(&workingDirPath\)\?\.nativePath\(\)/);
+});

@@ -1105,6 +1105,20 @@ ${params.functionBody}
     return _webView.settings.setUseWideViewPort(use);
   }
 
+  // The OHOS platform view already composes application paint zoom. Only page
+  // zoom is sent to ArkWeb; multiplying application zoom here would double it.
+  late final NativeWebViewZoom _pageZoom = NativeWebViewZoom(
+    applyZoom: (factor) => const MethodChannel('operit/webview_zoom')
+        .invokeMethod<void>('setPageZoom', <String, Object?>{
+          'viewIdentifier': webViewIdentifier,
+          'zoomFactor': factor,
+        }),
+  );
+
+  @override
+  Future<void> setZoomFactor(double zoomFactor) =>
+      _pageZoom.setPageZoomFactor(zoomFactor);
+
   /// Sets whether on-screen zoom controls are displayed.
   Future<void> setDisplayZoomControls(bool enabled) {
     return _webView.settings.setDisplayZoomControls(enabled);

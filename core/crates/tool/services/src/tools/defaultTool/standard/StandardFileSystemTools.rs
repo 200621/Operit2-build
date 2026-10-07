@@ -480,8 +480,8 @@ impl StandardFileSystemTools {
             }
         }
 
-        let physicalPath = match vfs.resolvePath(path) {
-            Ok(resolved) => resolved.physicalPath,
+        let physicalPath = match vfs.resolvePath(path).and_then(|resolved| resolved.nativePath()) {
+            Ok(path) => path,
             Err(error) => return toolError(tool, String::new(), error),
         };
         let intent = optionalParameterValue(tool, "intent")

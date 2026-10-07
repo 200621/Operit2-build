@@ -685,20 +685,23 @@ impl ToolPkgHookDispatcher for ToolPkgManager {
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
-    ) -> Result<Option<String>, String> {
-        let (engine, script, params) =
-            self.prepareToolPkgHook(enabledPackageNames, &invocation)?;
-        engine
-            .execute_script_function_with_timeout_millis(
-                &script,
-                &invocation.functionName,
-                &params,
-                &invocation.envOverrides,
-                invocation.onIntermediateResult,
-                invocation.dispatchIntermediateOnMain,
-                invocation.timeoutMillis,
-            )
-            .map_err(|error| error.to_string())
+    ) -> crate::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
+        let prepared = self.prepareToolPkgHook(enabledPackageNames, &invocation);
+        Box::pin(async move {
+            let (engine, script, params) = prepared?;
+            engine
+                .execute_script_function_with_timeout_millis(
+                    &script,
+                    &invocation.functionName,
+                    &params,
+                    &invocation.envOverrides,
+                    invocation.onIntermediateResult,
+                    invocation.dispatchIntermediateOnMain,
+                    invocation.timeoutMillis,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -887,6 +890,15 @@ fn normalizeToolPkgEntryPath(rawPath: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Asserts that an immediate mock completion is ready on its first poll.
+    fn pollReadyCompletion<T>(mut completion: crate::javascript::JsExecutionCompletion<T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(completion.as_mut(), &mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("immediate mock completion must be ready"),
+        }
+    }
+
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -1034,8 +1046,9 @@ mod tests {
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
             _timeout_sec: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no script result for exact-deadline registry tests.
@@ -1048,8 +1061,9 @@ mod tests {
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
             _timeout_millis: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Records hook parameters and yields once before completing asynchronous execution.
@@ -1093,8 +1107,9 @@ mod tests {
             _runtime_options: &BTreeMap<String, Value>,
             _env_overrides: &BTreeMap<String, String>,
             _text_resources: Arc<BTreeMap<String, String>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no Compose DSL result asynchronously for registry tests.
@@ -1116,8 +1131,9 @@ mod tests {
             _runtime_options: &BTreeMap<String, Value>,
             _env_overrides: &BTreeMap<String, String>,
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no Compose DSL action result asynchronously for registry tests.
@@ -1411,27 +1427,26 @@ mod tests {
             ..ToolPkgLoadResult::default()
         });
 
-        manager
-            .dispatchToolPkgHook(
-                &["snapshot_package".to_string()],
-                ToolPkgHookInvocation {
-                    containerPackageName: "snapshot_package".to_string(),
-                    functionName: "onInputMenuToggle".to_string(),
-                    event: "input_menu_toggle".to_string(),
-                    eventName: None,
-                    pluginId: Some("snapshot_hook".to_string()),
-                    inlineFunctionSource: None,
-                    eventPayload: Value::Object(Default::default()),
-                    executionContextKey: None,
-                    runtimeKind: None,
-                    envOverrides: BTreeMap::new(),
-                    timestampMs: 1,
-                    timeoutMillis: 1_000,
-                    dispatchIntermediateOnMain: true,
-                    onIntermediateResult: None,
-                },
-            )
-            .expect("snapshot ToolPkg hook dispatch must succeed");
+        pollReadyCompletion(manager.dispatchToolPkgHook(
+            &["snapshot_package".to_string()],
+            ToolPkgHookInvocation {
+                containerPackageName: "snapshot_package".to_string(),
+                functionName: "onInputMenuToggle".to_string(),
+                event: "input_menu_toggle".to_string(),
+                eventName: None,
+                pluginId: Some("snapshot_hook".to_string()),
+                inlineFunctionSource: None,
+                eventPayload: Value::Object(Default::default()),
+                executionContextKey: None,
+                runtimeKind: None,
+                envOverrides: BTreeMap::new(),
+                timestampMs: 1,
+                timeoutMillis: 1_000,
+                dispatchIntermediateOnMain: true,
+                onIntermediateResult: None,
+            },
+        ))
+        .expect("snapshot ToolPkg hook dispatch must succeed");
 
         let contexts = factory
             .contexts

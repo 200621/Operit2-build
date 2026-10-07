@@ -26,7 +26,7 @@ use crate::output::CoreCommandOutput;
 use operit_runtime::core::application::OperitApplication::OperitApplication;
 
 /// Dispatches a top-level core command family into its command module.
-pub fn run_core_command(
+pub async fn run_core_command(
     application: &mut OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -37,15 +37,16 @@ pub fn run_core_command(
     }
 
     if matches!(args[0].as_str(), "plugin" | "package" | "skill" | "mcp")
-        && args.get(1).map(String::as_str) == Some("scope") {
+        && args.get(1).map(String::as_str) == Some("scope")
+    {
         return extension::run_scope_command(application, &args[0], &args[2..], output);
     }
 
     match args[0].as_str() {
         "extension" => extension::run_extension_command(application, &args[1..], output),
-        "tool" => tool::run_tool_command(application, &args[1..], output),
-        "package" => package::run_package_command(application, &args[1..], output),
-        "plugin" => plugin::run_plugin_command(application, &args[1..], output),
+        "tool" => tool::run_tool_command(application, &args[1..], output).await,
+        "package" => package::run_package_command(application, &args[1..], output).await,
+        "plugin" => plugin::run_plugin_command(application, &args[1..], output).await,
         "skill" => skill::run_skill_command(application, &args[1..], output),
         "mcp" => mcp::run_mcp_command(application, &args[1..], output),
         "market" => market::run_market_command(application, &args[1..], output),
@@ -63,7 +64,7 @@ pub fn run_core_command(
         "active-prompt" => people::run_active_prompt_command(application, &args[1..], output),
         "model" => model::run_model_command(application.hostManager.clone(), &args[1..], output),
         "chat" => chat::run_chat_command(application, &args[1..], output),
-        "workspace" => workspace::run_workspace_command(application, &args[1..], output),
+        "workspace" => workspace::run_workspace_command(application, &args[1..], output).await,
         "storage" => storage::run_storage_command(application, &args[1..], output),
         "stt" => stt::run_stt_command(application, &args[1..], output),
         "update" => update::run_update_command(&args[1..], output),

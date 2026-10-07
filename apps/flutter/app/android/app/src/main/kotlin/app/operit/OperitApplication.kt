@@ -1,22 +1,47 @@
 package app.operit
 
-import android.app.Application
 import android.app.Activity
+import android.app.ActivityManager
+import android.app.Application
+import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import org.json.JSONObject
 
 /** Launches the isolated crash Activity before Android terminates a failed process. */
 class OperitApplication : Application() {
+    private val isCrashProcess: Boolean by lazy {
+        val processName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Application.getProcessName()
+        } else {
+            val activityManager = getSystemService(ACTIVITY_SERVICE) as? ActivityManager
+            activityManager?.runningAppProcesses
+                ?.firstOrNull { it.pid == Process.myPid() }
+                ?.processName
+        }
+        processName == "$packageName:crash"
+    }
+
     /** Installs the process-wide Android uncaught-exception handler. */
     override fun onCreate() {
         super.onCreate()
+        // The diagnostic process must not relaunch itself or initialize the Core host.
+        if (isCrashProcess) return
+
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            NativeCrashActivity.start(
-                applicationContext,
-                "Unhandled Android exception on ${thread.name}\n\n${error.stackTraceToString()}",
-            )
-            Process.killProcess(Process.myPid())
+            Log.e("OperitApplication", "Unhandled Android exception on ${thread.name}", error)
+            try {
+                NativeCrashActivity.start(
+                    applicationContext,
+                    "Unhandled Android exception on ${thread.name}\n\n${error.stackTraceToString()}",
+                )
+            } catch (presentationError: Throwable) {
+                Log.e("OperitApplication", "Unable to open the native crash screen", presentationError)
+            } finally {
+                // Terminate the failed process even if crash presentation also fails.
+                Process.killProcess(Process.myPid())
+            }
         }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
@@ -68,6 +93,7 @@ class OperitApplication : Application() {
     }
 
     private fun emitLifecycleEvent(topic: String, payload: JSONObject) {
+        if (isCrashProcess) return
         AndroidCoreRuntime
             .get(applicationContext)
             .emitRuntimeEvent(RuntimeEvents.androidLifecycle(topic, payload))

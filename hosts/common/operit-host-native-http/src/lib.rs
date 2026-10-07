@@ -1,8 +1,8 @@
 pub mod server;
 pub use server::NativeHttpServerHost;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
 use std::error::Error;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -13,9 +13,10 @@ use operit_host_api::{
     httpDownloadPartialTargetPath, HostError, HostResult, HttpDownloadControl,
     HttpDownloadFileRequest, HttpDownloadFileResult, HttpDownloadProgress,
     HttpDownloadProgressCallback, HttpDownloadProgressState, HttpDownloadRequest,
-    HttpDownloadResult, HttpFileDownloadResult, HttpHost, HttpRequestData, HttpResponseData, HttpStreamChunkCallback,
-    HttpStreamClosedCallback, HttpStreamHost, HttpStreamOpenedCallback, WebSocketClosedCallback,
-    WebSocketHost, WebSocketMessageCallback, WebSocketOpenedCallback, WebSocketRequestData,
+    HttpDownloadResult, HttpFileDownloadResult, HttpHost, HttpRequestData, HttpResponseData,
+    HttpResponseHead, HttpStreamChunkCallback, HttpStreamClosedCallback, HttpStreamHost,
+    HttpStreamOpenedCallback, HttpStreamResponseCallback, WebSocketClosedCallback, WebSocketHost,
+    WebSocketMessageCallback, WebSocketOpenedCallback, WebSocketRequestData,
 };
 use reqwest::blocking::{multipart, Client as BlockingClient};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_RANGE, RANGE};
@@ -209,14 +210,15 @@ fn setWebSocketReadTimeout(
     }
 }
 
-impl HttpStreamHost for NativeHttpHost {
-    /// Opens one native asynchronous HTTP response stream on a Host-owned network thread.
+impl NativeHttpHost {
+    /// Owns cancellation and thread cleanup for both metadata and byte-only streams.
     #[allow(non_snake_case)]
-    fn openHttpByteStream(
+    fn openNativeHttpStream(
         &self,
         streamId: String,
         request: HttpRequestData,
         onOpened: HttpStreamOpenedCallback,
+        onResponse: Option<HttpStreamResponseCallback>,
         onChunk: HttpStreamChunkCallback,
         onClosed: HttpStreamClosedCallback,
     ) -> HostResult<()> {
@@ -237,8 +239,9 @@ impl HttpStreamHost for NativeHttpHost {
         let spawnResult = std::thread::Builder::new()
             .name(format!("operit-http-stream-{streamId}"))
             .spawn(move || {
-                let result = executeHttpByteStream(request, cancelReceiver, onOpened, onChunk)
-                    .map_err(|error| error.to_string());
+                let result =
+                    executeHttpByteStream(request, cancelReceiver, onOpened, onResponse, onChunk)
+                        .map_err(|error| error.to_string());
                 onClosed(result);
                 streams
                     .lock()
@@ -255,6 +258,41 @@ impl HttpStreamHost for NativeHttpHost {
             return Err(HostError::new(error.to_string()));
         }
         Ok(())
+    }
+}
+
+impl HttpStreamHost for NativeHttpHost {
+    /// Opens one byte-only stream without changing its existing status handling.
+    #[allow(non_snake_case)]
+    fn openHttpByteStream(
+        &self,
+        streamId: String,
+        request: HttpRequestData,
+        onOpened: HttpStreamOpenedCallback,
+        onChunk: HttpStreamChunkCallback,
+        onClosed: HttpStreamClosedCallback,
+    ) -> HostResult<()> {
+        self.openNativeHttpStream(streamId, request, onOpened, None, onChunk, onClosed)
+    }
+
+    /// Delivers response metadata before body chunks, including HTTP error responses.
+    #[allow(non_snake_case)]
+    fn openHttpResponseStream(
+        &self,
+        streamId: String,
+        request: HttpRequestData,
+        onResponse: HttpStreamResponseCallback,
+        onChunk: HttpStreamChunkCallback,
+        onClosed: HttpStreamClosedCallback,
+    ) -> HostResult<()> {
+        self.openNativeHttpStream(
+            streamId,
+            request,
+            Arc::new(|| {}),
+            Some(onResponse),
+            onChunk,
+            onClosed,
+        )
     }
 
     /// Cancels one native asynchronous HTTP response stream.
@@ -278,6 +316,7 @@ fn executeHttpByteStream(
     request: HttpRequestData,
     mut cancelReceiver: tokio::sync::watch::Receiver<bool>,
     onOpened: HttpStreamOpenedCallback,
+    onResponse: Option<HttpStreamResponseCallback>,
     onChunk: HttpStreamChunkCallback,
 ) -> HostResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -322,12 +361,29 @@ fn executeHttpByteStream(
                 response.map_err(httpError)?
             }
         };
-        if !response.status().is_success() {
+        if let Some(onResponse) = onResponse {
+            onResponse(HttpResponseHead {
+                finalUrl: response.url().to_string(),
+                statusCode: i32::from(response.status().as_u16()),
+                statusMessage: response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or_default()
+                    .to_string(),
+                headers: response
+                    .headers()
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.as_str().to_string(),
+                            value.to_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect(),
+            });
+        } else if !response.status().is_success() {
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(httpError)?;
+            let body = response.text().await.map_err(httpError)?;
             return Err(HostError::new(format!("HTTP {status}: {body}")));
         }
         onOpened();
@@ -490,10 +546,7 @@ fn executeHttpRequestOnBlockingThread(
                 .map_err(|error| HostError::new(error.to_string()))
         })
         .collect::<HostResult<Vec<_>>>()?;
-    let body = response
-        .bytes()
-        .map_err(httpError)?
-        .to_vec();
+    let body = response.bytes().map_err(httpError)?.to_vec();
     Ok(HttpResponseData {
         finalUrl,
         statusCode,
@@ -1697,3 +1750,6 @@ mod tests {
         root
     }
 }
+
+#[cfg(test)]
+mod response_stream_tests;

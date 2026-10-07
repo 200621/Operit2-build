@@ -243,7 +243,14 @@ pub fn buildRuntimeBootstrapScript() -> String {
         var intervalStates = {{}};
         var NativeInterface = {{
             callTool: function(toolType, toolName, paramsJson) {{
-                return __operitNativeCallTool(String(toolType || 'default'), String(toolName || ''), String(paramsJson || '{{}}'));
+                return new Promise(function(resolve) {{
+                    var callbackId = '__operit_tool_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                    window[callbackId] = function(result) {{
+                        delete window[callbackId];
+                        resolve(result);
+                    }};
+                    NativeInterface.callToolAsync(callbackId, toolType, toolName, paramsJson);
+                }});
             }},
             callToolAsync: function(callbackId, toolType, toolName, paramsJson) {{
                 __operitNativeCallToolAsync(
@@ -612,7 +619,8 @@ pub fn buildRuntimeBootstrapScript() -> String {
             return result;
         }}
 
-        function toolCall() {{
+        /** Executes a tool through the asynchronous Host callback boundary. */
+        async function toolCall() {{
             var type = 'default';
             var name = '';
             var params = {{}};
@@ -630,7 +638,7 @@ pub fn buildRuntimeBootstrapScript() -> String {
                 name = String(arguments[1] || '');
                 params = arguments[2] || {{}};
             }}
-            var raw = NativeInterface.callTool(type, name, JSON.stringify(params));
+            var raw = await NativeInterface.callTool(type, name, JSON.stringify(params));
             var parsed;
             try {{
                 parsed = JSON.parse(raw);

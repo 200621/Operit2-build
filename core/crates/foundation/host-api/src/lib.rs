@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod HostManager;
+pub mod FileSystemResource;
 pub mod PluginSdkIpc;
 pub mod TimeUtils;
 pub mod HttpServer;
@@ -971,7 +972,7 @@ impl From<std::io::Error> for HostError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub isDirectory: bool,
@@ -980,14 +981,14 @@ pub struct FileEntry {
     pub lastModified: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileExistence {
     pub exists: bool,
     pub isDirectory: bool,
     pub size: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
     pub path: String,
     pub exists: bool,
@@ -1000,7 +1001,7 @@ pub struct FileInfo {
     pub rawStatOutput: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindFilesRequest {
     pub path: String,
     pub pattern: String,
@@ -1009,7 +1010,7 @@ pub struct FindFilesRequest {
     pub caseInsensitive: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepCodeRequest {
     pub path: String,
     pub pattern: String,
@@ -1019,20 +1020,20 @@ pub struct GrepCodeRequest {
     pub maxResults: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepLineMatch {
     pub lineNumber: usize,
     pub lineContent: String,
     pub matchContext: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepFileMatch {
     pub filePath: String,
     pub lineMatches: Vec<GrepLineMatch>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepCodeResult {
     pub matches: Vec<GrepFileMatch>,
     pub totalMatches: usize,
@@ -1369,6 +1370,17 @@ impl HttpDownloadControl {
 
 pub type HttpDownloadProgressCallback = Arc<dyn Fn(HttpDownloadProgress) + Send + Sync + 'static>;
 
+/// HTTP response metadata delivered before the first streamed body chunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponseHead {
+    pub finalUrl: String,
+    pub statusCode: i32,
+    pub statusMessage: String,
+    pub headers: Vec<(String, String)>,
+}
+
+pub type HttpStreamResponseCallback = Arc<dyn Fn(HttpResponseHead) + Send + Sync + 'static>;
+
 pub type HttpStreamOpenedCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub type HttpStreamChunkCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>;
@@ -1461,6 +1473,21 @@ pub trait HttpStreamHost: Send + Sync {
         onChunk: HttpStreamChunkCallback,
         onClosed: HttpStreamClosedCallback,
     ) -> HostResult<()>;
+
+    /// Opens an HTTP response stream, including non-success statuses. Metadata must
+    /// precede ordered body chunks; close must cancel header and body reads alike.
+    /// This must not buffer the response or silently fall back to a blocking request.
+    #[allow(non_snake_case)]
+    fn openHttpResponseStream(
+        &self,
+        _streamId: String,
+        _request: HttpRequestData,
+        _onResponse: HttpStreamResponseCallback,
+        _onChunk: HttpStreamChunkCallback,
+        _onClosed: HttpStreamClosedCallback,
+    ) -> HostResult<()> {
+        Err(HostError::new("HTTP response streaming is not supported by this host"))
+    }
 
     /// Closes one previously opened HTTP byte stream.
     #[allow(non_snake_case)]

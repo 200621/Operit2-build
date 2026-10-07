@@ -67,71 +67,85 @@ impl ToolPkgChatRuntimeHookBridge {
         activeConversationCount: i32,
         currentSessionToolCount: i32,
     ) {
-        let Some(runtime) = CHAT_RUNTIME.get() else {
-            return;
-        };
-        let hooks = CHAT_RUNTIME_HOOKS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .expect("toolpkg chat runtime hook mutex poisoned")
-            .clone();
-        if hooks.is_empty() {
-            return;
-        }
-        let payload = buildPayload(
-            chatId,
-            state,
-            activeChatIds,
-            currentTurnToolInvocationCount,
-            activeConversationCount,
-            currentSessionToolCount,
+        let chatId = chatId.to_owned();
+        let state = state.to_owned();
+        super::ToolPkgHookBridgeSupport::scheduleToolPkgNotification(
+            "operit-toolpkg-notification",
+            move || {
+                Box::pin(async move {
+                    let chatId = &chatId;
+                    let state = &state;
+                    let Some(runtime) = CHAT_RUNTIME.get() else {
+                        return;
+                    };
+                    let hooks = CHAT_RUNTIME_HOOKS
+                        .get_or_init(|| Mutex::new(Vec::new()))
+                        .lock()
+                        .expect("toolpkg chat runtime hook mutex poisoned")
+                        .clone();
+                    if hooks.is_empty() {
+                        return;
+                    }
+                    let payload = buildPayload(
+                        chatId,
+                        state,
+                        activeChatIds,
+                        currentTurnToolInvocationCount,
+                        activeConversationCount,
+                        currentSessionToolCount,
+                    );
+                    let manager = runtime.package_manager();
+                    for hook in hooks {
+                        ChainLogger::info(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.chat_runtime.run.start",
+                            &[
+                                ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
+                                ("package", hook.containerPackageName.clone()),
+                                ("hookId", hook.hookId.clone()),
+                                ("function", hook.functionName.clone()),
+                            ],
+                        );
+                        match manager
+                            .runToolPkgMainHook(
+                                &hook.containerPackageName,
+                                &hook.functionName,
+                                TOOLPKG_EVENT_CHAT_RUNTIME,
+                                Some(CHAT_RUNTIME_EVENT_STATE_CHANGED),
+                                Some(&hook.hookId),
+                                hook.functionSource.as_deref(),
+                                payload.clone(),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(_) => ChainLogger::info(
+                                PLUGIN_CHAIN,
+                                "plugin.toolpkg.chat_runtime.run.done",
+                                &[
+                                    ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
+                                    ("package", hook.containerPackageName.clone()),
+                                    ("hookId", hook.hookId.clone()),
+                                ],
+                            ),
+                            Err(error) => ChainLogger::error(
+                                PLUGIN_CHAIN,
+                                "plugin.toolpkg.chat_runtime.run.error",
+                                &[
+                                    ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
+                                    ("package", hook.containerPackageName.clone()),
+                                    ("hookId", hook.hookId.clone()),
+                                    ("function", hook.functionName.clone()),
+                                    ("error", error),
+                                ],
+                            ),
+                        }
+                    }
+                })
+            },
         );
-        let manager = runtime.package_manager();
-        for hook in hooks {
-            ChainLogger::info(
-                PLUGIN_CHAIN,
-                "plugin.toolpkg.chat_runtime.run.start",
-                &[
-                    ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
-                    ("package", hook.containerPackageName.clone()),
-                    ("hookId", hook.hookId.clone()),
-                    ("function", hook.functionName.clone()),
-                ],
-            );
-            match manager.runToolPkgMainHook(
-                &hook.containerPackageName,
-                &hook.functionName,
-                TOOLPKG_EVENT_CHAT_RUNTIME,
-                Some(CHAT_RUNTIME_EVENT_STATE_CHANGED),
-                Some(&hook.hookId),
-                hook.functionSource.as_deref(),
-                payload.clone(),
-                None,
-                None,
-                None,
-            ) {
-                Ok(_) => ChainLogger::info(
-                    PLUGIN_CHAIN,
-                    "plugin.toolpkg.chat_runtime.run.done",
-                    &[
-                        ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
-                        ("package", hook.containerPackageName.clone()),
-                        ("hookId", hook.hookId.clone()),
-                    ],
-                ),
-                Err(error) => ChainLogger::error(
-                    PLUGIN_CHAIN,
-                    "plugin.toolpkg.chat_runtime.run.error",
-                    &[
-                        ("event", CHAT_RUNTIME_EVENT_STATE_CHANGED.to_string()),
-                        ("package", hook.containerPackageName.clone()),
-                        ("hookId", hook.hookId.clone()),
-                        ("function", hook.functionName.clone()),
-                        ("error", error),
-                    ],
-                ),
-            }
-        }
     }
 }
 

@@ -38,6 +38,11 @@ class AndroidRuntimeHost(context: Context) {
     @Volatile
     private var runtimeStartupMessage = "正在准备本地运行时"
 
+    private val documentFileSystem by lazy { AndroidDocumentFileSystem(applicationContext) }
+
+    /** JNI worker entry point for capability-backed filesystem resources. */
+    fun fileSystemResourceOperation(request: String): String = documentFileSystem.execute(request)
+
     /** Installs storage roots and accepts repeated identical configuration. */
     fun setStorageRoots(runtimePath: String?, workspacePath: String?) {
         val runtimeRoot = requiredAbsoluteRoot(runtimePath, "runtimeRoot")

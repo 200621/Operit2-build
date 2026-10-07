@@ -61,73 +61,87 @@ impl ToolPkgHostEventHookBridge {
     /// `eventPayload` is the JSON payload delivered to the handler function.
     #[allow(non_snake_case)]
     pub fn dispatchHostEvent(runtime: &ToolPkgBridgeRuntime, source: &str, eventPayload: Value) {
-        let hooks = HOST_EVENT_HOOKS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .expect("toolpkg host event hook mutex poisoned")
-            .clone();
+        let runtime = runtime.to_owned();
+        let source = source.to_owned();
+        super::ToolPkgHookBridgeSupport::scheduleToolPkgNotification(
+            "operit-toolpkg-notification",
+            move || {
+                Box::pin(async move {
+                    let runtime = &runtime;
+                    let source = &source;
+                    let hooks = HOST_EVENT_HOOKS
+                        .get_or_init(|| Mutex::new(Vec::new()))
+                        .lock()
+                        .expect("toolpkg host event hook mutex poisoned")
+                        .clone();
 
-        let manager = runtime.package_manager();
-        for hook in hooks {
-            if !hook.enabled {
-                continue;
-            }
-            if hook.source != source {
-                continue;
-            }
-            if !hostEventHookMatchesPayload(&hook, &eventPayload) {
-                continue;
-            }
-            ChainLogger::info(
-                PLUGIN_CHAIN,
-                "plugin.toolpkg.host_event.run.start",
-                &[
-                    ("source", source.to_string()),
-                    ("package", hook.containerPackageName.clone()),
-                    ("hookId", hook.hookId.clone()),
-                    ("function", hook.functionName.clone()),
-                ],
-            );
-            let payload = serde_json::json!({
-                "eventSource": source,
-                "hookId": hook.hookId,
-                "trigger": hook.trigger,
-                "payload": eventPayload,
-            });
-            match manager.runToolPkgMainHook(
-                &hook.containerPackageName,
-                &hook.functionName,
-                TOOLPKG_EVENT_HOST_EVENT,
-                Some("host_event"),
-                Some(&hook.hookId),
-                hook.functionSource.as_deref(),
-                payload,
-                None,
-                None,
-                None,
-            ) {
-                Ok(_) => ChainLogger::info(
-                    PLUGIN_CHAIN,
-                    "plugin.toolpkg.host_event.run.done",
-                    &[
-                        ("source", source.to_string()),
-                        ("package", hook.containerPackageName.clone()),
-                        ("hookId", hook.hookId.clone()),
-                    ],
-                ),
-                Err(error) => ChainLogger::error(
-                    PLUGIN_CHAIN,
-                    "plugin.toolpkg.host_event.run.error",
-                    &[
-                        ("source", source.to_string()),
-                        ("package", hook.containerPackageName.clone()),
-                        ("hookId", hook.hookId.clone()),
-                        ("function", hook.functionName.clone()),
-                        ("error", error),
-                    ],
-                ),
-            }
-        }
+                    let manager = runtime.package_manager();
+                    for hook in hooks {
+                        if !hook.enabled {
+                            continue;
+                        }
+                        if hook.source != source.as_str() {
+                            continue;
+                        }
+                        if !hostEventHookMatchesPayload(&hook, &eventPayload) {
+                            continue;
+                        }
+                        ChainLogger::info(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.host_event.run.start",
+                            &[
+                                ("source", source.to_string()),
+                                ("package", hook.containerPackageName.clone()),
+                                ("hookId", hook.hookId.clone()),
+                                ("function", hook.functionName.clone()),
+                            ],
+                        );
+                        let payload = serde_json::json!({
+                            "eventSource": source,
+                            "hookId": hook.hookId,
+                            "trigger": hook.trigger,
+                            "payload": eventPayload,
+                        });
+                        match manager
+                            .runToolPkgMainHook(
+                                &hook.containerPackageName,
+                                &hook.functionName,
+                                TOOLPKG_EVENT_HOST_EVENT,
+                                Some("host_event"),
+                                Some(&hook.hookId),
+                                hook.functionSource.as_deref(),
+                                payload,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(_) => ChainLogger::info(
+                                PLUGIN_CHAIN,
+                                "plugin.toolpkg.host_event.run.done",
+                                &[
+                                    ("source", source.to_string()),
+                                    ("package", hook.containerPackageName.clone()),
+                                    ("hookId", hook.hookId.clone()),
+                                ],
+                            ),
+                            Err(error) => ChainLogger::error(
+                                PLUGIN_CHAIN,
+                                "plugin.toolpkg.host_event.run.error",
+                                &[
+                                    ("source", source.to_string()),
+                                    ("package", hook.containerPackageName.clone()),
+                                    ("hookId", hook.hookId.clone()),
+                                    ("function", hook.functionName.clone()),
+                                    ("error", error),
+                                ],
+                            ),
+                        }
+                    }
+                })
+            },
+        );
     }
 }
 

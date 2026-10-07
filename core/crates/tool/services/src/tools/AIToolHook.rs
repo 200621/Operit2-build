@@ -21,6 +21,14 @@ pub trait AIToolHook: Send + Sync {
         AIToolHookDecision::Allow
     }
 
+    /// Adapts synchronous interception hooks to the asynchronous dispatcher.
+    fn onToolCallInterceptAsync<'a>(
+        &'a self,
+        tool: &'a AITool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AIToolHookDecision> + Send + 'a>> {
+        Box::pin(std::future::ready(self.onToolCallIntercept(tool)))
+    }
+
     /// Observes the completed permission check.
     fn onToolPermissionChecked(&self, _tool: &AITool, _granted: bool, _reason: Option<&str>) {}
 

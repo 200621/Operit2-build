@@ -5,7 +5,7 @@ use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::{AITool, ToolParameter};
 
 /// Runs tool inspection and execution commands.
-pub fn run_tool_command(
+pub async fn run_tool_command(
     application: &OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -41,6 +41,7 @@ pub fn run_tool_command(
                 params_json,
                 output,
             )
+            .await
         }
         _ => {
             print_tool_usage(output);
@@ -102,7 +103,7 @@ fn format_tool_visibility(visibility: Option<ToolRegistrationVisibility>) -> Str
     }
 }
 
-pub fn exec_tool(
+pub async fn exec_tool(
     mut handler: AIToolHandler,
     tool_name: &str,
     params_json: &str,
@@ -112,7 +113,7 @@ pub fn exec_tool(
         name: tool_name.to_string(),
         parameters: parse_tool_parameters_json(params_json)?,
     };
-    let result = handler.executeTool(tool);
+    let result = handler.executeTool(tool).await;
     print_tool_execution_result(&result, output)
 }
 

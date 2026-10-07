@@ -1,0 +1,92 @@
+# Android Root / su 封装
+
+## 参考范围
+
+设计参考：GitHub `AAswordman/Operit`，提交
+`dbf71916fae9750cfdc9f9a774f5a0fee56633fb`（2026-10-07 拉取）。主要阅读：
+
+- `app/src/main/java/com/ai/assistance/operit/core/tools/system/RootAuthorizer.kt`
+- `app/src/main/java/com/ai/assistance/operit/core/tools/system/shell/RootShellExecutor.kt`
+- `app/src/main/java/com/ai/assistance/operit/core/tools/system/shell/ShellExecutorFactory.kt`
+- `app/src/main/java/com/ai/assistance/operit/data/preferences/AndroidPermissionPreferences.kt`
+
+本实现按 Operit2 的同步 Kotlin owner / Flutter MethodChannel 边界重新实现，
+没有直接复制上游源文件，也没有引入其 UI、DataStore、Flow 或工具层依赖。
+保留已有 libsu 6.0.0 和 Shizuku 13.1.5 依赖。
+
+## 主要修正
+
+之前 Root 授权固定执行 `su -c 'id -u'`，截图却固定使用 libsu；授权状态只读取
+SharedPreferences 的历史布尔值，libsu 执行则没有落实调用者的命令超时。
+
+现在分为：
+
+- `AndroidRootCommandRouter`：自动/强制模式、自定义 su argv、设备 Root 迹象与
+  实际授权区分、身份探测、执行路由。可以通过假后端进行 JVM 行为测试。
+- `AndroidRootShell`：管理私有 libsu Shell，启用 mount-master，初始化上限 10 秒；
+  每条 libsu 命令有独立 deadline，失败/超时后关闭失效 Shell，非 Root Shell 不缓存。
+- `AndroidCommandProcessRunner`：直接 exec 和 Shizuku 共用的 stdout/stderr 并发读取、
+  超时、关闭 stdin、清理进程和输出流。直接 exec / Shizuku 保留原始字节输出；
+  libsu 仍使用其按行文本收集 API。
+- `AndroidPrivilegeAuthorization`：显式用户同意 + 当前 UID 验证，而不是持久化
+  `true` 就永远视为已授权。未同意时，状态查询不调用 su，以免打开界面就触发授权弹窗。
+
+授权检查和截图默认使用 `RootAuto`，遵循同一套设置。自动选择会优先复查最近成功的
+传输；首次探测遇到 KernelSU / APatch 的版本标识优先直接 exec，否则优先 libsu。
+失败时只在**身份探测阶段**尝试另一种方式。版本输出、su 文件存在等仅是 Root 迹象，
+实际授权必须满足 `id -u` 退出码为 0，且输出恰好为 `0`。
+
+不会永久缓存授权成功或拒绝；撤销权限后下次状态查询会重新验证，拒绝后也能重试。
+直接 exec 的用户命令在同一 su 进程内再次检查 UID，不允许降级成普通用户执行。
+用户命令启动后不会换传输重试，避免有副作用的命令执行两次。
+
+## 模式与自定义 su
+
+已有 MethodChannel `hostOnboardingRequestPermission` 对 `android.root` 新增两个
+**可选**字段；现有 Flutter 调用不传字段时，沿用已保存设置，首次默认为自动模式：
+
+```dart
+await channel.invokeMethod<void>('hostOnboardingRequestPermission', {
+  'hostId': 'android',
+  'requirementId': 'android.root',
+  'rootExecutionMode': 'exec', // auto / libsu / exec
+  'suCommand': "'/custom path/su' --flag",
+});
+```
+
+这提供原生配置入口，尚未新增 Flutter 模式选择/自定义命令的设置界面。
+自定义 su 按参数列表解析，支持带空格的路径、引号、转义；不会作为 shell 表达式执行。
+修改模式或命令会清除旧的用户同意标志，必须通过本次授权探测确认新配置。
+强制模式不会自动切换到另一种执行方式。自定义 su 不会悄悄替换成其他安装路径。
+默认 `su` 在 PATH 不可执行时还会尝试存在的常见 su 绝对路径。
+
+Owner `execute_privileged_command` 支持 `root` / `root_auto`，同时保留
+`root_libsu` / `root_exec` / `shizuku`。显式的 `root_libsu` 和 `root_exec`
+保持指定传输，不会自动切换。
+
+授权请求总预算为 30 秒；已同意后的状态复查总预算为 10 秒，并放到后台线程。
+RootAuto 单条命令的传输探测与实际执行共用调用者传入的超时预算。
+
+## 验证
+
+原生接线契约（无需 Android SDK）：
+
+```sh
+node --test tools/tests/android_root_commands.test.mjs \
+  tools/tests/android_runtime_contracts.test.mjs \
+  tools/tests/super_admin_terminal_routing.test.mjs
+```
+
+真实 Kotlin 行为测试（Java 17+，Kotlin 2.2.20）：
+
+```sh
+JAVA_HOME=/path/to/java KOTLINC=/path/to/kotlinc \
+  python3 tools/tests/test_android_root_commands.py
+```
+
+覆盖自动选择、KernelSU/APatch、强制模式、权限撤销/重试、自定义 su、拒绝普通 UID、
+中断、共享 deadline、不重复执行、双管道大量输出、stdin EOF、二进制输出、超时清理。
+没有 Kotlin 编译器时 Python 测试显式报告 skipped，不将其视为行为验证通过。
+
+还需要在 Magisk / KernelSU / APatch 真机上验证 Root 管理器授权弹窗、拒绝后重试、
+权限撤销、截图和长时间命令超时；JVM 测试不能替代设备级兼容性验证。

@@ -360,6 +360,9 @@ class WebKitWebViewController extends PlatformWebViewController {
   int _nextUserScriptIdentifier = 0;
 
   bool _zoomEnabled = true;
+  late final NativeWebViewZoom _nativeZoom = NativeWebViewZoom(
+    applyZoom: _setNativePageZoom,
+  );
   bool _verticalScrollBarEnabled = true;
   bool _horizontalScrollBarEnabled = true;
   Future<void> _macOSScrollBarStyleUpdate = Future<void>.value();
@@ -800,13 +803,24 @@ class WebKitWebViewController extends PlatformWebViewController {
     }
   }
 
-  /// Sets the page viewport zoom factor.
   @override
-  Future<void> setZoomFactor(double zoomFactor) {
-    if (!zoomFactor.isFinite || zoomFactor <= 0) {
-      throw ArgumentError.value(zoomFactor, 'zoomFactor');
-    }
+  bool get requiresNativeApplicationZoom =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
+  /// Sets page zoom without replacing the application's independently set zoom.
+  @override
+  Future<void> setZoomFactor(double zoomFactor) =>
+      _nativeZoom.setPageZoomFactor(zoomFactor);
+
+  @override
+  Future<void> setApplicationZoomFactor(double zoomFactor) {
+    if (!requiresNativeApplicationZoom) {
+      return Future<void>.value();
+    }
+    return _nativeZoom.setApplicationZoomFactor(zoomFactor);
+  }
+
+  Future<void> _setNativePageZoom(double zoomFactor) {
     final int? identifier = PigeonInstanceManager.instance.getIdentifier(
       _webView.nativeWebView,
     );

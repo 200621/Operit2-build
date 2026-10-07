@@ -321,7 +321,7 @@ impl ToolExecutionManager {
             }
 
             toolHandler.notifyToolCallRequested(&invocation.tool);
-            let interception = toolHandler.checkToolInterception(&invocation.tool);
+            let interception = toolHandler.checkToolInterception(&invocation.tool).await;
             if let operit_tools::tools::AIToolHook::AIToolHookDecision::Block(_) = interception {
                 let blockedResult =
                     AIToolHandler::toolInterceptionResult(&invocation.tool, interception);
@@ -795,6 +795,66 @@ pub trait ToolExecutor: Send {
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult;
     fn accessSpec(&self, tool: &AITool) -> Result<ToolAccessSpec, String>;
     fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult>;
+}
+
+/// Represents a tool result produced without blocking its calling executor.
+pub type ToolInvocationFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ToolResult>> + Send + 'a>>;
+
+/// Executes tools that own asynchronous package calls; synchronous tools retain ToolExecutor.
+pub trait AsyncToolExecutor: Send {
+    /// Validates a request before its execution begins.
+    fn validateParameters(&self, tool: &AITool) -> ToolValidationResult;
+    /// Declares the access boundary of the asynchronous tool.
+    fn accessSpec(&self, tool: &AITool) -> Result<ToolAccessSpec, String>;
+    /// Executes one invocation on its asynchronous result path.
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a>;
+}
+
+/// Records the execution contract explicitly selected when a tool is registered.
+pub enum RegisteredToolExecutor {
+    Synchronous(Box<dyn ToolExecutor>),
+    Asynchronous(Box<dyn AsyncToolExecutor>),
+}
+
+impl<T: ToolExecutor + 'static> From<Box<T>> for RegisteredToolExecutor {
+    /// Records a synchronous executor without changing its invocation contract.
+    fn from(executor: Box<T>) -> Self {
+        Self::Synchronous(executor)
+    }
+}
+
+impl From<Box<dyn ToolExecutor>> for RegisteredToolExecutor {
+    /// Records an already erased synchronous executor at registration.
+    fn from(executor: Box<dyn ToolExecutor>) -> Self {
+        Self::Synchronous(executor)
+    }
+}
+
+impl RegisteredToolExecutor {
+    /// Validates a request using its registered contract.
+    pub fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
+        match self {
+            Self::Synchronous(executor) => executor.validateParameters(tool),
+            Self::Asynchronous(executor) => executor.validateParameters(tool),
+        }
+    }
+    /// Returns the declared access boundary of the registered tool.
+    pub fn accessSpec(&self, tool: &AITool) -> Result<ToolAccessSpec, String> {
+        match self {
+            Self::Synchronous(executor) => executor.accessSpec(tool),
+            Self::Asynchronous(executor) => executor.accessSpec(tool),
+        }
+    }
+    /// Dispatches exactly the contract registered for this tool, without probing or retrying.
+    pub fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        match self {
+            Self::Synchronous(executor) => {
+                Box::pin(std::future::ready(executor.invokeAndStream(tool)))
+            }
+            Self::Asynchronous(executor) => executor.invokeAndStreamAsync(tool),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

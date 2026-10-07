@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
@@ -29,6 +30,7 @@ void main(List<String> arguments) async {
       final startupStopwatch = Stopwatch()..start();
       final bindingStopwatch = Stopwatch()..start();
       WidgetsFlutterBinding.ensureInitialized();
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       consumeGitHubOAuthWebCallbackAtStartup();
       final bindingElapsedMs = bindingStopwatch.elapsedMilliseconds;
       final loggerStopwatch = Stopwatch()..start();

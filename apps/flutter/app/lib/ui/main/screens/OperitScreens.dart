@@ -14,17 +14,22 @@ import '../../features/settings/models/SettingsModels.dart';
 import '../../features/settings/screens/SettingsScreen.dart';
 
 abstract class OperitScreen {
+  /// Creates a route with explicit ownership of its bottom system inset.
   const OperitScreen({
     required this.routeTypeName,
     this.title,
     this.participatesInCrossfadeTransition = true,
     this.keepAlive = false,
+    this.handlesBottomSafeArea = false,
   });
 
   final String routeTypeName;
   final String? title;
   final bool participatesInCrossfadeTransition;
   final bool keepAlive;
+
+  /// Lets a page extend its surfaces while keeping its own controls inset.
+  final bool handlesBottomSafeArea;
 
   Map<String, Object?> routeArgs() {
     return const <String, Object?>{};
@@ -42,7 +47,13 @@ abstract class OperitScreen {
 }
 
 class AiChatScreenRoute extends OperitScreen {
-  const AiChatScreenRoute() : super(routeTypeName: 'AiChat', title: 'AI Chat');
+  /// Lets the chat composer own the navigation-bar inset inside its surface.
+  const AiChatScreenRoute()
+    : super(
+        routeTypeName: 'AiChat',
+        title: 'AI Chat',
+        handlesBottomSafeArea: true,
+      );
 
   @override
   String? stableScreenKey() {

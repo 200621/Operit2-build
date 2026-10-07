@@ -455,7 +455,7 @@ impl ChatServiceCore {
 
     /// Dispatches chat input change notifications from host-owned input widgets.
     #[allow(non_snake_case)]
-    pub fn dispatchChatInputChanged(
+    pub async fn dispatchChatInputChanged(
         &self,
         chatIdOverride: Option<String>,
         messageText: String,
@@ -475,12 +475,13 @@ impl ChatServiceCore {
                 attachmentCount,
                 CHAT_INPUT_EVENT_INPUT_CHANGED,
             ),
-        );
+        )
+        .await;
     }
 
     /// Dispatches submit_requested and returns the ToolPkg decision for the host input widget.
     #[allow(non_snake_case)]
-    pub fn dispatchChatInputSubmitRequested(
+    pub async fn dispatchChatInputSubmitRequested(
         &self,
         chatIdOverride: Option<String>,
         messageText: String,
@@ -500,7 +501,8 @@ impl ChatServiceCore {
                 attachmentCount,
                 CHAT_INPUT_EVENT_SUBMIT_REQUESTED,
             ),
-        );
+        )
+        .await;
         serializeChatInputHookResult(decision)
     }
 
@@ -545,7 +547,8 @@ impl ChatServiceCore {
                     attachmentCount,
                     CHAT_INPUT_EVENT_SUBMIT_REQUESTED,
                 ),
-            );
+            )
+            .await;
             if let Some(decision) = submitDecision {
                 match decision.action.as_str() {
                     CHAT_INPUT_SUBMIT_ACTION_BLOCK | CHAT_INPUT_SUBMIT_ACTION_CONSUME => {
@@ -573,7 +576,8 @@ impl ChatServiceCore {
                 attachmentCount,
                 CHAT_INPUT_EVENT_SUBMITTED,
             ),
-        );
+        )
+        .await;
         ToolPkgInputMenuToggleBridge::invalidateToggleDefinitions();
         if self.enhancedAiService.is_some() && self.messageCoordinationDelegate.is_some() {
             self.markPendingQueueBlocked(&hookChatId);
@@ -913,13 +917,13 @@ impl ChatServiceCore {
 
     /// Renders one XML block through registered ToolPkg XML render hooks.
     #[allow(non_snake_case)]
-    pub fn renderToolPkgXml(
+    pub async fn renderToolPkgXml(
         &self,
         tagName: String,
         xmlContent: String,
         chatId: Option<String>,
     ) -> serde_json::Value {
-        ToolPkgXmlRenderBridge::renderRegisteredXml(tagName, xmlContent, chatId)
+        ToolPkgXmlRenderBridge::renderRegisteredXml(tagName, xmlContent, chatId).await
     }
 
     /// Creates a new chat and makes it available through chat history state.
@@ -1622,7 +1626,7 @@ impl ChatServiceCore {
     }
 
     /// Adds a file, pasted text, pasted image, package, screen capture, notification capture, or location capture as an attachment.
-    pub fn handleAttachment(&mut self, _filePath: String) {
+    pub async fn handleAttachment(&mut self, _filePath: String) {
         if let Some(content) = _filePath.strip_prefix(PASTED_TEXT_ATTACHMENT_PREFIX) {
             self.attachPastedText(content.to_string());
             return;
@@ -1645,15 +1649,15 @@ impl ChatServiceCore {
         }
 
         if filePath == "screen_capture" {
-            self.captureScreenContent();
+            self.captureScreenContent().await;
             return;
         }
         if filePath == "notifications_capture" {
-            self.captureNotifications(10);
+            self.captureNotifications(10).await;
             return;
         }
         if filePath == "location_capture" {
-            self.captureLocation(true);
+            self.captureLocation(true).await;
             return;
         }
         if let Some(packageName) = filePath.strip_prefix(PACKAGE_ATTACHMENT_PREFIX) {
@@ -1818,12 +1822,14 @@ impl ChatServiceCore {
 
     /// Captures and recognizes screen text through the configured system host.
     #[allow(non_snake_case)]
-    fn captureScreenContent(&mut self) {
+    async fn captureScreenContent(&mut self) {
         let mut toolHandler = self.runtimeToolHandler();
-        let result = toolHandler.executeTool(AITool {
-            name: "capture_screenshot".to_string(),
-            parameters: Vec::new(),
-        });
+        let result = toolHandler
+            .executeTool(AITool {
+                name: "capture_screenshot".to_string(),
+                parameters: Vec::new(),
+            })
+            .await;
         if !result.success {
             self.messageProcessingDelegate
                 .showToast(format!("添加屏幕内容失败: {}", toolFailureMessage(&result)));
@@ -1885,21 +1891,23 @@ impl ChatServiceCore {
     }
 
     #[allow(non_snake_case)]
-    fn captureNotifications(&mut self, limit: i32) {
+    async fn captureNotifications(&mut self, limit: i32) {
         let mut toolHandler = self.runtimeToolHandler();
-        let result = toolHandler.executeTool(AITool {
-            name: "get_notifications".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "limit".to_string(),
-                    value: limit.to_string(),
-                },
-                ToolParameter {
-                    name: "include_ongoing".to_string(),
-                    value: "true".to_string(),
-                },
-            ],
-        });
+        let result = toolHandler
+            .executeTool(AITool {
+                name: "get_notifications".to_string(),
+                parameters: vec![
+                    ToolParameter {
+                        name: "limit".to_string(),
+                        value: limit.to_string(),
+                    },
+                    ToolParameter {
+                        name: "include_ongoing".to_string(),
+                        value: "true".to_string(),
+                    },
+                ],
+            })
+            .await;
         if !result.success {
             self.messageProcessingDelegate
                 .showToast(format!("添加当前通知失败: {}", toolFailureMessage(&result)));
@@ -1922,25 +1930,27 @@ impl ChatServiceCore {
 
     /// Attaches current coordinates without requesting an implicit reverse-geocoding service.
     #[allow(non_snake_case)]
-    fn captureLocation(&mut self, highAccuracy: bool) {
+    async fn captureLocation(&mut self, highAccuracy: bool) {
         let mut toolHandler = self.runtimeToolHandler();
-        let result = toolHandler.executeTool(AITool {
-            name: "get_device_location".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "high_accuracy".to_string(),
-                    value: highAccuracy.to_string(),
-                },
-                ToolParameter {
-                    name: "timeout".to_string(),
-                    value: "10".to_string(),
-                },
-                ToolParameter {
-                    name: "include_address".to_string(),
-                    value: "false".to_string(),
-                },
-            ],
-        });
+        let result = toolHandler
+            .executeTool(AITool {
+                name: "get_device_location".to_string(),
+                parameters: vec![
+                    ToolParameter {
+                        name: "high_accuracy".to_string(),
+                        value: highAccuracy.to_string(),
+                    },
+                    ToolParameter {
+                        name: "timeout".to_string(),
+                        value: "10".to_string(),
+                    },
+                    ToolParameter {
+                        name: "include_address".to_string(),
+                        value: "false".to_string(),
+                    },
+                ],
+            })
+            .await;
         if !result.success {
             self.messageProcessingDelegate
                 .showToast(format!("添加当前位置失败: {}", toolFailureMessage(&result)));

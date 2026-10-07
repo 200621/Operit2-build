@@ -203,7 +203,7 @@ impl SystemPromptConfig {
     }
 
     #[allow(non_snake_case)]
-    pub fn getSystemPrompt(options: SystemPromptOptions) -> String {
+    pub async fn getSystemPrompt(options: SystemPromptOptions) -> String {
         let package_system_visible = options.tool_exposure_mode == ToolExposureMode::FULL
             && options.enable_tools
             && options
@@ -291,6 +291,7 @@ impl SystemPromptConfig {
                         &options.tool_visibility,
                         options.hook_metadata.clone(),
                     )
+                    .await
                 )
             };
         let available_tools_cn =
@@ -314,6 +315,7 @@ impl SystemPromptConfig {
                         &options.tool_visibility,
                         options.hook_metadata.clone(),
                     )
+                    .await
                 )
             };
 
@@ -402,7 +404,9 @@ impl SystemPromptConfig {
     }
 
     #[allow(non_snake_case)]
-    pub fn getSystemPromptWithCustomPrompts(options: SystemPromptWithCustomOptions) -> String {
+    pub async fn getSystemPromptWithCustomPrompts(
+        options: SystemPromptWithCustomOptions,
+    ) -> String {
         let mut metadata = HashMap::from([
             (
                 "workspacePath".to_string(),
@@ -509,12 +513,13 @@ impl SystemPromptConfig {
                 available_tools: Vec::new(),
                 metadata,
                 on_hook_timeout: None,
-            });
+            })
+            .await;
 
-        let base_prompt = before_context
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| Self::getSystemPrompt(options.base.clone()));
+        let base_prompt = match before_context.system_prompt.clone() {
+            Some(prompt) => prompt,
+            None => Self::getSystemPrompt(options.base.clone()).await,
+        };
         let mut composed_prompt =
             Self::applyCustomPrompts(&base_prompt, &options.custom_intro_prompt);
         if options.enable_group_orchestration_hint {
@@ -540,14 +545,16 @@ impl SystemPromptConfig {
                 stage: "compose_system_prompt_sections".to_string(),
                 system_prompt: Some(composed_prompt),
                 ..before_context
-            });
+            })
+            .await;
         let after_compose_prompt = compose_context.system_prompt.clone().unwrap_or_default();
         let after_context =
             PromptHookRegistry::dispatchSystemPromptComposeHooks(PromptHookContext {
                 stage: "after_compose_system_prompt".to_string(),
                 system_prompt: Some(after_compose_prompt),
                 ..compose_context
-            });
+            })
+            .await;
         after_context.system_prompt.unwrap_or_default()
     }
 }
@@ -732,9 +739,9 @@ mod tests {
     }
 
     /// Verifies native tool-call prompts never advertise the text XML protocol.
-    #[test]
-    fn nativeToolCallPromptExcludesXmlToolSyntax() {
-        let prompt = SystemPromptConfig::getSystemPrompt(packagePromptOptions(true));
+    #[tokio::test(flavor = "current_thread")]
+    async fn nativeToolCallPromptExcludesXmlToolSyntax() {
+        let prompt = SystemPromptConfig::getSystemPrompt(packagePromptOptions(true)).await;
 
         assert!(prompt.contains("call the use_package function"));
         assert!(!prompt.contains("<tool"));
@@ -742,34 +749,38 @@ mod tests {
     }
 
     /// Verifies text-protocol prompts retain the XML package invocation syntax.
-    #[test]
-    fn xmlToolPromptIncludesPackageInvocationSyntax() {
-        let prompt = SystemPromptConfig::getSystemPrompt(packagePromptOptions(false));
+    #[tokio::test(flavor = "current_thread")]
+    async fn xmlToolPromptIncludesPackageInvocationSyntax() {
+        let prompt = SystemPromptConfig::getSystemPrompt(packagePromptOptions(false)).await;
 
         assert!(prompt.contains("<tool name=\"use_package\">"));
         assert!(prompt.contains("<param name=\"package_name\">"));
     }
 
-    #[test]
-    fn attachment_origin_guidelines_are_visible_without_a_workspace_in_both_languages() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn attachment_origin_guidelines_are_visible_without_a_workspace_in_both_languages() {
         for use_english in [true, false] {
             let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
-                use_english, custom_system_prompt_template: "Custom instructions".into(),
+                use_english,
+                custom_system_prompt_template: "Custom instructions".into(),
                 ..SystemPromptOptions::default()
-            });
+            })
+            .await;
             assert!(prompt.contains("node_id"));
             assert!(prompt.contains("switch_core"));
             assert!(prompt.contains("/app/data/temp/clean_on_exit"));
         }
     }
 
-    #[test]
-    fn workspace_prompt_explains_sync_and_external_mount_boundaries() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_prompt_explains_sync_and_external_mount_boundaries() {
         for use_english in [true, false] {
             let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
-                use_english, workspace_path: Some("/app/workspaces/test".into()),
+                use_english,
+                workspace_path: Some("/app/workspaces/test".into()),
                 ..SystemPromptOptions::default()
-            });
+            })
+            .await;
             if use_english {
                 assert!(prompt.contains("automatically replicated bidirectionally"));
                 assert!(prompt.contains("Synchronization is eventual"));
@@ -785,8 +796,8 @@ mod tests {
     }
 
     /// Verifies every mounted workspace folder is exposed in the model prompt.
-    #[test]
-    fn workspacePromptListsAllMountedFolders() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptListsAllMountedFolders() {
         let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
             use_english: true,
             workspace_path: Some("/app/workspaces/test".to_string()),
@@ -795,7 +806,8 @@ mod tests {
                 "/mnt/windows/d/Code/stm32".to_string(),
             ],
             ..SystemPromptOptions::default()
-        });
+        })
+        .await;
 
         assert!(prompt.contains("/app/workspaces/test"));
         assert!(prompt.contains("/mnt/windows/d/Code/stm32"));
@@ -824,15 +836,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workspacePromptIncludesTerminalMappingsInBothLanguagesAndToolModes() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptIncludesTerminalMappingsInBothLanguagesAndToolModes() {
         for use_english in [false, true] {
             for mode in [super::ToolExposureMode::FULL, super::ToolExposureMode::CLI] {
                 for use_tool_call_api in [false, true] {
                     let mut options = workspacePromptOptions(use_english);
                     options.tool_exposure_mode = mode.clone();
                     options.use_tool_call_api = use_tool_call_api;
-                    let prompt = SystemPromptConfig::getSystemPrompt(options);
+                    let prompt = SystemPromptConfig::getSystemPrompt(options).await;
                     assert!(prompt.contains("/Users/test/My Projects/main"));
                     assert!(prompt.contains("/Users/test/My Projects/library"));
                     assert!(prompt.contains(if use_english {
@@ -850,15 +862,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workspacePromptSurvivesCustomTemplatesWithOrWithoutPlaceholder() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptSurvivesCustomTemplatesWithOrWithoutPlaceholder() {
         for template in [
             "Custom instructions.",
             "Custom instructions.\nWORKSPACE_GUIDELINES_SECTION",
         ] {
             let mut options = workspacePromptOptions(true);
             options.custom_system_prompt_template = template.into();
-            let prompt = SystemPromptConfig::getSystemPrompt(options);
+            let prompt = SystemPromptConfig::getSystemPrompt(options).await;
             assert!(prompt.contains("Custom instructions."));
             assert!(prompt.contains("/Users/test/My Projects/main"));
             assert_eq!(prompt.matches("TERMINAL WORKSPACE PATHS").count(), 1);
@@ -866,60 +878,60 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workspacePromptOmitsPathsWhenToolsAreDisabledOrWorkspaceIsUnbound() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptOmitsPathsWhenToolsAreDisabledOrWorkspaceIsUnbound() {
         for template in ["Custom instructions.", "WORKSPACE_GUIDELINES_SECTION"] {
             let mut options = workspacePromptOptions(true);
             options.custom_system_prompt_template = template.into();
             options.enable_tools = false;
-            assert!(
-                !SystemPromptConfig::getSystemPrompt(options).contains("/Users/test/My Projects")
-            );
+            assert!(!SystemPromptConfig::getSystemPrompt(options)
+                .await
+                .contains("/Users/test/My Projects"));
         }
         for path in [None, Some(" ".into())] {
             let mut options = workspacePromptOptions(true);
             options.workspace_path = path;
-            assert!(
-                !SystemPromptConfig::getSystemPrompt(options).contains("TERMINAL WORKSPACE PATHS")
-            );
+            assert!(!SystemPromptConfig::getSystemPrompt(options)
+                .await
+                .contains("TERMINAL WORKSPACE PATHS"));
         }
     }
 
-    #[test]
-    fn workspacePromptDoesNotGuessUnresolvedTerminalPaths() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptDoesNotGuessUnresolvedTerminalPaths() {
         let mut options = workspacePromptOptions(true);
         options.workspace_path_mappings.clear();
-        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        let prompt = SystemPromptConfig::getSystemPrompt(options).await;
         assert!(prompt.contains("No absolute host path mapping is available"));
         assert!(!prompt.contains("Terminal absolute path:"));
     }
 
-    #[test]
-    fn workspacePromptDistinguishesOhosNativeAndVrootPaths() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptDistinguishesOhosNativeAndVrootPaths() {
         let mut options = workspacePromptOptions(true);
         options.host_environment.platform = super::HostPlatform::Ohos;
-        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        let prompt = SystemPromptConfig::getSystemPrompt(options).await;
         assert!(prompt.contains("Native terminal: `/Users/test/My Projects/main`"));
         assert!(
             prompt.contains("QEMU-vroot terminal: `/mnt/host-root/Users/test/My Projects/main`")
         );
     }
 
-    #[test]
-    fn workspacePromptDoesNotTreatBrowserStorageAsVmDirectories() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptDoesNotTreatBrowserStorageAsVmDirectories() {
         let mut options = workspacePromptOptions(true);
         options.host_environment.platform = super::HostPlatform::Web;
-        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        let prompt = SystemPromptConfig::getSystemPrompt(options).await;
         assert!(prompt.contains("Workspace VFS storage is not mounted into that VM"));
         assert!(!prompt.contains("/Users/test/My Projects"));
     }
 
-    #[test]
-    fn workspacePromptIncludesWindowsDrivePathsWithoutRewritingThem() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspacePromptIncludesWindowsDrivePathsWithoutRewritingThem() {
         let mut options = workspacePromptOptions(true);
         options.host_environment.platform = super::HostPlatform::Windows;
         options.workspace_path_mappings[0].physicalPath = "D:/My Projects/main".into();
-        let prompt = SystemPromptConfig::getSystemPrompt(options);
+        let prompt = SystemPromptConfig::getSystemPrompt(options).await;
         assert!(prompt.contains("Terminal absolute path: `D:/My Projects/main`"));
     }
 }

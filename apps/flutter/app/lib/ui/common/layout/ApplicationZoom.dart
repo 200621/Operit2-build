@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:webview_all/webview_all.dart' show WebViewScaleScope;
 
 /// Defines the discrete, user-controlled interface zoom levels.
 abstract final class ApplicationZoom {
@@ -140,7 +141,7 @@ class _ApplicationZoomHostState extends State<ApplicationZoomHost> {
         child: SizedBox(
           width: zoomedSize.width,
           height: zoomedSize.height,
-          child: widget.child,
+          child: WebViewScaleScope(scale: zoom, child: widget.child),
         ),
       ),
     );

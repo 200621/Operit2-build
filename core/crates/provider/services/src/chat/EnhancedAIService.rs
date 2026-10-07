@@ -379,39 +379,45 @@ impl ConversationRoundManagerMirror {
 pub struct RuntimePromptHistoryHooks;
 
 impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
-    fn dispatch_prompt_history_hooks(&self, context: HistoryHookContext) -> HistoryHookContext {
-        let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
-            stage: context.stage.clone(),
-            chat_id: context.chat_id.clone(),
-            function_type: None,
-            prompt_function_type: Some(context.prompt_function_type.clone()),
-            use_english: context.use_english,
-            raw_input: None,
-            processed_input: Some(context.processed_input.clone()),
-            chat_history: context.chat_history.clone(),
-            prepared_history: context.prepared_history.clone(),
-            system_prompt: None,
-            tool_prompt: None,
-            model_parameters: Vec::new(),
-            available_tools: Vec::new(),
-            metadata: btree_to_value_map(&context.metadata),
-            on_hook_timeout: None,
-        });
+    fn dispatch_prompt_history_hooks(
+        &self,
+        context: HistoryHookContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HistoryHookContext> + Send + '_>> {
+        Box::pin(async move {
+            let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
+                stage: context.stage.clone(),
+                chat_id: context.chat_id.clone(),
+                function_type: None,
+                prompt_function_type: Some(context.prompt_function_type.clone()),
+                use_english: context.use_english,
+                raw_input: None,
+                processed_input: Some(context.processed_input.clone()),
+                chat_history: context.chat_history.clone(),
+                prepared_history: context.prepared_history.clone(),
+                system_prompt: None,
+                tool_prompt: None,
+                model_parameters: Vec::new(),
+                available_tools: Vec::new(),
+                metadata: btree_to_value_map(&context.metadata),
+                on_hook_timeout: None,
+            })
+            .await;
 
-        HistoryHookContext {
-            stage: dispatched.stage,
-            chat_id: dispatched.chat_id,
-            prompt_function_type: dispatched
-                .prompt_function_type
-                .expect("PromptHistoryHook must preserve prompt_function_type"),
-            processed_input: dispatched
-                .processed_input
-                .expect("PromptHistoryHook must preserve processed_input"),
-            chat_history: dispatched.chat_history,
-            prepared_history: dispatched.prepared_history,
-            use_english: dispatched.use_english,
-            metadata: value_to_btree_map(dispatched.metadata),
-        }
+            HistoryHookContext {
+                stage: dispatched.stage,
+                chat_id: dispatched.chat_id,
+                prompt_function_type: dispatched
+                    .prompt_function_type
+                    .expect("PromptHistoryHook must preserve prompt_function_type"),
+                processed_input: dispatched
+                    .processed_input
+                    .expect("PromptHistoryHook must preserve processed_input"),
+                chat_history: dispatched.chat_history,
+                prepared_history: dispatched.prepared_history,
+                use_english: dispatched.use_english,
+                metadata: value_to_btree_map(dispatched.metadata),
+            }
+        })
     }
 }
 
@@ -421,108 +427,113 @@ pub struct RuntimeSystemPromptComposer {
 }
 
 impl SystemPromptComposer for RuntimeSystemPromptComposer {
-    fn get_system_prompt_with_custom_prompts(
-        &self,
-        request: &PrepareConversationHistoryRequest,
+    fn get_system_prompt_with_custom_prompts<'a>(
+        &'a self,
+        request: &'a PrepareConversationHistoryRequest,
         use_english: bool,
-    ) -> String {
-        let custom_system_prompt_template = match &request.custom_system_prompt_template {
-            Some(value) => value.clone(),
-            None => String::new(),
-        };
-        let group_participant_names_text = match &request.group_participant_names_text {
-            Some(value) => value.clone(),
-            None => String::new(),
-        };
-        let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
-        // Use the same host-owned roots as file tools, not a guessed storage location.
-        // Resolve afresh for every request so workspace switches cannot retain stale paths.
-        let context = self.tool_handler.getContext();
-        let workspace_path_mappings = context
-            .runtimeStorageHost
-            .as_ref()
-            .and_then(|storage| {
-                Some(PathMapper::new(
-                    storage.runtimeRootDir()?,
-                    storage.workspaceRootDir()?,
-                ))
-            })
-            .map(|mapper| {
-                resolve_workspace_path_mappings(
-                    &mapper,
-                    request.workspace_path.as_deref(),
-                    &request.workspace_folders,
-                )
-            })
-            .unwrap_or_default();
-        let package_manager = self.tool_handler.getOrCreatePackageManager();
-        let package_manager_guard = package_manager
-            .lock()
-            .expect("package manager mutex poisoned");
-        let enabled_packages = package_manager_guard
-            .getEnabledPackageNames()
-            .into_iter()
-            .filter_map(|package_name| {
-                package_manager_guard
-                    .getEffectivePackageTools(&package_name)
-                    .filter(|_| !package_manager_guard.isToolPkgContainer(&package_name))
-                    .map(|tool_package| PackageInfo {
-                        name: package_name,
-                        description: tool_package.description.resolve(use_english),
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
+        Box::pin(async move {
+            let custom_system_prompt_template = match &request.custom_system_prompt_template {
+                Some(value) => value.clone(),
+                None => String::new(),
+            };
+            let group_participant_names_text = match &request.group_participant_names_text {
+                Some(value) => value.clone(),
+                None => String::new(),
+            };
+            let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
+            // Use the same host-owned roots as file tools, not a guessed storage location.
+            // Resolve afresh for every request so workspace switches cannot retain stale paths.
+            let context = self.tool_handler.getContext();
+            let workspace_path_mappings = context
+                .runtimeStorageHost
+                .as_ref()
+                .and_then(|storage| {
+                    Some(PathMapper::new(
+                        storage.runtimeRootDir()?,
+                        storage.workspaceRootDir()?,
+                    ))
+                })
+                .map(|mapper| {
+                    resolve_workspace_path_mappings(
+                        &mapper,
+                        request.workspace_path.as_deref(),
+                        &request.workspace_folders,
+                    )
+                })
+                .unwrap_or_default();
+            let package_manager = self.tool_handler.getOrCreatePackageManager();
+            let (enabled_packages, mcp_servers) = {
+                let package_manager_guard = package_manager
+                    .lock()
+                    .expect("package manager mutex poisoned");
+                let enabled_packages = package_manager_guard
+                    .getEnabledPackageNames()
+                    .into_iter()
+                    .filter_map(|package_name| {
+                        package_manager_guard
+                            .getEffectivePackageTools(&package_name)
+                            .filter(|_| !package_manager_guard.isToolPkgContainer(&package_name))
+                            .map(|tool_package| PackageInfo {
+                                name: package_name,
+                                description: tool_package.description.resolve(use_english),
+                            })
                     })
-            })
-            .collect::<Vec<_>>();
-        let mcp_servers = package_manager_guard
-            .getAvailableServerPackages()
-            .into_iter()
-            .map(|(name, server_config)| PackageInfo {
-                name,
-                description: server_config.description,
-            })
-            .collect::<Vec<_>>();
-        drop(package_manager_guard);
-        let skill_packages = self
-            .provider_runtime_context
-            .support()
-            .aiVisibleSkillPackages()
-            .expect("provider runtime support must provide skill packages")
-            .into_iter()
-            .map(|package| PackageInfo {
-                name: package.name,
-                description: package.description,
-            })
-            .collect::<Vec<_>>();
-        SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
-            base: SystemPromptOptions {
-                chat_id: request.chat_id.clone(),
-                workspace_path: request.workspace_path.clone(),
-                workspace_folders: request.workspace_folders.clone(),
-                workspace_path_mappings,
-                use_english,
-                custom_system_prompt_template,
-                enable_tools: true,
-                has_image_recognition: request.has_image_recognition,
-                chat_model_has_direct_image: request.chat_model_has_direct_image,
-                has_audio_recognition: request.has_audio_recognition,
-                has_video_recognition: request.has_video_recognition,
-                chat_model_has_direct_audio: request.chat_model_has_direct_audio,
-                chat_model_has_direct_video: request.chat_model_has_direct_video,
-                use_tool_call_api: request.use_tool_call_api,
-                tool_exposure_mode: match request.tool_exposure_mode {
-                    ToolExposureMode::Full => SystemToolExposureMode::FULL,
-                    ToolExposureMode::Cli => SystemToolExposureMode::CLI,
+                    .collect::<Vec<_>>();
+                let mcp_servers = package_manager_guard
+                    .getAvailableServerPackages()
+                    .into_iter()
+                    .map(|(name, server_config)| PackageInfo {
+                        name,
+                        description: server_config.description,
+                    })
+                    .collect::<Vec<_>>();
+                (enabled_packages, mcp_servers)
+            };
+            let skill_packages = self
+                .provider_runtime_context
+                .support()
+                .aiVisibleSkillPackages()
+                .expect("provider runtime support must provide skill packages")
+                .into_iter()
+                .map(|package| PackageInfo {
+                    name: package.name,
+                    description: package.description,
+                })
+                .collect::<Vec<_>>();
+            SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
+                base: SystemPromptOptions {
+                    chat_id: request.chat_id.clone(),
+                    workspace_path: request.workspace_path.clone(),
+                    workspace_folders: request.workspace_folders.clone(),
+                    workspace_path_mappings,
+                    use_english,
+                    custom_system_prompt_template,
+                    enable_tools: true,
+                    has_image_recognition: request.has_image_recognition,
+                    chat_model_has_direct_image: request.chat_model_has_direct_image,
+                    has_audio_recognition: request.has_audio_recognition,
+                    has_video_recognition: request.has_video_recognition,
+                    chat_model_has_direct_audio: request.chat_model_has_direct_audio,
+                    chat_model_has_direct_video: request.chat_model_has_direct_video,
+                    use_tool_call_api: request.use_tool_call_api,
+                    tool_exposure_mode: match request.tool_exposure_mode {
+                        ToolExposureMode::Full => SystemToolExposureMode::FULL,
+                        ToolExposureMode::Cli => SystemToolExposureMode::CLI,
+                    },
+                    host_environment,
+                    enabled_packages,
+                    mcp_servers,
+                    skill_packages,
+                    hook_metadata: btree_to_value_map(&request.active_prompt_metadata),
+                    ..SystemPromptOptions::default()
                 },
-                host_environment,
-                enabled_packages,
-                mcp_servers,
-                skill_packages,
-                hook_metadata: btree_to_value_map(&request.active_prompt_metadata),
-                ..SystemPromptOptions::default()
-            },
-            custom_intro_prompt: request.intro_prompt.clone(),
-            enable_group_orchestration_hint: request.enable_group_orchestration_hint,
-            group_orchestration_role_name: request.ai_name.clone(),
-            group_participant_names_text,
+                custom_intro_prompt: request.intro_prompt.clone(),
+                enable_group_orchestration_hint: request.enable_group_orchestration_hint,
+                group_orchestration_role_name: request.ai_name.clone(),
+                group_participant_names_text,
+            })
+            .await
         })
     }
 }
@@ -659,12 +670,16 @@ impl EnhancedAIService {
         Ok(windowSize)
     }
 
-    pub fn applyPromptFinalizeHooks(
+    pub async fn applyPromptFinalizeHooks<F, Fut>(
         &self,
         initialContext: PromptHookContext,
-        dispatchHooks: fn(PromptHookContext) -> PromptHookContext,
-    ) -> PromptHookContext {
-        dispatchHooks(initialContext)
+        dispatchHooks: F,
+    ) -> PromptHookContext
+    where
+        F: FnOnce(PromptHookContext) -> Fut,
+        Fut: std::future::Future<Output = PromptHookContext>,
+    {
+        dispatchHooks(initialContext).await
     }
 
     pub fn bypassPromptHooks(&self, context: PromptHookContext) -> PromptHookContext {
@@ -704,7 +719,7 @@ impl EnhancedAIService {
     }
 
     /// Prepares provider-facing history with the complete workspace folder set.
-    pub fn prepareConversationHistory(
+    pub async fn prepareConversationHistory(
         &mut self,
         chatHistory: Vec<PromptTurn>,
         processedInput: String,
@@ -739,39 +754,42 @@ impl EnhancedAIService {
             tool_handler: self.tool_handler.clone(),
             provider_runtime_context: self.provider_runtime_context.clone(),
         };
-        self.conversation_service.prepare_conversation_history(
-            PrepareConversationHistoryRequest {
-                chat_history: chatHistory,
-                processed_input: processedInput,
-                chat_id: chatId,
-                workspace_path: workspacePath,
-                workspace_folders: workspaceFolders,
-                prompt_function_type: prompt_function_type_name(&promptFunctionType).to_string(),
-                custom_system_prompt_template: customSystemPromptTemplate,
-                role_card_id: roleCardId,
-                enable_group_orchestration_hint: enableGroupOrchestrationHint,
-                group_participant_names_text: groupParticipantNamesText,
-                proxy_sender_name: proxySenderName,
-                has_image_recognition: !isSubTask && runtime.hasImageRecognition,
-                has_audio_recognition: !isSubTask && runtime.hasAudioRecognition,
-                has_video_recognition: !isSubTask && runtime.hasVideoRecognition,
-                chat_model_has_direct_audio: chatModelHasDirectAudio,
-                chat_model_has_direct_video: chatModelHasDirectVideo,
-                use_tool_call_api: useToolCallApi,
-                chat_model_has_direct_image: chatModelHasDirectImage,
-                tool_exposure_mode: runtime.toolExposureMode.clone(),
-                active_prompt_metadata: runtime.activePromptMetadata.clone(),
-                user_preferences_text: runtime.userPreferencesText.clone(),
-                intro_prompt: runtime.introPrompt.clone(),
-                waifu_rules_text: runtime.waifuRulesText.clone(),
-                avatar_mood_rules_text: runtime.avatarMoodRulesText.clone(),
-                disable_user_preference_description: runtime.disableUserPreferenceDescription,
-                ai_name: runtime.aiName.clone(),
-            },
-            &history_hooks,
-            &system_prompt_composer,
-            runtime.useEnglish,
-        )
+        self.conversation_service
+            .prepare_conversation_history(
+                PrepareConversationHistoryRequest {
+                    chat_history: chatHistory,
+                    processed_input: processedInput,
+                    chat_id: chatId,
+                    workspace_path: workspacePath,
+                    workspace_folders: workspaceFolders,
+                    prompt_function_type: prompt_function_type_name(&promptFunctionType)
+                        .to_string(),
+                    custom_system_prompt_template: customSystemPromptTemplate,
+                    role_card_id: roleCardId,
+                    enable_group_orchestration_hint: enableGroupOrchestrationHint,
+                    group_participant_names_text: groupParticipantNamesText,
+                    proxy_sender_name: proxySenderName,
+                    has_image_recognition: !isSubTask && runtime.hasImageRecognition,
+                    has_audio_recognition: !isSubTask && runtime.hasAudioRecognition,
+                    has_video_recognition: !isSubTask && runtime.hasVideoRecognition,
+                    chat_model_has_direct_audio: chatModelHasDirectAudio,
+                    chat_model_has_direct_video: chatModelHasDirectVideo,
+                    use_tool_call_api: useToolCallApi,
+                    chat_model_has_direct_image: chatModelHasDirectImage,
+                    tool_exposure_mode: runtime.toolExposureMode.clone(),
+                    active_prompt_metadata: runtime.activePromptMetadata.clone(),
+                    user_preferences_text: runtime.userPreferencesText.clone(),
+                    intro_prompt: runtime.introPrompt.clone(),
+                    waifu_rules_text: runtime.waifuRulesText.clone(),
+                    avatar_mood_rules_text: runtime.avatarMoodRulesText.clone(),
+                    disable_user_preference_description: runtime.disableUserPreferenceDescription,
+                    ai_name: runtime.aiName.clone(),
+                },
+                &history_hooks,
+                &system_prompt_composer,
+                runtime.useEnglish,
+            )
+            .await
     }
 
     pub async fn generateSummary(
@@ -883,24 +901,26 @@ impl EnhancedAIService {
         publishEstimate: bool,
         mut runtime: SendMessageRuntime,
     ) -> Result<i64, AiServiceError> {
-        let preparedHistory = self.prepareConversationHistory(
-            chatHistory,
-            message.clone(),
-            chatId.clone(),
-            workspacePath,
-            workspaceFolders,
-            promptFunctionType.clone(),
-            None,
-            roleCardId.clone(),
-            enableGroupOrchestrationHint,
-            groupParticipantNamesText,
-            proxySenderName,
-            false,
-            FunctionType::CHAT,
-            chatProviderIdOverride.clone(),
-            chatModelIdOverride.clone(),
-            &runtime,
-        );
+        let preparedHistory = self
+            .prepareConversationHistory(
+                chatHistory,
+                message.clone(),
+                chatId.clone(),
+                workspacePath,
+                workspaceFolders,
+                promptFunctionType.clone(),
+                None,
+                roleCardId.clone(),
+                enableGroupOrchestrationHint,
+                groupParticipantNamesText,
+                proxySenderName,
+                false,
+                FunctionType::CHAT,
+                chatProviderIdOverride.clone(),
+                chatModelIdOverride.clone(),
+                &runtime,
+            )
+            .await;
         let availableTools = self.getAvailableToolsForFunction(
             FunctionType::CHAT,
             chatId.clone(),
@@ -1284,24 +1304,26 @@ impl EnhancedAIService {
         let runtimeSupport = self.provider_runtime_context.shared_support();
         let startTime = runtimeSupport.messageTimingNow();
         lifecycle.push(SendMessageLifecycleStage::PrepareConversationHistory);
-        let preparedHistory = self.prepareConversationHistory(
-            execContext.conversationHistory.clone(),
-            message.clone(),
-            chatId.clone(),
-            workspacePath.clone(),
-            options.workspaceFolders.clone(),
-            promptFunctionType.clone(),
-            customSystemPromptTemplate.clone(),
-            roleCardId.clone(),
-            enableGroupOrchestrationHint,
-            groupParticipantNamesText.clone(),
-            proxySenderName.clone(),
-            isSubTask,
-            functionType.clone(),
-            chatProviderIdOverride.clone(),
-            chatModelIdOverride.clone(),
-            &runtime,
-        );
+        let preparedHistory = self
+            .prepareConversationHistory(
+                execContext.conversationHistory.clone(),
+                message.clone(),
+                chatId.clone(),
+                workspacePath.clone(),
+                options.workspaceFolders.clone(),
+                promptFunctionType.clone(),
+                customSystemPromptTemplate.clone(),
+                roleCardId.clone(),
+                enableGroupOrchestrationHint,
+                groupParticipantNamesText.clone(),
+                proxySenderName.clone(),
+                isSubTask,
+                functionType.clone(),
+                chatProviderIdOverride.clone(),
+                chatModelIdOverride.clone(),
+                &runtime,
+            )
+            .await;
         let tAfterPrepareHistory = runtimeSupport.messageTimingNow();
         AppLogger::d(
             TAG,
@@ -1394,46 +1416,50 @@ impl EnhancedAIService {
         );
         let mut finalProcessedInput = message.clone();
         let mut finalPreparedHistory = preparedHistory;
-        let beforeFinalizeContext = self.applyPromptFinalizeHooks(
-            PromptHookContext {
-                stage: "before_finalize_prompt".to_string(),
-                chat_id: chatId.clone(),
-                function_type: Some(function_type_name(&functionType).to_string()),
-                prompt_function_type: Some(
-                    prompt_function_type_name(&promptFunctionType).to_string(),
-                ),
-                raw_input: Some(message.clone()),
-                processed_input: Some(finalProcessedInput.clone()),
-                prepared_history: finalPreparedHistory.clone(),
-                model_parameters: serializePromptHookModelParameters(&modelParameters),
-                available_tools: serializePromptHookToolPrompts(&availableTools),
-                metadata: self.buildPromptFinalizeMetadata(
-                    chatId.clone(),
-                    roleCardId.clone(),
-                    workspacePath.clone(),
-                    enableThinking,
-                    stream,
-                    isSubTask,
-                ),
-                ..PromptHookContext::default()
-            },
-            PromptHookRegistry::dispatchPromptFinalizeHooks,
-        );
+        let beforeFinalizeContext = self
+            .applyPromptFinalizeHooks(
+                PromptHookContext {
+                    stage: "before_finalize_prompt".to_string(),
+                    chat_id: chatId.clone(),
+                    function_type: Some(function_type_name(&functionType).to_string()),
+                    prompt_function_type: Some(
+                        prompt_function_type_name(&promptFunctionType).to_string(),
+                    ),
+                    raw_input: Some(message.clone()),
+                    processed_input: Some(finalProcessedInput.clone()),
+                    prepared_history: finalPreparedHistory.clone(),
+                    model_parameters: serializePromptHookModelParameters(&modelParameters),
+                    available_tools: serializePromptHookToolPrompts(&availableTools),
+                    metadata: self.buildPromptFinalizeMetadata(
+                        chatId.clone(),
+                        roleCardId.clone(),
+                        workspacePath.clone(),
+                        enableThinking,
+                        stream,
+                        isSubTask,
+                    ),
+                    ..PromptHookContext::default()
+                },
+                PromptHookRegistry::dispatchPromptFinalizeHooks,
+            )
+            .await;
         lifecycle.push(SendMessageLifecycleStage::BeforeFinalizePromptHook);
         if let Some(processedInput) = beforeFinalizeContext.processed_input.clone() {
             finalProcessedInput = processedInput;
         }
         finalPreparedHistory = beforeFinalizeContext.prepared_history.clone();
 
-        let beforeSendContext = self.applyPromptFinalizeHooks(
-            PromptHookContext {
-                stage: "before_send_to_model".to_string(),
-                processed_input: Some(finalProcessedInput.clone()),
-                prepared_history: finalPreparedHistory.clone(),
-                ..beforeFinalizeContext
-            },
-            PromptHookRegistry::dispatchPromptFinalizeHooks,
-        );
+        let beforeSendContext = self
+            .applyPromptFinalizeHooks(
+                PromptHookContext {
+                    stage: "before_send_to_model".to_string(),
+                    processed_input: Some(finalProcessedInput.clone()),
+                    prepared_history: finalPreparedHistory.clone(),
+                    ..beforeFinalizeContext
+                },
+                PromptHookRegistry::dispatchPromptFinalizeHooks,
+            )
+            .await;
         lifecycle.push(SendMessageLifecycleStage::BeforeSendToModelHook);
         if let Some(processedInput) = beforeSendContext.processed_input.clone() {
             finalProcessedInput = processedInput;
@@ -1784,29 +1810,31 @@ impl EnhancedAIService {
             let memoryContent = execContext.roundManager.getDisplayContent();
             if !memoryContent.trim().is_empty() {
                 let result = (|| -> Result<(), AiServiceError> {
-                let roleCardId = memoryAutoUpdateCharacterCardId.clone().ok_or_else(|| {
-                    AiServiceError::RequestFailed(
-                        "memory auto update requires a role card".to_string(),
-                    )
-                })?;
-                let ownerKey = self
-                    .provider_runtime_context
-                    .support()
-                    .memoryOwnerKeyForCharacterCard(&roleCardId)
-                    .map_err(AiServiceError::RequestFailed)?;
-                let chatId = chatId.ok_or_else(|| {
-                    AiServiceError::RequestFailed(
-                        "memory auto update requires a persisted chat".to_string(),
-                    )
-                })?;
-                MemoryLibrary::enqueueAutoSaveCandidate(ownerKey, chatId, currentTimeMillis())
-                    .map_err(AiServiceError::RequestFailed)?;
-                Ok(())
+                    let roleCardId = memoryAutoUpdateCharacterCardId.clone().ok_or_else(|| {
+                        AiServiceError::RequestFailed(
+                            "memory auto update requires a role card".to_string(),
+                        )
+                    })?;
+                    let ownerKey = self
+                        .provider_runtime_context
+                        .support()
+                        .memoryOwnerKeyForCharacterCard(&roleCardId)
+                        .map_err(AiServiceError::RequestFailed)?;
+                    let chatId = chatId.ok_or_else(|| {
+                        AiServiceError::RequestFailed(
+                            "memory auto update requires a persisted chat".to_string(),
+                        )
+                    })?;
+                    MemoryLibrary::enqueueAutoSaveCandidate(ownerKey, chatId, currentTimeMillis())
+                        .map_err(AiServiceError::RequestFailed)?;
+                    Ok(())
                 })();
                 if let Err(error) = result {
                     let message = format!("自动保存长期记忆候选入队失败: {error}");
                     AppLogger::e(TAG, &message);
-                    if let Some(callback) = onNonFatalError { callback(message); }
+                    if let Some(callback) = onNonFatalError {
+                        callback(message);
+                    }
                 }
             }
         }
@@ -3234,7 +3262,7 @@ fn deserializePromptHookToolParameters(value: Option<&Value>) -> Vec<ToolParamet
     }
 }
 
-fn applyToolPromptComposeHooksToAvailableTools(
+async fn applyToolPromptComposeHooksToAvailableTools(
     availableTools: Vec<ToolPrompt>,
     chatId: Option<String>,
     functionType: FunctionType,
@@ -3252,7 +3280,8 @@ fn applyToolPromptComposeHooksToAvailableTools(
         use_english: Some(useEnglish),
         available_tools: serializePromptHookToolPrompts(&availableTools),
         ..PromptHookContext::default()
-    });
+    })
+    .await;
     deserializePromptHookToolPrompts(hookContext.available_tools)
 }
 

@@ -125,10 +125,13 @@ fn create_cli_host_manager_with_toast_host(toastHost: Arc<dyn ToastHost>) -> Hos
     context = context.withPluginSdkIpcHost(Arc::new(NativePluginSdkIpcHost::new()));
     let commandContext = context.clone();
     context.withCoreCommandExecutor(Arc::new(move |args: Vec<String>| {
-        let output =
-            operit_command_core::run_core_command_with_context(commandContext.clone(), &args)?;
-        persist_cli_storage_config(&output.stdout)?;
-        Ok(output.stdout)
+        let commandContext = commandContext.clone();
+        Box::pin(async move {
+            let output =
+                operit_command_core::run_core_command_with_context(commandContext, &args).await?;
+            persist_cli_storage_config(&output.stdout)?;
+            Ok(output.stdout)
+        })
     }))
 }
 
@@ -551,8 +554,8 @@ mod tests {
     use operit_tools::tools::ToolResultDataClasses::ToolResultData;
     use operit_tools::ToolExecutionManager::{AITool, ToolParameter};
 
-    #[test]
-    fn direct_terminal_tool_chain_executes_visible_terminal() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_terminal_tool_chain_executes_visible_terminal() {
         let application = create_cli_application();
         let mut handler = application.toolHandler.clone();
         handler.registerDefaultTools();
@@ -570,36 +573,40 @@ mod tests {
             "direct-tool-ok\ntty=yes",
         );
 
-        let createResult = handler.executeTool(AITool {
-            name: "create_terminal_session".to_string(),
-            parameters: vec![ToolParameter {
-                name: "session_name".to_string(),
-                value: sessionName.to_string(),
-            }],
-        });
+        let createResult = handler
+            .executeTool(AITool {
+                name: "create_terminal_session".to_string(),
+                parameters: vec![ToolParameter {
+                    name: "session_name".to_string(),
+                    value: sessionName.to_string(),
+                }],
+            })
+            .await;
         assert!(createResult.success, "{:?}", createResult.error);
         let sessionId = match createResult.result {
             ToolResultData::TerminalSessionCreationResultData(data) => data.sessionId,
             data => panic!("create result data type mismatch: {}", data.toJson()),
         };
 
-        let executeResult = handler.executeTool(AITool {
-            name: "execute_in_terminal_session".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "session_id".to_string(),
-                    value: sessionId.clone(),
-                },
-                ToolParameter {
-                    name: "command".to_string(),
-                    value: command.to_string(),
-                },
-                ToolParameter {
-                    name: "timeout_ms".to_string(),
-                    value: "3000".to_string(),
-                },
-            ],
-        });
+        let executeResult = handler
+            .executeTool(AITool {
+                name: "execute_in_terminal_session".to_string(),
+                parameters: vec![
+                    ToolParameter {
+                        name: "session_id".to_string(),
+                        value: sessionId.clone(),
+                    },
+                    ToolParameter {
+                        name: "command".to_string(),
+                        value: command.to_string(),
+                    },
+                    ToolParameter {
+                        name: "timeout_ms".to_string(),
+                        value: "3000".to_string(),
+                    },
+                ],
+            })
+            .await;
         assert!(executeResult.success, "{:?}", executeResult.error);
         match executeResult.result {
             ToolResultData::TerminalCommandResultData(data) => {
@@ -610,13 +617,15 @@ mod tests {
             data => panic!("execute result data type mismatch: {}", data.toJson()),
         }
 
-        let screenResult = handler.executeTool(AITool {
-            name: "get_terminal_session_screen".to_string(),
-            parameters: vec![ToolParameter {
-                name: "session_id".to_string(),
-                value: sessionId,
-            }],
-        });
+        let screenResult = handler
+            .executeTool(AITool {
+                name: "get_terminal_session_screen".to_string(),
+                parameters: vec![ToolParameter {
+                    name: "session_id".to_string(),
+                    value: sessionId,
+                }],
+            })
+            .await;
         assert!(screenResult.success, "{:?}", screenResult.error);
         match screenResult.result {
             ToolResultData::TerminalSessionScreenResultData(data) => {

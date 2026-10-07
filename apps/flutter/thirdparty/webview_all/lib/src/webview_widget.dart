@@ -2,12 +2,42 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show Factory;
 import 'package:flutter/gestures.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
 import 'webview_controller.dart';
+
+/// Describes the uniform paint scale applied by the embedding application.
+///
+/// For native overlays, [WebViewWidget] cancels this scale around the viewport and
+/// lays the viewport out at its displayed size instead. This keeps AppKit mouse
+/// coordinates aligned with the view without changing the host device pixel
+/// ratio. The controller combines this application scale with its page zoom
+/// using native content zoom, so web content still follows application zoom.
+///
+/// Place this scope below the application's scaling widget. [scale] must be the
+/// total uniform ancestor scale, not the screen's device pixel ratio.
+class WebViewScaleScope extends InheritedWidget {
+  const WebViewScaleScope({
+    super.key,
+    required this.scale,
+    required super.child,
+  }) : assert(scale > 0 && scale < double.infinity);
+
+  final double scale;
+
+  static double scaleOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<WebViewScaleScope>()?.scale ??
+      1;
+
+  @override
+  bool updateShouldNotify(WebViewScaleScope oldWidget) =>
+      scale != oldWidget.scale;
+}
 
 /// Displays a native WebView as a Widget.
 ///
@@ -117,6 +147,85 @@ class WebViewWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return platform.build(context);
+    final Widget view = platform.build(context);
+    if (!platform.params.controller.requiresNativeApplicationZoom) {
+      return view;
+    }
+    return _NativeZoomWebViewViewport(
+      controller: platform.params.controller,
+      scale: WebViewScaleScope.scaleOf(context),
+      child: view,
+    );
+  }
+}
+
+class _NativeZoomWebViewViewport extends StatefulWidget {
+  const _NativeZoomWebViewViewport({
+    required this.controller,
+    required this.scale,
+    required this.child,
+  });
+
+  final PlatformWebViewController controller;
+  final double scale;
+  final Widget child;
+
+  @override
+  State<_NativeZoomWebViewViewport> createState() =>
+      _NativeZoomWebViewViewportState();
+}
+
+class _NativeZoomWebViewViewportState
+    extends State<_NativeZoomWebViewViewport> {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_applyContentScale());
+  }
+
+  @override
+  void didUpdateWidget(_NativeZoomWebViewViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.scale != widget.scale ||
+        oldWidget.controller != widget.controller) {
+      unawaited(_applyContentScale());
+    }
+  }
+
+  Future<void> _applyContentScale() async {
+    try {
+      await widget.controller.setApplicationZoomFactor(widget.scale);
+    } catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'webview_all',
+          context: ErrorDescription(
+            'while applying native WebView content zoom',
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // AppKit cannot map CALayer scaling into NSView input coordinates, while
+    // GTK overlays cannot represent paint scaling at all. These backends opt
+    // into native content zoom; composited backends retain Flutter paint zoom.
+    // Cancel only the application's scale, preserving positioning and clipping.
+    // Keep the same widget structure even at 1x so zoom does not remount AppKitView.
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) => FittedBox(
+        fit: BoxFit.fill,
+        alignment: Alignment.topLeft,
+        child: SizedBox(
+          width: constraints.maxWidth * widget.scale,
+          height: constraints.maxHeight * widget.scale,
+          child: widget.child,
+        ),
+      ),
+    );
   }
 }

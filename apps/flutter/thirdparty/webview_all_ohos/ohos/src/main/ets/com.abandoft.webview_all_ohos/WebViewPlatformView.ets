@@ -15,6 +15,7 @@ import { WebSettings } from './WebSettingsHostApiImpl';
 import { WebViewClient } from './WebViewClientHostApiImpl';
 import { WebViewFlutterApiImpl } from './WebViewFlutterApiImpl';
 import { WebViewSettings } from './WebViewSettings';
+import { buildPageZoomScript } from './PageZoomScript';
 
 const TAG: string = 'WebViewPlatformView';
 
@@ -92,6 +93,7 @@ export class WebViewPlatformView extends PlatformView {
 
   private documentStartScripts: Map<string, ScriptItem> = new Map();
   private nextDocumentStartScriptIdentifier: number = 0;
+  private pageZoomFactor: number = 1;
   private documentStartScriptHost?: (scripts: Array<ScriptItem>) => Promise<void>;
   private documentStartScriptHostWaiters: Array<DocumentStartScriptHostWaiter> = [];
   private documentStartScriptHostDisposed: boolean = false;
@@ -362,7 +364,21 @@ export class WebViewPlatformView extends PlatformView {
 
   /** Restores existing native registrations when an ArkUI Web component reattaches. */
   getDocumentStartScripts(): Array<ScriptItem> {
-    return Array.from(this.documentStartScripts.values());
+    const scripts = Array.from(this.documentStartScripts.values());
+    if (this.pageZoomFactor !== 1) {
+      scripts.unshift({ script: buildPageZoomScript(this.pageZoomFactor), scriptRules: ['*'] });
+    }
+    return scripts;
+  }
+
+  /** Retains page zoom across documents without changing Flutter paint scaling. */
+  async setPageZoomFactor(factor: number): Promise<void> {
+    if (!Number.isFinite(factor) || factor <= 0) throw new Error('Invalid page zoom factor');
+    const host = await this.waitDocumentStartScriptHost();
+    this.pageZoomFactor = factor;
+    await host(this.getDocumentStartScripts());
+    await this.waitControllerAttached();
+    await this.controller.runJavaScript(buildPageZoomScript(factor));
   }
 
   /** Stops new registrations from targeting a component that has disappeared. */
@@ -385,7 +401,7 @@ export class WebViewPlatformView extends PlatformView {
     const host = await this.waitDocumentStartScriptHost();
     const identifier = 'operit-user-script-' + (++this.nextDocumentStartScriptIdentifier);
     this.documentStartScripts.set(identifier, { script: source, scriptRules: ['*'] });
-    await host(Array.from(this.documentStartScripts.values()));
+    await host(this.getDocumentStartScripts());
     return identifier;
   }
 
@@ -393,14 +409,14 @@ export class WebViewPlatformView extends PlatformView {
   async removeDocumentStartScript(identifier: string): Promise<void> {
     const host = await this.waitDocumentStartScriptHost();
     if (!this.documentStartScripts.delete(identifier)) throw new Error('Unknown script handle');
-    await host(Array.from(this.documentStartScripts.values()));
+    await host(this.getDocumentStartScripts());
   }
 
   /** Clears application registrations without changing native JavaScript proxies. */
   async removeAllDocumentStartScripts(): Promise<void> {
     const host = await this.waitDocumentStartScriptHost();
     this.documentStartScripts.clear();
-    await host([]);
+    await host(this.getDocumentStartScripts());
   }
 
   /** Rejects pending script-host registration when the native view is destroyed. */

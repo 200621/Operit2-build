@@ -158,6 +158,28 @@ class WebWebViewController extends PlatformWebViewController {
     });
   }
 
+  // Scale the iframe element itself, not its document: this also supports
+  // cross-origin pages and pages with JavaScript disabled. Keep the host viewport
+  // clipped and resize the CSS viewport inversely so content zoom causes reflow.
+  late final web.HTMLDivElement _viewportElement = web.HTMLDivElement()
+    ..style.width = '100%'
+    ..style.height = '100%'
+    ..style.overflow = 'hidden'
+    ..appendChild(_webWebViewParams.iFrame);
+
+  @override
+  Future<void> setZoomFactor(double zoomFactor) async {
+    if (!zoomFactor.isFinite || zoomFactor <= 0) {
+      throw ArgumentError.value(zoomFactor, 'zoomFactor');
+    }
+    final style = _webWebViewParams.iFrame.style;
+    style.width = '${100 / zoomFactor}%';
+    style.height = '${100 / zoomFactor}%';
+    style.transformOrigin = '0 0';
+    style.transform = 'scale($zoomFactor)';
+    style.display = 'block';
+  }
+
   static const String _scrollBarStyleId = '__webview_all_scrollbars';
   static const String _channelMessageType = '__webview_all_type';
   static const String _javaScriptChannelMessageType = 'javascriptChannel';
@@ -1619,7 +1641,7 @@ class WebWebViewWidget extends PlatformWebViewWidget {
     final controller = params.controller as WebWebViewController;
     ui_web.platformViewRegistry.registerViewFactory(
       controller._webWebViewParams.iFrame.id,
-      (int viewId) => controller._webWebViewParams.iFrame,
+      (int viewId) => controller._viewportElement,
     );
   }
 

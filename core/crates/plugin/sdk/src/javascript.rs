@@ -115,6 +115,9 @@ pub type JsToolPkgIpcCompletion = Box<dyn FnOnce(Result<Value, String>) + Send +
 /// Represents one locally polled JavaScript execution future.
 pub type JsExecutionFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
+/// Represents a Send result while its local JavaScript session is driven by the owning Host.
+pub type JsExecutionCompletion<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
 /// Identifies the storage scope selected before a ToolPkg registration is evaluated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -139,7 +142,10 @@ pub trait JsExecutionHost: crate::js_sdk::JsToolsHost + Send + Sync {
     fn get_tool_catalog(&self) -> Result<serde_json::Value, String>;
 
     /// Executes one validated tool call through the embedding application's tool system.
-    fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult;
+    fn execute_tool_call(
+        &self,
+        request: JsToolCallRequest,
+    ) -> JsExecutionCompletion<JsToolCallResult>;
 
     /// Returns the language code exposed to package JavaScript.
     fn package_language(&self) -> Result<String, String>;
@@ -228,7 +234,7 @@ pub trait JsPackageExecutor: Send + Sync {
         &self,
         script: &str,
         request: &JsPackageToolCallRequest,
-    ) -> JsPackageToolCallResult;
+    ) -> JsExecutionCompletion<JsPackageToolCallResult>;
 }
 
 /// Supplies concrete JavaScript execution services to an embedding application.
@@ -385,7 +391,7 @@ pub trait JsExecutionEngine: Send + Sync {
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         dispatch_intermediate_on_main: bool,
         timeout_sec: u64,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes a named JavaScript function with an exact millisecond timeout for ToolPkg runtime hooks.
     fn execute_script_function_with_timeout_millis(
@@ -397,7 +403,7 @@ pub trait JsExecutionEngine: Send + Sync {
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         dispatch_intermediate_on_main: bool,
         timeout_millis: u64,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes a named JavaScript function without blocking the caller runtime.
     fn execute_script_function_async(
@@ -427,7 +433,7 @@ pub trait JsExecutionEngine: Send + Sync {
         runtime_options: &BTreeMap<String, Value>,
         env_overrides: &BTreeMap<String, String>,
         text_resources: Arc<BTreeMap<String, String>>,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes one Compose DSL render without blocking the caller runtime.
     fn execute_compose_dsl_script_async(
@@ -446,7 +452,7 @@ pub trait JsExecutionEngine: Send + Sync {
         runtime_options: &BTreeMap<String, Value>,
         env_overrides: &BTreeMap<String, String>,
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Dispatches one Compose DSL action without blocking the caller runtime.
     fn dispatch_compose_dsl_action_result_async(

@@ -27,7 +27,7 @@ fn with_main_chat_core<R>(
 }
 
 /// Runs workspace path, binding, shortcut, and workspace tool commands.
-pub fn run_workspace_command(
+pub async fn run_workspace_command(
     application: &mut OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -47,8 +47,8 @@ pub fn run_workspace_command(
         "chats" => list_workspace_chats(application, &args[1..], output),
         "commands" => list_workspace_commands(application, &args[1..], output),
         "commands-path" => list_workspace_commands_path(application, &args[1..], output),
-        "run" => run_workspace_shortcut(application, &args[1..], output),
-        "run-path" => run_workspace_shortcut_path(application, &args[1..], output),
+        "run" => run_workspace_shortcut(application, &args[1..], output).await,
+        "run-path" => run_workspace_shortcut_path(application, &args[1..], output).await,
         _ => {
             print_workspace_usage(output);
             Ok(())
@@ -258,7 +258,7 @@ fn list_workspace_commands_path(
 }
 
 /// Runs a configured workspace shortcut for a chat workspace.
-fn run_workspace_shortcut(
+async fn run_workspace_shortcut(
     application: &mut OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -270,11 +270,11 @@ fn run_workspace_shortcut(
         .get(1)
         .ok_or_else(|| "usage: operit2 workspace run <chat-id> <command-id>".to_string())?;
     let workspacePath = workspace_path_for_chat(application, chatId)?;
-    run_command_at_path(application, Some(chatId), &workspacePath, commandId, output)
+    run_command_at_path(application, Some(chatId), &workspacePath, commandId, output).await
 }
 
 /// Runs a configured workspace shortcut at an explicit workspace path.
-fn run_workspace_shortcut_path(
+async fn run_workspace_shortcut_path(
     application: &mut OperitApplication,
     args: &[String],
     output: &mut CoreCommandOutput,
@@ -288,7 +288,7 @@ fn run_workspace_shortcut_path(
     let commandId = args
         .get(1)
         .ok_or_else(|| "usage: operit2 workspace run-path <workspace> <command-id>".to_string())?;
-    run_command_at_path(application, None, &workspacePath, commandId, output)
+    run_command_at_path(application, None, &workspacePath, commandId, output).await
 }
 
 /// Resolves the workspace path currently bound to one chat.
@@ -361,7 +361,7 @@ fn list_commands_at_path(
 }
 
 /// Runs one command from a workspace configuration file.
-fn run_command_at_path(
+async fn run_command_at_path(
     application: &OperitApplication,
     chatId: Option<&str>,
     workspacePath: &str,
@@ -386,7 +386,8 @@ fn run_command_at_path(
             workspacePath,
             &toolName,
             output,
-        );
+        )
+        .await;
     }
 
     let commandText = command
@@ -405,7 +406,7 @@ fn run_command_at_path(
 }
 
 /// Executes one workspace command via the tool runtime.
-fn execute_workspace_tool(
+async fn execute_workspace_tool(
     mut handler: AIToolHandler,
     command: &CommandConfig,
     chatId: Option<&str>,
@@ -421,10 +422,12 @@ fn execute_workspace_tool(
         });
     }
 
-    let result = handler.executeTool(AITool {
-        name: toolName.to_string(),
-        parameters,
-    });
+    let result = handler
+        .executeTool(AITool {
+            name: toolName.to_string(),
+            parameters,
+        })
+        .await;
     print_tool_execution_result(&result, command, chatId, workspacePath, output)
 }
 
@@ -614,7 +617,7 @@ fn workspace_command_working_dir(
     } else {
         PathMapper::joinVfsPath(workspacePath, trimmed)?
     };
-    Ok(vfs.resolvePath(&workingDirPath)?.physicalPath)
+    vfs.resolvePath(&workingDirPath)?.nativePath()
 }
 
 /// Builds the terminal session name for a workspace command.

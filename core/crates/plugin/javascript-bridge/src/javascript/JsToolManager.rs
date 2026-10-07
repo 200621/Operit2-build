@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use serde_json::Value;
 
 use operit_plugin_sdk::execution_result::{JsExecutionError, JsExecutionResult};
 use operit_plugin_sdk::javascript::{
-    JsExecutionEngine, JsPackageExecutor, JsPackageRuntime, JsPackageToolCallRequest,
+    JsExecutionCompletion, JsExecutionEngine, JsPackageExecutor, JsPackageRuntime, JsPackageToolCallRequest,
     JsPackageToolCallResult,
 };
 use operit_plugin_sdk::toolpkg::ToolPkgManager::ToolPkgExecutionEngineFactory;
@@ -14,7 +16,25 @@ use operit_plugin_sdk::toolpkg::ToolPkgManager::ToolPkgExecutionEngineFactory;
 /// Executes JavaScript-backed package tools through reusable JS engines.
 pub struct JsToolManager {
     packageRuntime: Arc<dyn JsPackageRuntime>,
-    enginePool: Arc<(Mutex<Vec<Arc<dyn JsExecutionEngine>>>, Condvar)>,
+    enginePool: Arc<Mutex<Vec<Arc<dyn JsExecutionEngine>>>>,
+    enginePermits: Arc<Semaphore>,
+}
+
+/// Returns an engine to its pool before releasing its asynchronous permit.
+struct JsEngineLease {
+    engine: Arc<dyn JsExecutionEngine>,
+    pool: Arc<Mutex<Vec<Arc<dyn JsExecutionEngine>>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for JsEngineLease {
+    /// Returns the leased engine when execution completes or is cancelled.
+    fn drop(&mut self) {
+        self.pool
+            .lock()
+            .expect("JsToolManager engine pool mutex poisoned")
+            .push(self.engine.clone());
+    }
 }
 
 #[derive(Debug)]
@@ -34,38 +54,43 @@ impl JsToolManager {
             .collect::<Vec<_>>();
         Self {
             packageRuntime,
-            enginePool: Arc::new((Mutex::new(engines), Condvar::new())),
+            enginePool: Arc::new(Mutex::new(engines)),
+            enginePermits: Arc::new(Semaphore::new(MAX_CONCURRENT_ENGINES)),
         }
     }
 
+    /// Acquires an engine slot asynchronously and keeps it leased across execution.
     #[allow(non_snake_case)]
-    fn withEngine<T>(&self, block: impl FnOnce(Arc<dyn JsExecutionEngine>) -> T) -> T {
-        let (pool, available) = &*self.enginePool;
-        let mut guard = pool
+    async fn withEngine<T>(
+        &self,
+        block: impl FnOnce(Arc<dyn JsExecutionEngine>) -> JsExecutionCompletion<T>,
+    ) -> T {
+        let permit = self
+            .enginePermits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("JsToolManager engine semaphore must remain open");
+        let engine = self
+            .enginePool
             .lock()
-            .expect("JsToolManager engine pool mutex poisoned");
-        while guard.is_empty() {
-            guard = available
-                .wait(guard)
-                .expect("JsToolManager engine pool mutex poisoned");
-        }
-        let engine = guard
-            .pop()
-            .expect("JsToolManager engine pool must contain engine");
-        drop(guard);
-        let output = block(engine.clone());
-        pool.lock()
             .expect("JsToolManager engine pool mutex poisoned")
-            .push(engine);
-        available.notify_one();
-        output
+            .pop()
+            .expect("an acquired engine permit must own a pool entry");
+        let lease = JsEngineLease {
+            engine,
+            pool: self.enginePool.clone(),
+            _permit: permit,
+        };
+        block(lease.engine.clone()).await
     }
 
+    /// Selects the package engine without holding the pool lock across await.
     #[allow(non_snake_case)]
-    fn withExecutionEngineForPackage<T>(
+    async fn withExecutionEngineForPackage<T>(
         &self,
         packageName: &str,
-        block: impl FnOnce(Arc<dyn JsExecutionEngine>) -> T,
+        block: impl FnOnce(Arc<dyn JsExecutionEngine>) -> JsExecutionCompletion<T>,
     ) -> T {
         let toolPkgRuntime = self.packageRuntime.resolve_toolpkg_subpackage(packageName);
         if let Some(runtime) = toolPkgRuntime {
@@ -73,9 +98,9 @@ impl JsToolManager {
             let engine = self
                 .packageRuntime
                 .toolpkg_execution_engine(&contextKey, &runtime.containerPackageName);
-            return block(engine);
+            return block(engine).await;
         }
-        self.withEngine(block)
+        self.withEngine(block).await
     }
 
     #[allow(non_snake_case)]
@@ -308,7 +333,7 @@ impl JsToolManager {
     /// Converts a JavaScript failure envelope into the SDK execution result.
     #[allow(non_snake_case)]
     /// Executes a package function by dotted package tool name.
-    pub fn executeScriptByName(
+    pub async fn executeScriptByName(
         &self,
         toolName: &str,
         params: BTreeMap<String, String>,
@@ -346,11 +371,12 @@ impl JsToolManager {
                 60,
             )
         })
+        .await
     }
 
     #[allow(non_snake_case)]
     /// Executes a JavaScript package tool through the SDK execution contract.
-    pub fn executeScript(
+    pub async fn executeScript(
         &self,
         script: &str,
         request: &JsPackageToolCallRequest,
@@ -368,17 +394,19 @@ impl JsToolManager {
             Err(error) => return Self::failure(&request.tool_name, error.message),
         };
 
-        let result = self.withExecutionEngineForPackage(&packageName, |engine| {
-            engine.execute_script_function(
-                script,
-                &functionName,
-                &runtimeParams,
-                &BTreeMap::new(),
-                None,
-                true,
-                60,
-            )
-        });
+        let result = self
+            .withExecutionEngineForPackage(&packageName, |engine| {
+                engine.execute_script_function(
+                    script,
+                    &functionName,
+                    &runtimeParams,
+                    &BTreeMap::new(),
+                    None,
+                    true,
+                    60,
+                )
+            })
+            .await;
         match result {
             Ok(value) => Self::success(&request.tool_name, value),
             Err(error) => Self::failure(&request.tool_name, error.message),
@@ -395,8 +423,11 @@ impl JsPackageExecutor for JsToolManager {
         &self,
         script: &str,
         request: &JsPackageToolCallRequest,
-    ) -> JsPackageToolCallResult {
-        self.executeScript(script, request)
+    ) -> JsExecutionCompletion<JsPackageToolCallResult> {
+        let manager = self.clone();
+        let script = script.to_string();
+        let request = request.clone();
+        Box::pin(async move { manager.executeScript(&script, &request).await })
     }
 }
 
@@ -444,15 +475,20 @@ mod tests {
         }
 
         /// Rejects unexpected host tool calls from package execution tests.
-        fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult {
-            JsToolCallResult {
-                success: false,
-                error: Some(format!(
-                    "Unexpected host tool call: {}",
-                    request.qualified_tool_name()
-                )),
-                ..JsToolCallResult::default()
-            }
+        fn execute_tool_call(
+            &self,
+            request: JsToolCallRequest,
+        ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsToolCallResult> {
+            Box::pin(async move {
+                JsToolCallResult {
+                    success: false,
+                    error: Some(format!(
+                        "Unexpected host tool call: {}",
+                        request.qualified_tool_name()
+                    )),
+                    ..JsToolCallResult::default()
+                }
+            })
         }
 
         /// Returns the package language used by manager tests.
@@ -1290,9 +1326,9 @@ mod tests {
         (manager, package_runtime)
     }
 
-    #[test]
+    #[tokio::test(flavor = "current_thread")]
     /// Verifies a minified ToolPkg downloads through the standard external path and executes.
-    fn minified_toolpkg_download_executes_registered_tool() {
+    async fn minified_toolpkg_download_executes_registered_tool() {
         register_test_runtime_storage("js-tool-manager-marketplace-flow");
         let upload_source_bytes = build_toolpkg_bytes();
         let upload_subpackage_bytes = read_zip_entry_bytes(&upload_source_bytes, "dist/sub.js");
@@ -1353,7 +1389,9 @@ mod tests {
         let manager = JsToolManager::new(package_runtime, Arc::new(TestExecutionEngineFactory));
         let params = BTreeMap::from([("text".to_string(), "downloaded".to_string())]);
         let output = expect_js_output(
-            manager.executeScriptByName("market_flow_sub.inspect", params),
+            manager
+                .executeScriptByName("market_flow_sub.inspect", params)
+                .await,
             "minified ToolPkg download execution",
         );
 
@@ -1363,9 +1401,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test(flavor = "current_thread")]
     /// Verifies a minified standalone script downloads and executes without encryption.
-    fn minified_standalone_download_executes_registered_tool() {
+    async fn minified_standalone_download_executes_registered_tool() {
         register_test_runtime_storage("js-tool-manager-standalone-marketplace-flow");
         let upload_source_bytes = build_standalone_js_bytes();
         assert!(contains_bytes(
@@ -1394,15 +1432,17 @@ mod tests {
         let manager = JsToolManager::new(package_runtime, Arc::new(TestExecutionEngineFactory));
         let params = BTreeMap::from([("text".to_string(), "downloaded".to_string())]);
         let output = expect_js_output(
-            manager.executeScriptByName("standalone_market_flow.inspect", params),
+            manager
+                .executeScriptByName("standalone_market_flow.inspect", params)
+                .await,
             "minified standalone download execution",
         );
 
         assert_eq!(output, "\"standalone-protected:downloaded\"");
     }
 
-    #[test]
-    fn subpackage_runtime_params_match_toolpkg_context() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn subpackage_runtime_params_match_toolpkg_context() {
         let script = r#"
             exports.inspect = function(params) {
                 return [
@@ -1418,7 +1458,9 @@ mod tests {
         let (manager, _) = toolpkg_manager(script);
 
         let output = expect_js_output(
-            manager.executeScriptByName("test_toolpkg_sub.inspect", BTreeMap::new()),
+            manager
+                .executeScriptByName("test_toolpkg_sub.inspect", BTreeMap::new())
+                .await,
             "subpackage runtime params execution",
         );
 
@@ -1428,8 +1470,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn subpackage_execution_uses_toolpkg_main_engine() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn subpackage_execution_uses_toolpkg_main_engine() {
         let script = r#"
             exports.inspect = function(_params) {
                 return globalThis.__toolpkg_engine_marker;
@@ -1448,22 +1490,26 @@ mod tests {
             "__operit_package_lang".to_string(),
             Value::String("en".to_string()),
         )]);
-        let seed_output = engine.execute_script_function(
-            seed_script,
-            "seed",
-            &seed_params,
-            &BTreeMap::new(),
-            None,
-            true,
-            60,
-        );
+        let seed_output = engine
+            .execute_script_function(
+                seed_script,
+                "seed",
+                &seed_params,
+                &BTreeMap::new(),
+                None,
+                true,
+                60,
+            )
+            .await;
 
         assert_eq!(
             expect_js_output(seed_output, "ToolPkg main engine seed execution"),
             "\"ok\""
         );
         let output = expect_js_output(
-            manager.executeScriptByName("test_toolpkg_sub.inspect", BTreeMap::new()),
+            manager
+                .executeScriptByName("test_toolpkg_sub.inspect", BTreeMap::new())
+                .await,
             "subpackage shared-engine execution",
         );
         assert_eq!(output, "\"same-engine\"");

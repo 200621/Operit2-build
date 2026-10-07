@@ -39,7 +39,7 @@ test('ArkWeb commits its native document-start list before acknowledging registr
   assert.match(component, /\.runJavaScriptOnDocumentStart\(this\.documentStartScripts\)/);
   assert.match(component, /postFrameCallback\(commit\)/);
   assert.match(component, /onIdle\(_timeLeftInNano: number\)/);
-  assert.match(view, /await host\(Array\.from\(this\.documentStartScripts\.values\(\)\)\)/);
+  assert.match(view, /await host\(this\.getDocumentStartScripts\(\)\)/);
 });
 
 test('the common interface has no default false capability or late-execution substitution', () => {

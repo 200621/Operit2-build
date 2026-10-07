@@ -1,8 +1,9 @@
 use operit_host_api::{
     HostResult, HttpDownloadControl, HttpDownloadProgressCallback, HttpDownloadRequest,
     HttpDownloadResult, HttpHost, HttpRequestData, HttpResponseData, HttpStreamChunkCallback,
-    HttpStreamClosedCallback, HttpStreamHost, HttpStreamOpenedCallback, WebSocketClosedCallback,
-    WebSocketHost, WebSocketMessageCallback, WebSocketOpenedCallback, WebSocketRequestData,
+    HttpStreamClosedCallback, HttpStreamHost, HttpStreamOpenedCallback, HttpStreamResponseCallback,
+    WebSocketClosedCallback, WebSocketHost, WebSocketMessageCallback, WebSocketOpenedCallback,
+    WebSocketRequestData,
 };
 use operit_host_native_common::NativeHttpHost;
 
@@ -12,6 +13,20 @@ pub struct LinuxHttpHost {
 }
 
 impl HttpStreamHost for LinuxHttpHost {
+    /// Streams response headers and body through the shared native network host.
+    #[allow(non_snake_case)]
+    fn openHttpResponseStream(
+        &self,
+        streamId: String,
+        request: HttpRequestData,
+        onResponse: HttpStreamResponseCallback,
+        onChunk: HttpStreamChunkCallback,
+        onClosed: HttpStreamClosedCallback,
+    ) -> HostResult<()> {
+        self.inner
+            .openHttpResponseStream(streamId, request, onResponse, onChunk, onClosed)
+    }
+
     /// Opens one Linux HTTP byte stream through the shared native Host implementation.
     #[allow(non_snake_case)]
     fn openHttpByteStream(

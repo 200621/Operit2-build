@@ -400,7 +400,7 @@ fn serializeToolResultData(result: &JsToolCallResultData) -> SerializedToolResul
 
 /// Executes one JavaScript tool call through the Rust runtime supplied by the caller.
 #[allow(non_snake_case)]
-pub fn callToolSerialized(
+pub async fn callToolSerialized(
     toolRuntime: &dyn JsExecutionHost,
     toolType: &str,
     toolName: &str,
@@ -414,20 +414,9 @@ pub fn callToolSerialized(
         Ok(value) => value,
         Err(error) => return (buildToolErrorJson(&error), true),
     };
-    let result = toolRuntime.execute_tool_call(parsed);
+    let result = toolRuntime.execute_tool_call(parsed).await;
     let isError = !result.success;
     (serializeToolExecutionResult(&result), isError)
-}
-
-/// Executes one synchronous JavaScript tool call and returns its serialized result.
-#[allow(non_snake_case)]
-pub fn callToolSync(
-    toolRuntime: &dyn JsExecutionHost,
-    toolType: &str,
-    toolName: &str,
-    paramsJson: &str,
-) -> String {
-    callToolSerialized(toolRuntime, toolType, toolName, paramsJson).0
 }
 
 #[cfg(test)]

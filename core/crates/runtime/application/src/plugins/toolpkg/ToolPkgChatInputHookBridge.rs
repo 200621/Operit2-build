@@ -95,7 +95,7 @@ impl ToolPkgChatInputHookBridge {
     }
 
     #[allow(non_snake_case)]
-    pub fn dispatchChatInputHooks(
+    pub async fn dispatchChatInputHooks(
         runtime: &ToolPkgBridgeRuntime,
         context: ChatInputHookContext,
     ) -> Option<ChatInputHookResult> {
@@ -139,19 +139,21 @@ impl ToolPkgChatInputHookBridge {
                     ("function", hook.functionName.clone()),
                 ],
             );
-            let raw = manager.runToolPkgMainHookWithTimeoutMillis(
-                &hook.containerPackageName,
-                &hook.functionName,
-                TOOLPKG_EVENT_CHAT_INPUT,
-                Some(&current.eventName),
-                Some(&hook.hookId),
-                hook.functionSource.as_deref(),
-                buildChatInputEventPayload(&current),
-                None,
-                None,
-                None,
-                timeoutMillis,
-            );
+            let raw = manager
+                .runToolPkgMainHookWithTimeoutMillis(
+                    &hook.containerPackageName,
+                    &hook.functionName,
+                    TOOLPKG_EVENT_CHAT_INPUT,
+                    Some(&current.eventName),
+                    Some(&hook.hookId),
+                    hook.functionSource.as_deref(),
+                    buildChatInputEventPayload(&current),
+                    None,
+                    None,
+                    None,
+                    timeoutMillis,
+                )
+                .await;
             let hookTimedOut = raw
                 .as_ref()
                 .err()
@@ -261,11 +263,11 @@ impl ToolPkgChatInputHookBridge {
 
     /// Dispatches chat input hooks through the runtime registered by the common bridge.
     #[allow(non_snake_case)]
-    pub fn dispatchRegisteredChatInputHooks(
+    pub async fn dispatchRegisteredChatInputHooks(
         context: ChatInputHookContext,
     ) -> Option<ChatInputHookResult> {
         let runtime = CHAT_INPUT_RUNTIME.get()?;
-        Self::dispatchChatInputHooks(runtime, context)
+        Self::dispatchChatInputHooks(runtime, context).await
     }
 }
 

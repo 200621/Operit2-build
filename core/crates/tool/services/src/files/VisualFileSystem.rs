@@ -34,7 +34,20 @@ impl VisualFileSystem {
     /// Lists child entries for a virtual directory.
     #[allow(non_snake_case)]
     pub fn listFiles(&self, path: &str) -> Result<Vec<FileEntry>, String> {
-        if let Some(entries) = self.mapper.virtualDirectoryEntries(path)? {
+        if let Some(mut entries) = self.mapper.virtualDirectoryEntries(path)? {
+            // Registered namespaces may overlay a built-in native directory
+            // (e.g. /mnt/macos/bookmarks). Keep its accessible native children.
+            if let Ok(resolved) = self.resolvePath(path) {
+                if resolved.nativePath().is_ok() {
+                    if let Ok(nativeEntries) = self.host.listFiles(&resolved.physicalPath) {
+                        for entry in nativeEntries {
+                            if !entries.iter().any(|existing| existing.name == entry.name) {
+                                entries.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(entries);
         }
         let resolved = self.resolvePath(path)?;

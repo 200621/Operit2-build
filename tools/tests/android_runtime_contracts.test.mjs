@@ -195,6 +195,44 @@ test('Android main-thread state lock excludes expensive runtime lifecycle work',
   assert.match(application, /\.emitRuntimeEvent\(RuntimeEvents\.androidLifecycle\(topic, payload\)\)/);
 });
 
+/** Keeps absent Intent extras from crashing the crash-report Activity itself. */
+test('Android crash screen restores saved details and tolerates missing reports', () => {
+  const activity = source(`${android}src/main/kotlin/app/operit/NativeCrashActivity.kt`);
+  assert.doesNotMatch(activity, /requireNotNull|!!/);
+  assert.match(activity, /details = savedInstanceState\?\.getString\(extraDetails\)\s*\?: intent\?\.getStringExtra\(extraDetails\)\s*\?: missingDetails/);
+  assert.match(activity, /private const val missingDetails =\s*"[^"\n]+"/);
+  assert.match(activity, /override fun onSaveInstanceState\(outState: Bundle\)\s*\{\s*outState.putString\(extraDetails, details\)\s*super.onSaveInstanceState\(outState\)/);
+  assert.match(activity, /text = details/);
+  assert.match(activity, /ClipData.newPlainText\("Operit2 crash", details\)/);
+});
+
+/** The isolated report process must never enter normal host setup or relaunch itself. */
+test('Android crash process skips the relaunch handler and all Core lifecycle events', () => {
+  const manifest = source(`${android}src/main/AndroidManifest.xml`);
+  assert.match(manifest, /android:name="\.NativeCrashActivity"[^>]*android:process=":crash"/);
+  const application = source(`${android}src/main/kotlin/app/operit/OperitApplication.kt`);
+  assert.match(application, /processName == "\$packageName:crash"/);
+  assert.match(application, /Build.VERSION.SDK_INT >= Build.VERSION_CODES.P/);
+  assert.match(application, /Application.getProcessName\(\)/);
+  assert.match(application, /firstOrNull \{ it.pid == Process.myPid\(\) \}/);
+  const setup = section(application, 'override fun onCreate()', 'override fun onLowMemory()');
+  const guard = setup.indexOf('if (isCrashProcess) return');
+  assert.ok(guard >= 0);
+  assert.ok(guard < setup.indexOf('Thread.setDefaultUncaughtExceptionHandler'));
+  assert.ok(guard < setup.indexOf('registerActivityLifecycleCallbacks'));
+  assert.match(application, /private fun emitLifecycleEvent\(topic: String, payload: JSONObject\)\s*\{\s*if \(isCrashProcess\) return\s*AndroidCoreRuntime/);
+});
+
+/** A rejected crash-screen launch must still terminate the already-failed process. */
+test('Android fatal handler terminates even when crash presentation throws', () => {
+  const application = source(`${android}src/main/kotlin/app/operit/OperitApplication.kt`);
+  const handler = section(application, 'Thread.setDefaultUncaughtExceptionHandler', 'registerActivityLifecycleCallbacks');
+  assert.match(handler, /Log.e\("OperitApplication", "Unhandled Android exception on \$\{thread.name\}", error\)/);
+  assert.match(handler, /try \{\s*NativeCrashActivity.start\(/);
+  assert.match(handler, /catch \(presentationError: Throwable\)/);
+  assert.match(handler, /finally \{(?:\s*\/\/[^\n]*\n)*\s*Process.killProcess\(Process.myPid\(\)\)/);
+});
+
 /** Serializes concurrent service and FFI startup while publishing the native handle atomically. */
 test('Android runtime creation uses its own lock and short state publication scopes', () => {
   const host = source(`${android}src/main/kotlin/app/operit/AndroidRuntimeHost.kt`);

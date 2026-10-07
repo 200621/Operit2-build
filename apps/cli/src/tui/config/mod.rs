@@ -67,6 +67,9 @@ pub(crate) struct ConfigUi {
     pub(crate) add_model_filtered: Vec<usize>,
     pub(crate) add_model_index: usize,
     pub(crate) available_models: Vec<operit_model::ModelConfigData::AvailableProviderModel>,
+    /// Content rect of the topmost config overlay, recorded during render for
+    /// mouse selection.
+    pub(crate) selection_rect: Option<Rect>,
 }
 
 pub(crate) enum ConfirmAction {
@@ -104,6 +107,7 @@ impl ConfigUi {
             add_model_filtered: Vec::new(),
             add_model_index: 0,
             available_models: Vec::new(),
+            selection_rect: None,
         }
     }
 
@@ -197,7 +201,7 @@ impl ConfigUi {
         self.add_model_index = 0;
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame, text: TuiText) {
+    pub(crate) fn render(&mut self, frame: &mut Frame, text: TuiText) {
         let popup = centered_rect(72, 70, frame.area());
         frame.render_widget(Clear, popup);
 
@@ -207,6 +211,7 @@ impl ConfigUi {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT));
         let inner = block.inner(popup);
+        self.selection_rect = Some(inner);
         frame.render_widget(block, popup);
 
         let areas = Layout::default()
@@ -498,7 +503,7 @@ impl ConfigUi {
         ratatui::text::Text::from(lines)
     }
 
-    fn render_confirm_dialog(&self, frame: &mut Frame, parent: Rect, text: TuiText) {
+    fn render_confirm_dialog(&mut self, frame: &mut Frame, parent: Rect, text: TuiText) {
         let w = 40.min(parent.width);
         let h = 6.min(parent.height);
         let x = parent.x + (parent.width.saturating_sub(w)) / 2;
@@ -515,6 +520,7 @@ impl ConfigUi {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT_STRONG));
         let inner = block.inner(popup);
+        self.selection_rect = Some(inner);
         frame.render_widget(block, popup);
 
         frame.render_widget(
@@ -527,7 +533,7 @@ impl ConfigUi {
         );
     }
 
-    fn render_add_model_popup(&self, frame: &mut Frame, parent: Rect, text: TuiText) {
+    fn render_add_model_popup(&mut self, frame: &mut Frame, parent: Rect, text: TuiText) {
         let w = 50.min(parent.width);
         let h = 20.min(parent.height);
         let x = parent.x + (parent.width.saturating_sub(w)) / 2;
@@ -544,6 +550,7 @@ impl ConfigUi {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::ACCENT));
         let inner = block.inner(popup);
+        self.selection_rect = Some(inner);
         frame.render_widget(block, popup);
 
         if self.add_model_custom_mode {

@@ -199,7 +199,7 @@ where
     });
     let host = host.clone();
     Box::pin(async move {
-        let response = JsExecutionHost::execute_tool_call(&host, request?);
+        let response = JsExecutionHost::execute_tool_call(&host, request?).await;
         if !response.success {
             return Err(JsHostError::new(
                 response
@@ -269,7 +269,7 @@ fn invoke_terminal_streaming(
     let mut host = host.clone();
     Box::pin(async move {
         host.notifyToolCallRequested(&tool);
-        let interception = host.checkToolInterception(&tool);
+        let interception = host.checkToolInterception(&tool).await;
         if let operit_tools::tools::AIToolHook::AIToolHookDecision::Block(_) = interception {
             let result = AIToolHandler::toolInterceptionResult(&tool, interception);
             host.notifyToolExecutionResult(&tool, &result);

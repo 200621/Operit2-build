@@ -215,62 +215,78 @@ fn runChatViewHook(
     eventName: &str,
     eventPayload: Value,
 ) {
-    let manager = runtime.package_manager();
-    ChainLogger::info(
-        PLUGIN_CHAIN,
-        "plugin.toolpkg.chat_view.run.start",
-        &[
-            ("event", eventName.to_string()),
-            ("package", hook.containerPackageName.clone()),
-            ("hookId", hook.hookId.clone()),
-            ("function", hook.functionName.clone()),
-        ],
+    let runtime = runtime.to_owned();
+    let hook = hook.to_owned();
+    let eventName = eventName.to_owned();
+    super::ToolPkgHookBridgeSupport::scheduleToolPkgNotification(
+        "operit-toolpkg-notification",
+        move || {
+            Box::pin(async move {
+                let runtime = &runtime;
+                let hook = &hook;
+                let eventName = &eventName;
+                let manager = runtime.package_manager();
+                ChainLogger::info(
+                    PLUGIN_CHAIN,
+                    "plugin.toolpkg.chat_view.run.start",
+                    &[
+                        ("event", eventName.to_string()),
+                        ("package", hook.containerPackageName.clone()),
+                        ("hookId", hook.hookId.clone()),
+                        ("function", hook.functionName.clone()),
+                    ],
+                );
+                match manager
+                    .runToolPkgMainHook(
+                        &hook.containerPackageName,
+                        &hook.functionName,
+                        TOOLPKG_EVENT_CHAT_VIEW,
+                        Some(eventName),
+                        Some(&hook.hookId),
+                        hook.functionSource.as_deref(),
+                        eventPayload,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let contextKey = format!("toolpkg_main:{}", hook.containerPackageName);
+                        if let Some(engine) = manager
+                            .findToolPkgExecutionEngine(&contextKey, &hook.containerPackageName)
+                        {
+                            CHAT_VIEW_HOOK_ENGINES
+                                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                                .lock()
+                                .expect("toolpkg chat view engine mutex poisoned")
+                                .insert(hookKey(hook), Arc::downgrade(&engine));
+                        }
+                        ChainLogger::info(
+                            PLUGIN_CHAIN,
+                            "plugin.toolpkg.chat_view.run.done",
+                            &[
+                                ("event", eventName.to_string()),
+                                ("package", hook.containerPackageName.clone()),
+                                ("hookId", hook.hookId.clone()),
+                            ],
+                        );
+                    }
+                    Err(error) => ChainLogger::error(
+                        PLUGIN_CHAIN,
+                        "plugin.toolpkg.chat_view.run.error",
+                        &[
+                            ("event", eventName.to_string()),
+                            ("package", hook.containerPackageName.clone()),
+                            ("hookId", hook.hookId.clone()),
+                            ("function", hook.functionName.clone()),
+                            ("error", error),
+                        ],
+                    ),
+                }
+            })
+        },
     );
-    match manager.runToolPkgMainHook(
-        &hook.containerPackageName,
-        &hook.functionName,
-        TOOLPKG_EVENT_CHAT_VIEW,
-        Some(eventName),
-        Some(&hook.hookId),
-        hook.functionSource.as_deref(),
-        eventPayload,
-        None,
-        None,
-        None,
-    ) {
-        Ok(_) => {
-            let contextKey = format!("toolpkg_main:{}", hook.containerPackageName);
-            if let Some(engine) =
-                manager.findToolPkgExecutionEngine(&contextKey, &hook.containerPackageName)
-            {
-                CHAT_VIEW_HOOK_ENGINES
-                    .get_or_init(|| Mutex::new(BTreeMap::new()))
-                    .lock()
-                    .expect("toolpkg chat view engine mutex poisoned")
-                    .insert(hookKey(hook), Arc::downgrade(&engine));
-            }
-            ChainLogger::info(
-                PLUGIN_CHAIN,
-                "plugin.toolpkg.chat_view.run.done",
-                &[
-                    ("event", eventName.to_string()),
-                    ("package", hook.containerPackageName.clone()),
-                    ("hookId", hook.hookId.clone()),
-                ],
-            );
-        }
-        Err(error) => ChainLogger::error(
-            PLUGIN_CHAIN,
-            "plugin.toolpkg.chat_view.run.error",
-            &[
-                ("event", eventName.to_string()),
-                ("package", hook.containerPackageName.clone()),
-                ("hookId", hook.hookId.clone()),
-                ("function", hook.functionName.clone()),
-                ("error", error),
-            ],
-        ),
-    }
 }
 
 #[allow(non_snake_case)]

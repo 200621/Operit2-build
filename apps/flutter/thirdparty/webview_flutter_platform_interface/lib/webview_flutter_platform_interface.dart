@@ -12,3 +12,5 @@ export 'src/types/types.dart';
 export 'src/webview_platform.dart';
 
 export 'src/local_resource.dart';
+
+export 'src/native_webview_zoom.dart';

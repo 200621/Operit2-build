@@ -436,7 +436,7 @@ fn resolve_terminal_working_dir(context: &HostManager, workingDir: &str) -> Resu
     {
         return terminal_vfs(context)?
             .resolvePath(trimmed)
-            .map(|path| path.physicalPath);
+            .and_then(|path| path.nativePath());
     }
     Ok(trimmed.to_string())
 }

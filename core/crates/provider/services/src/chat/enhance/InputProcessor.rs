@@ -19,7 +19,7 @@ pub struct ProcessUserInputRequest {
 
 impl InputProcessor {
     /// Applies input preprocessing hooks for one chat request.
-    pub fn process_user_input(request: ProcessUserInputRequest) -> String {
+    pub async fn process_user_input(request: ProcessUserInputRequest) -> String {
         let active_prompt_metadata = build_active_prompt_hook_metadata(
             request.chat_id.as_deref(),
             request.role_card_id.as_deref(),
@@ -38,7 +38,8 @@ impl InputProcessor {
             metadata,
             on_hook_timeout: request.on_hook_timeout.clone(),
             ..PromptHookContext::default()
-        });
+        })
+        .await;
 
         let processed_input = before_context
             .processed_input
@@ -53,7 +54,8 @@ impl InputProcessor {
             processed_input: Some(processed_input.clone()),
             metadata: before_context.metadata.clone(),
             ..before_context
-        });
+        })
+        .await;
 
         after_context.processed_input.unwrap_or(processed_input)
     }

@@ -324,6 +324,15 @@ fn normalizePackageName(packageName: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Asserts that an immediate mock completion is ready on its first poll.
+    fn pollReadyCompletion<T>(mut completion: crate::javascript::JsExecutionCompletion<T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(completion.as_mut(), &mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("immediate mock completion must be ready"),
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::sync::Arc;
@@ -479,11 +488,14 @@ mod tests {
             _onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatchIntermediateOnMain: bool,
             _timeoutSec: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(params
-                .get("event")
-                .and_then(Value::as_str)
-                .map(str::to_string))
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| {
+                Ok(params
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .map(str::to_string))
+            })();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns the dispatched event name for exact-deadline hook tests.
@@ -497,11 +509,14 @@ mod tests {
             _onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatchIntermediateOnMain: bool,
             _timeoutMillis: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(params
-                .get("event")
-                .and_then(Value::as_str)
-                .map(str::to_string))
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| {
+                Ok(params
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .map(str::to_string))
+            })();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns the dispatched event asynchronously for package manager tests.
@@ -543,8 +558,9 @@ mod tests {
             _runtimeOptions: &BTreeMap<String, Value>,
             _envOverrides: &BTreeMap<String, String>,
             _textResources: Arc<BTreeMap<String, String>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(Some(script.to_string()))
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(Some(script.to_string())))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns the supplied Compose DSL script asynchronously for tests.
@@ -567,8 +583,9 @@ mod tests {
             _runtimeOptions: &BTreeMap<String, Value>,
             _envOverrides: &BTreeMap<String, String>,
             _onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(Some(actionId.to_string()))
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(Some(actionId.to_string())))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns the dispatched action id asynchronously for tests.
@@ -710,28 +727,26 @@ mod tests {
         assert!(registered);
         manager.setEnabledPackageNames(&["container".to_string()]);
 
-        let output = manager
-            .toolPkgManager()
-            .dispatchToolPkgHook(
-                &manager.enabledPackageNames(),
-                ToolPkgHookInvocation {
-                    containerPackageName: "container".to_string(),
-                    functionName: "onEvent".to_string(),
-                    event: "host_event".to_string(),
-                    eventName: None,
-                    pluginId: None,
-                    inlineFunctionSource: None,
-                    eventPayload: Value::Object(Default::default()),
-                    executionContextKey: None,
-                    runtimeKind: None,
-                    envOverrides: BTreeMap::new(),
-                    timestampMs: 1,
-                    timeoutMillis: 10_000,
-                    dispatchIntermediateOnMain: true,
-                    onIntermediateResult: None,
-                },
-            )
-            .expect("ToolPkg hook dispatch must succeed");
+        let output = pollReadyCompletion(manager.toolPkgManager().dispatchToolPkgHook(
+            &manager.enabledPackageNames(),
+            ToolPkgHookInvocation {
+                containerPackageName: "container".to_string(),
+                functionName: "onEvent".to_string(),
+                event: "host_event".to_string(),
+                eventName: None,
+                pluginId: None,
+                inlineFunctionSource: None,
+                eventPayload: Value::Object(Default::default()),
+                executionContextKey: None,
+                runtimeKind: None,
+                envOverrides: BTreeMap::new(),
+                timestampMs: 1,
+                timeoutMillis: 10_000,
+                dispatchIntermediateOnMain: true,
+                onIntermediateResult: None,
+            },
+        ))
+        .expect("ToolPkg hook dispatch must succeed");
 
         assert_eq!(output.as_deref(), Some("host_event"));
     }

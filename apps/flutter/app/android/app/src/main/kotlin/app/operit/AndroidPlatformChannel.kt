@@ -12,8 +12,9 @@ import android.os.Environment
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
-import app.operit.core.tools.system.AndroidPrivilegedCommandExecutor
-import app.operit.core.tools.system.AndroidPrivilegedCommandTarget
+import app.operit.core.tools.system.AndroidRootExecutionMode
+import app.operit.core.tools.system.AndroidRootExecutionSettings
+import app.operit.core.tools.system.AndroidRootShell
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
@@ -104,7 +105,16 @@ class AndroidPlatformChannel(
             result.error("INVALID_HOST", "Invalid onboarding host", null)
             return
         }
-        onboardingPermissionSnapshot(result)
+        runtimeHost.runBackground {
+            try {
+                val snapshot = onboardingPermissionSnapshot()
+                activity.runOnUiThread { result.success(snapshot) }
+            } catch (error: Throwable) {
+                activity.runOnUiThread {
+                    result.error("PERMISSION_SNAPSHOT_ERROR", error.message, null)
+                }
+            }
+        }
     }
 
     /** Starts an Android onboarding authorization request for the requested host. */
@@ -240,47 +250,45 @@ class AndroidPlatformChannel(
     }
 
     /** Builds the Android onboarding authorization status snapshot. */
-    private fun onboardingPermissionSnapshot(result: MethodChannel.Result) {
-        result.success(
-            mapOf(
-                "android.fileManagement" to requirement(
-                    "android.fileManagement",
-                    hasFileManagementPermission(),
-                ),
-                "android.notifications" to requirement(
-                    "android.notifications",
-                    hasNotificationPermission(),
-                ),
-                "android.appList" to requirement(
-                    "android.appList",
-                    hasPackageQueryVisibilityPermission(),
-                ),
-                "android.usageStats" to requirement(
-                    "android.usageStats",
-                    hasUsageStatsPermission(),
-                ),
-                "android.writeSettings" to requirement(
-                    "android.writeSettings",
-                    canWriteSystemSettings(),
-                ),
-                "android.location" to requirement(
-                    "android.location",
-                    hasPermission(Manifest.permission.ACCESS_FINE_LOCATION),
-                ),
-                "android.bluetooth" to requirement(
-                    "android.bluetooth",
-                    hasBluetoothConnectPermission() && hasBluetoothScanPermission(),
-                ),
-                "android.overlay" to requirement("android.overlay", canDrawOverlays()),
-                "android.batteryOptimization" to requirement(
-                    "android.batteryOptimization",
-                    isIgnoringBatteryOptimizations(),
-                ),
-                "android.shizuku" to shizukuAuthorizationRequirement(),
-                "android.root" to requirement(
-                    "android.root",
-                    AndroidPrivilegeAuthorization.isRootAuthorized(activity),
-                ),
+    private fun onboardingPermissionSnapshot(): Map<String, Any> {
+        return mapOf(
+            "android.fileManagement" to requirement(
+                "android.fileManagement",
+                hasFileManagementPermission(),
+            ),
+            "android.notifications" to requirement(
+                "android.notifications",
+                hasNotificationPermission(),
+            ),
+            "android.appList" to requirement(
+                "android.appList",
+                hasPackageQueryVisibilityPermission(),
+            ),
+            "android.usageStats" to requirement(
+                "android.usageStats",
+                hasUsageStatsPermission(),
+            ),
+            "android.writeSettings" to requirement(
+                "android.writeSettings",
+                canWriteSystemSettings(),
+            ),
+            "android.location" to requirement(
+                "android.location",
+                hasPermission(Manifest.permission.ACCESS_FINE_LOCATION),
+            ),
+            "android.bluetooth" to requirement(
+                "android.bluetooth",
+                hasBluetoothConnectPermission() && hasBluetoothScanPermission(),
+            ),
+            "android.overlay" to requirement("android.overlay", canDrawOverlays()),
+            "android.batteryOptimization" to requirement(
+                "android.batteryOptimization",
+                isIgnoringBatteryOptimizations(),
+            ),
+            "android.shizuku" to shizukuAuthorizationRequirement(),
+            "android.root" to requirement(
+                "android.root",
+                AndroidPrivilegeAuthorization.isRootAuthorized(activity),
             ),
         )
     }
@@ -310,7 +318,7 @@ class AndroidPlatformChannel(
                 result.success(null)
             }
             "android.shizuku" -> requestShizukuAuthorization(result)
-            "android.root" -> requestRootAuthorization(result)
+            "android.root" -> requestRootAuthorization(call, result)
             else -> {
                 result.error("INVALID_ONBOARDING_REQUIREMENT", "Invalid onboarding requirement", null)
                 return
@@ -382,9 +390,22 @@ class AndroidPlatformChannel(
     }
 
     /** Verifies and records the user's explicit Root authorization. */
-    private fun requestRootAuthorization(result: MethodChannel.Result) {
+    private fun requestRootAuthorization(call: MethodCall, result: MethodChannel.Result) {
         runtimeHost.runBackground {
             try {
+                val current = AndroidPrivilegeAuthorization.rootExecutionSettings(activity)
+                val mode = call.argument<String>("rootExecutionMode")?.let {
+                    when (it) {
+                        "auto" -> AndroidRootExecutionMode.Auto
+                        "libsu" -> AndroidRootExecutionMode.ForceLibsu
+                        "exec" -> AndroidRootExecutionMode.ForceExec
+                        else -> throw IllegalArgumentException("unsupported Root execution mode: $it")
+                    }
+                } ?: current.mode
+                val command = call.argument<String>("suCommand") ?: current.suCommand
+                AndroidPrivilegeAuthorization.configureRootExecution(
+                    activity, AndroidRootExecutionSettings(mode, command),
+                )
                 verifyRootAuthorization()
                 activity.runOnUiThread { result.success(null) }
             } catch (error: Throwable) {
@@ -395,18 +416,16 @@ class AndroidPlatformChannel(
         }
     }
 
-    /** Executes a Root identity check and stores an explicit successful approval. */
+    /** Uses the same automatic/forced transport policy as actual Root commands. */
     private fun verifyRootAuthorization() {
-        val result =
-            AndroidPrivilegedCommandExecutor.execute(
-                target = AndroidPrivilegedCommandTarget.RootExec,
-                command = "id -u",
-                timeoutMillis = ROOT_AUTHORIZATION_TIMEOUT_MS,
-            )
-        if (result.exitCode != 0 || result.stdoutText().trim() != "0") {
-            throw IllegalStateException("Root authorization was not granted")
+        val status = AndroidRootShell.checkAccess(
+            AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
+            ROOT_AUTHORIZATION_TIMEOUT_MS,
+        )
+        AndroidPrivilegeAuthorization.setRootAuthorized(activity, status.granted)
+        check(status.granted) {
+            "Root authorization was not granted: ${status.diagnostics.joinToString("; ")}"
         }
-        AndroidPrivilegeAuthorization.setRootAuthorized(activity)
     }
 
     /** Requests broad shared-storage access for Android file tools. */
@@ -643,6 +662,6 @@ class AndroidPlatformChannel(
     private companion object {
         private const val ONBOARDING_PERMISSION_REQUEST_CODE = 2407
         private const val SHIZUKU_PERMISSION_REQUEST_CODE = 2408
-        private const val ROOT_AUTHORIZATION_TIMEOUT_MS = 10_000L
+        private const val ROOT_AUTHORIZATION_TIMEOUT_MS = 30_000L
     }
 }

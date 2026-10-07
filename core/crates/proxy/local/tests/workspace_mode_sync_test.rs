@@ -61,7 +61,11 @@ impl SystemOperationHost for TestSystemLocale {
 }
 
 /// Runs the actual embedded mode hook in its cached main JavaScript context.
-fn input_hook(manager: &RuntimePackageManager, package: &str, payload: Value) -> Option<Value> {
+async fn input_hook(
+    manager: &RuntimePackageManager,
+    package: &str,
+    payload: Value,
+) -> Option<Value> {
     decodeToolPkgHookResult(
         manager
             .runToolPkgMainHook(
@@ -76,23 +80,25 @@ fn input_hook(manager: &RuntimePackageManager, package: &str, payload: Value) ->
                 None,
                 None,
             )
+            .await
             .expect("mode input hook must execute"),
     )
 }
 
-fn definition(manager: &RuntimePackageManager, package: &str, chat_id: &str) -> Value {
+async fn definition(manager: &RuntimePackageManager, package: &str, chat_id: &str) -> Value {
     input_hook(
         manager,
         package,
         json!({"action": "create", "chatId": chat_id, "runtime": "main"}),
     )
+    .await
     .expect("mode must return its menu definition")["toggles"][0]
         .clone()
 }
 
-fn assert_workspace_state(manager: &RuntimePackageManager, chat_id: &str, bound: bool) {
+async fn assert_workspace_state(manager: &RuntimePackageManager, chat_id: &str, bound: bool) {
     for package in MODES {
-        let toggle = definition(manager, package, chat_id);
+        let toggle = definition(manager, package, chat_id).await;
         let description = toggle["description"].as_str().unwrap();
         let missing = description.contains("未绑定")
             || description.contains("No workspace is bound")
@@ -102,15 +108,18 @@ fn assert_workspace_state(manager: &RuntimePackageManager, chat_id: &str, bound:
     }
 }
 
-fn enable_modes(manager: &RuntimePackageManager, chat_id: &str) {
+async fn enable_modes(manager: &RuntimePackageManager, chat_id: &str) {
     for package in MODES {
-        let toggle = definition(manager, package, chat_id);
+        let toggle = definition(manager, package, chat_id).await;
         input_hook(
             manager,
             package,
             json!({"action": "toggle", "chatId": chat_id, "runtime": "main", "toggleId": toggle["id"]}),
+        ).await;
+        assert_eq!(
+            definition(manager, package, chat_id).await["isChecked"],
+            true
         );
-        assert_eq!(definition(manager, package, chat_id)["isChecked"], true);
     }
 }
 
@@ -174,7 +183,7 @@ async fn workspace_modes_follow_creation_reload_unbind_and_rebind() {
                 "built-in modes must load: {:?}",
                 snapshot().getToolPkgLoadIssues()
             );
-            assert_workspace_state(&snapshot(), &chat_id, false);
+            assert_workspace_state(&snapshot(), &chat_id, false).await;
 
             CoreLinkSharedClient::call(
                 &proxy,
@@ -188,8 +197,8 @@ async fn workspace_modes_follow_creation_reload_unbind_and_rebind() {
             .await
             .result
             .expect("workspace creation through Flutter route must succeed");
-            assert_workspace_state(&snapshot(), &chat_id, true);
-            enable_modes(&snapshot(), &chat_id);
+            assert_workspace_state(&snapshot(), &chat_id, true).await;
+            enable_modes(&snapshot(), &chat_id).await;
 
             // A scan destroys both JS instances while leaving identical hook registrations.
             packages.lock().unwrap().loadAvailablePackages();
@@ -198,8 +207,8 @@ async fn workspace_modes_follow_creation_reload_unbind_and_rebind() {
                 &bridge,
                 manager.getEnabledToolPkgContainerRuntimes(),
             );
-            assert_workspace_state(&manager, &chat_id, true);
-            enable_modes(&manager, &chat_id);
+            assert_workspace_state(&manager, &chat_id, true).await;
+            enable_modes(&manager, &chat_id).await;
 
             CoreLinkSharedClient::call(
                 &proxy,
@@ -213,7 +222,7 @@ async fn workspace_modes_follow_creation_reload_unbind_and_rebind() {
             .await
             .result
             .expect("workspace unbind must succeed");
-            assert_workspace_state(&snapshot(), &chat_id, false);
+            assert_workspace_state(&snapshot(), &chat_id, false).await;
 
             CoreLinkSharedClient::call(
                 &proxy,
@@ -228,8 +237,8 @@ async fn workspace_modes_follow_creation_reload_unbind_and_rebind() {
             .await
             .result
             .expect("workspace rebind must succeed");
-            assert_workspace_state(&snapshot(), &chat_id, true);
-            enable_modes(&snapshot(), &chat_id);
+            assert_workspace_state(&snapshot(), &chat_id, true).await;
+            enable_modes(&snapshot(), &chat_id).await;
         })
         .await;
 }

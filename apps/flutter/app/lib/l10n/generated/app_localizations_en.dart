@@ -3403,6 +3403,19 @@ class AppLocalizationsEn extends AppLocalizations {
       'Runtime root and workspace root are required.';
 
   @override
+  String get storageDirectoryTermuxUnsupported =>
+      'Termux\'s document provider is not supported for local storage paths. Choose a directory in shared storage (such as Download or Documents) instead of Termux\'s private directory.';
+
+  @override
+  String get storageDirectoryProviderUnsupported =>
+      'The selected directory cannot be resolved to a supported local storage path. Choose a directory in shared storage (such as Download or Documents), or enter a local path that this app can access.';
+
+  @override
+  String storageDirectorySelectionFailed(String error) {
+    return 'Could not select a directory: $error';
+  }
+
+  @override
   String get settingsDataStorageConfirmTitle => 'Change storage location';
 
   @override
