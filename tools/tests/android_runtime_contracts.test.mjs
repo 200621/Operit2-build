@@ -342,3 +342,39 @@ test('Android runtime event JNI runs only inside the existing worker dispatch', 
   assert.doesNotMatch(ingress, /ensureRuntimeHandle|\.get\(|\.join\(|\.await\(|\.recv\(/);
   assert.match(ingress, /scheduleRuntimeEventLocked\(handle, eventJson\)/);
 });
+
+/** Selects optimized Cargo builds for Android release and profile without changing debug builds. */
+test('Android Rust profiles follow the exact Android build variant', () => {
+  const gradle = source(`${android}build.gradle.kts`);
+  assert.match(gradle, /when \(variant\.buildType\) \{\s*"debug" -> "debug"\s*"profile", "release" -> "release"\s*else -> throw GradleException/);
+  assert.match(gradle, /if \(rustProfile == "release"\) \{\s*cargoArguments\.add\("--release"\)/);
+  assert.match(gradle, /commandLine\(cargoArguments\)/);
+  assert.match(gradle, /target\/\$\{target\.rustTarget\}\/\$rustProfile\/liboperit_flutter_bridge\.so/);
+  assert.match(gradle, /if \(!bridgeLibrary\.isFile\) \{\s*throw GradleException/);
+});
+
+/** Excludes shared cached bridges and publishes only the selected variant's generated JNI libraries. */
+test('Android JNI sources isolate Rust build variants and selected ABIs', () => {
+  const gradle = source(`${android}build.gradle.kts`);
+  assert.match(gradle, /abstract class StageOperitAndroidJniLibraries : Sync\(\)/);
+  assert.match(gradle, /sourceSets\.getByName\("main"\)\.jniLibs\.setSrcDirs\(emptyList<String>\(\)\)/);
+  assert.match(gradle, /cargoBuildOperitFlutterBridge\$variantTaskSuffix\$abiTaskSuffix/);
+  assert.match(gradle, /stageOperitAndroidJniLibraries\$variantTaskSuffix/);
+  assert.match(gradle, /dependsOn\(cargoBuildOperitFlutterBridgeTasks\)/);
+  assert.match(gradle, /into\(target\.abi\) \{\s*from\(operitBridgeJniLibs\.resolve\(target\.abi\)\) \{\s*exclude\("liboperit_flutter_bridge\.so"\)/);
+  assert.match(gradle, /jniLibraries\.addGeneratedSourceDirectory\(stagedJniLibraries\) \{ it\.outputDirectory \}/);
+  const preBuild = gradle.slice(gradle.indexOf('tasks.named("preBuild")'));
+  assert.doesNotMatch(preBuild, /cargoBuildOperitFlutterBridge/);
+});
+
+/** Preserves Linux NDK tools alongside variant-specific Rust profile selection. */
+test('Android variant Rust builds preserve both Windows and Linux host toolchains', () => {
+  const gradle = source(`${android}build.gradle.kts`);
+  assert.match(gradle, /resolve\(if \(operitIsWindows\) "windows-x86_64" else "linux-x86_64"\)/);
+  assert.match(gradle, /-clang\$\{if \(operitIsWindows\) "\.cmd" else ""\}/);
+  assert.match(gradle, /resolve\(if \(operitIsWindows\) "llvm-ar\.exe" else "llvm-ar"\)/);
+  assert.match(gradle, /file\("\/usr\/lib"\)/);
+  assert.match(gradle, /System\.getenv\("OPERIT_LIBCLANG_DIR"\)/);
+  assert.match(gradle, /when \(variant\.buildType\)/);
+  assert.match(gradle, /cargoArguments\.add\("--release"\)/);
+});

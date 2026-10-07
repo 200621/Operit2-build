@@ -533,6 +533,13 @@ cross-build, Gradle `assembleRelease`) and writes
 automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
 is still required for the Rust bridge.
 
+Android Gradle selects the Rust bridge profile from the Android build variant:
+`debug` uses Cargo's `dev` profile and its `target/<rust-target>/debug` output;
+`profile` and `release` use `cargo build --release` and
+`target/<rust-target>/release`. JNI libraries are staged as variant-specific
+generated sources. The cached bridge in `src/main/jniLibs` is excluded from these
+sources so that a Release APK cannot package a previous Debug bridge.
+
 ### Local Linux Android Build
 
 Linux hosts build the same chain with the NDK's `linux-x86_64` prebuilt toolchain

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use super::OpenAIProvider::{StreamingJsonXmlConverter, StreamingJsonXmlEvent};
 use super::OpenAIResponsesProvider::strip_responses_protocol_markup;
 use super::StructuredToolCallBridge::{OpenToolCall, StructuredToolCallBridge};
+use super::StreamingResponseLines::{decodeStreamingTail, takeNextStreamingLine};
 use super::ThinkingConfiguration::ThinkingConfigurationApplier;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, retry_error_text, retry_message, AIService, AiServiceError,
@@ -872,12 +873,13 @@ impl GeminiProvider {
         }
     }
 
+    /// Parses response lines after their complete UTF-8 bytes have arrived.
     async fn process_streaming_response(
         &mut self,
         response: reqwest::Response,
     ) -> Result<Box<dyn RevisableTextStreamLike>, AiServiceError> {
         let mut chunks = Vec::new();
-        let mut pending = String::new();
+        let mut pending_bytes = Vec::new();
         let mut bytes_stream = response.bytes_stream();
         while let Some(item) = bytes_stream.next().await {
             if self.is_cancelled() {
@@ -885,14 +887,12 @@ impl GeminiProvider {
             }
             let bytes =
                 item.map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
-            pending.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(newline_index) = pending.find('\n') {
-                let line = pending[..newline_index].trim().to_string();
-                pending = pending[newline_index + 1..].to_string();
+            pending_bytes.extend_from_slice(&bytes);
+            while let Some(line) = takeNextStreamingLine(&mut pending_bytes)? {
                 self.process_response_line(&line, &mut chunks)?;
             }
         }
-        let tail = pending.trim().to_string();
+        let tail = decodeStreamingTail(&mut pending_bytes)?;
         if !tail.is_empty() {
             self.process_response_line(&tail, &mut chunks)?;
         }

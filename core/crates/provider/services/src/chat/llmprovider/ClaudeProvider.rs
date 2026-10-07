@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use super::OpenAIProvider::{StreamingJsonXmlConverter, StreamingJsonXmlEvent};
 use super::OpenAIResponsesProvider::strip_responses_protocol_markup;
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
+use super::StreamingResponseLines::{decodeStreamingTail, takeNextStreamingLine};
 use super::ThinkingConfiguration::ThinkingConfigurationApplier;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, retry_error_text, retry_message, AIService, AiServiceError,
@@ -1010,13 +1011,14 @@ impl ClaudeProvider {
         }
     }
 
+    /// Parses response lines after their complete UTF-8 bytes have arrived.
     async fn process_streaming_response(
         &mut self,
         response: reqwest::Response,
     ) -> Result<Box<dyn RevisableTextStreamLike>, AiServiceError> {
         let mut chunks = Vec::new();
         let mut accumulated_usage = Map::new();
-        let mut pending_line = String::new();
+        let mut pending_bytes = Vec::new();
         let mut bytes_stream = response.bytes_stream();
         let mut current_tool_parser: Option<StreamingJsonXmlConverter> = None;
         let mut current_tool_tag_name: Option<String> = None;
@@ -1031,10 +1033,8 @@ impl ClaudeProvider {
             }
             let bytes =
                 item.map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
-            pending_line.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(newline_index) = pending_line.find('\n') {
-                let line = pending_line[..newline_index].trim().to_string();
-                pending_line = pending_line[newline_index + 1..].to_string();
+            pending_bytes.extend_from_slice(&bytes);
+            while let Some(line) = takeNextStreamingLine(&mut pending_bytes)? {
                 self.process_streaming_line(
                     &line,
                     &mut chunks,
@@ -1048,7 +1048,7 @@ impl ClaudeProvider {
                 )?;
             }
         }
-        let pending = pending_line.trim().to_string();
+        let pending = decodeStreamingTail(&mut pending_bytes)?;
         if !pending.is_empty() {
             self.process_streaming_line(
                 &pending,

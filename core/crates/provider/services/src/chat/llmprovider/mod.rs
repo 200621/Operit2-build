@@ -60,6 +60,8 @@ pub mod RateLimiterRegistry;
 pub mod RequestConcurrencyRegistry;
 #[path = "SlidingWindowRateLimiter.rs"]
 pub mod SlidingWindowRateLimiter;
+#[path = "StreamingResponseLines.rs"]
+mod StreamingResponseLines;
 #[path = "StructuredToolCallBridge.rs"]
 pub mod StructuredToolCallBridge;
 #[path = "ThinkingConfiguration.rs"]

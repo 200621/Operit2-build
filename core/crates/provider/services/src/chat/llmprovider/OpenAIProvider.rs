@@ -12,6 +12,7 @@ use super::OpenAIResponsesProvider::{
     build_responses_web_search_chunks, strip_responses_protocol_markup, OpenAIResponsesPayloadAdapter,
 };
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
+use super::StreamingResponseLines::{decodeStreamingTail, takeNextStreamingLine};
 use super::ThinkingConfiguration::ThinkingConfigurationApplier;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, retry_error_text, retry_message, AIService, AiServiceError,
@@ -1146,6 +1147,7 @@ impl OpenAIProvider {
     }
 
     /// Reads provider stream bytes and records first-byte and completion boundaries.
+    /// Parses response lines after their complete UTF-8 bytes have arrived.
     async fn read_streaming_response(
         &self,
         response: reqwest::Response,
@@ -1226,10 +1228,7 @@ impl OpenAIProvider {
                 }
             }
 
-            let pending = String::from_utf8(std::mem::take(&mut state.pending_bytes))
-                .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?
-                .trim()
-                .to_string();
+            let pending = decodeStreamingTail(&mut state.pending_bytes)?;
             if !pending.is_empty() {
                 let emitted_before = state.chunks.len();
                 self.process_streaming_line(&pending, &mut state, on_tool_invocation)?;
@@ -2303,17 +2302,6 @@ impl OpenAIProvider {
         }
         Ok(headers)
     }
-}
-
-/// Extracts and strictly decodes one complete UTF-8 SSE line from pending transport bytes.
-fn takeNextStreamingLine(pending_bytes: &mut Vec<u8>) -> Result<Option<String>, AiServiceError> {
-    let Some(newline_index) = pending_bytes.iter().position(|byte| *byte == b'\n') else {
-        return Ok(None);
-    };
-    let line_bytes = pending_bytes.drain(..=newline_index).collect::<Vec<u8>>();
-    String::from_utf8(line_bytes)
-        .map(|line| Some(line.trim().to_string()))
-        .map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

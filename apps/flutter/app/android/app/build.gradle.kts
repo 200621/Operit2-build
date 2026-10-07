@@ -51,6 +51,12 @@ abstract class StageOperitAndroidAssets : DefaultTask() {
     }
 }
 
+/** Publishes variant-isolated JNI libraries through Android's generated sources API. */
+abstract class StageOperitAndroidJniLibraries : Sync() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+}
+
 val localProperties = Properties()
 val localPropertiesFile = rootProject.file("local.properties")
 localProperties.load(FileInputStream(localPropertiesFile))
@@ -134,6 +140,7 @@ android {
     }
 
     sourceSets.getByName("main").assets.setSrcDirs(emptyList<String>())
+    sourceSets.getByName("main").jniLibs.setSrcDirs(emptyList<String>())
 
     buildTypes {
         configureEach {
@@ -227,60 +234,92 @@ val syncOperitPlugins = tasks.register<Exec>("syncOperitPlugins") {
     )
 }
 
-val cargoBuildOperitFlutterBridgeTasks = selectedOperitRustTargets.map { target ->
-    tasks.register<Exec>("cargoBuildOperitFlutterBridge${target.abi.replace("-", "").replace("_", "")}") {
-        dependsOn(syncOperitPlugins)
-        val clangPrefix = target.rustTarget
-        val apiLevel = 23
-        val ndkToolchain = android.ndkDirectory
-            .resolve("toolchains")
-            .resolve("llvm")
-            .resolve("prebuilt")
-            .resolve(if (operitIsWindows) "windows-x86_64" else "linux-x86_64")
-            .resolve("bin")
-        val linkerPrefix = if (target.rustTarget == "armv7-linux-androideabi") {
-            "armv7a-linux-androideabi"
-        } else {
-            clangPrefix
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        val variantTaskSuffix = variant.name.replaceFirstChar { it.uppercase() }
+        val rustProfile = when (variant.buildType) {
+            "debug" -> "debug"
+            "profile", "release" -> "release"
+            else -> throw GradleException("Unsupported Android Rust build type: ${variant.buildType}")
         }
-        val linker = ndkToolchain.resolve("${linkerPrefix}${apiLevel}-clang${if (operitIsWindows) ".cmd" else ""}")
-        val ar = ndkToolchain.resolve(if (operitIsWindows) "llvm-ar.exe" else "llvm-ar")
-        val clangResourceDir = ndkToolchain
-            .parentFile
-            .resolve("lib")
-            .resolve("clang")
-            .listFiles()
-            ?.single { it.isDirectory }
-            ?: throw GradleException("Android NDK clang resource dir not found")
-        val bindgenClangArgs =
-            "--target=${target.rustTarget} --sysroot=${ndkToolchain.parentFile.resolve("sysroot").clangPath()} -resource-dir=${clangResourceDir.clangPath()}"
-        val ccEnvTarget = target.rustTarget.replace("-", "_")
-        environment("CC_$ccEnvTarget", linker.absolutePath)
-        environment("AR_$ccEnvTarget", ar.absolutePath)
-        environment("CARGO_TARGET_${target.envTarget}_LINKER", linker.absolutePath)
-        environment("CARGO_TARGET_${target.envTarget}_AR", ar.absolutePath)
-        environment("LIBCLANG_PATH", operitLibclangDir.absolutePath)
-        environment("BINDGEN_EXTRA_CLANG_ARGS_$ccEnvTarget", bindgenClangArgs)
-        environment("RUSTFLAGS", "-Awarnings")
-        commandLine(
-            "cargo",
-            "build",
-            "--manifest-path",
-            operitBridgeCrate.resolve("Cargo.toml").absolutePath,
-            "--target",
-            target.rustTarget,
-        )
-        doLast {
-            copy {
-                from(operitBridgeCrate.resolve("target/${target.rustTarget}/debug/liboperit_flutter_bridge.so"))
-                into(operitBridgeJniLibs.resolve(target.abi))
+        val cargoBuildOperitFlutterBridgeTasks = selectedOperitRustTargets.map { target ->
+            val abiTaskSuffix = target.abi.replace("-", "").replace("_", "")
+            val bridgeLibrary = operitBridgeCrate.resolve(
+                "target/${target.rustTarget}/$rustProfile/liboperit_flutter_bridge.so",
+            )
+            tasks.register<Exec>("cargoBuildOperitFlutterBridge$variantTaskSuffix$abiTaskSuffix") {
+                dependsOn(syncOperitPlugins)
+                val clangPrefix = target.rustTarget
+                val apiLevel = 23
+                val ndkToolchain = android.ndkDirectory
+                    .resolve("toolchains")
+                    .resolve("llvm")
+                    .resolve("prebuilt")
+                    .resolve(if (operitIsWindows) "windows-x86_64" else "linux-x86_64")
+                    .resolve("bin")
+                val linkerPrefix = if (target.rustTarget == "armv7-linux-androideabi") {
+                    "armv7a-linux-androideabi"
+                } else {
+                    clangPrefix
+                }
+                val linker = ndkToolchain.resolve("${linkerPrefix}${apiLevel}-clang${if (operitIsWindows) ".cmd" else ""}")
+                val ar = ndkToolchain.resolve(if (operitIsWindows) "llvm-ar.exe" else "llvm-ar")
+                val clangResourceDir = ndkToolchain
+                    .parentFile
+                    .resolve("lib")
+                    .resolve("clang")
+                    .listFiles()
+                    ?.single { it.isDirectory }
+                    ?: throw GradleException("Android NDK clang resource dir not found")
+                val bindgenClangArgs =
+                    "--target=${target.rustTarget} --sysroot=${ndkToolchain.parentFile.resolve("sysroot").clangPath()} -resource-dir=${clangResourceDir.clangPath()}"
+                val ccEnvTarget = target.rustTarget.replace("-", "_")
+                environment("CC_$ccEnvTarget", linker.absolutePath)
+                environment("AR_$ccEnvTarget", ar.absolutePath)
+                environment("CARGO_TARGET_${target.envTarget}_LINKER", linker.absolutePath)
+                environment("CARGO_TARGET_${target.envTarget}_AR", ar.absolutePath)
+                environment("LIBCLANG_PATH", operitLibclangDir.absolutePath)
+                environment("BINDGEN_EXTRA_CLANG_ARGS_$ccEnvTarget", bindgenClangArgs)
+                environment("RUSTFLAGS", "-Awarnings")
+                val cargoArguments = mutableListOf(
+                    "cargo",
+                    "build",
+                    "--manifest-path",
+                    operitBridgeCrate.resolve("Cargo.toml").absolutePath,
+                    "--target",
+                    target.rustTarget,
+                )
+                if (rustProfile == "release") {
+                    cargoArguments.add("--release")
+                }
+                commandLine(cargoArguments)
+                doLast {
+                    if (!bridgeLibrary.isFile) {
+                        throw GradleException("Missing Android Rust $rustProfile bridge: $bridgeLibrary")
+                    }
+                }
             }
         }
+        val stagedJniLibraries = tasks.register<StageOperitAndroidJniLibraries>(
+            "stageOperitAndroidJniLibraries$variantTaskSuffix",
+        ) {
+            dependsOn(cargoBuildOperitFlutterBridgeTasks)
+            selectedOperitRustTargets.forEach { target ->
+                into(target.abi) {
+                    from(operitBridgeJniLibs.resolve(target.abi)) {
+                        exclude("liboperit_flutter_bridge.so")
+                    }
+                    from(operitBridgeCrate.resolve(
+                        "target/${target.rustTarget}/$rustProfile/liboperit_flutter_bridge.so",
+                    ))
+                }
+            }
+            into(outputDirectory)
+        }
+        val jniLibraries = variant.sources.jniLibs
+            ?: throw GradleException("Android variant ${variant.name} has no JNI library sources")
+        jniLibraries.addGeneratedSourceDirectory(stagedJniLibraries) { it.outputDirectory }
     }
-}
-
-val cargoBuildOperitFlutterBridge = tasks.register("cargoBuildOperitFlutterBridge") {
-    dependsOn(cargoBuildOperitFlutterBridgeTasks)
 }
 
 val requiredOperitAndroidRuntimeLibraries = listOf(
@@ -320,6 +359,5 @@ val verifyOperitAndroidRuntimeArtifacts = tasks.register("verifyOperitAndroidRun
 
 tasks.named("preBuild") {
     dependsOn(syncOperitPlugins)
-    dependsOn(cargoBuildOperitFlutterBridge)
     dependsOn(verifyOperitAndroidRuntimeArtifacts)
 }
