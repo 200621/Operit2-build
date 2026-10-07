@@ -115,6 +115,10 @@ impl OperitTui {
             self.render_approval_modal(frame);
         }
 
+        if self.join_decision.is_some() {
+            self.render_join_decision_modal(frame);
+        }
+
         self.finish_popup_selection(frame.buffer_mut());
     }
 
@@ -1117,6 +1121,73 @@ impl OperitTui {
         ];
         let actions = Paragraph::new(Text::from(action_lines)).wrap(Wrap { trim: false });
         frame.render_widget(actions, chunks[1]);
+    }
+
+    /// Renders the Space join decision popup: the selected request's details
+    /// with Y/N/Esc actions, or a selectable queue when several requests are
+    /// pending.
+    fn render_join_decision_modal(&mut self, frame: &mut Frame) {
+        let Some(modal) = self.join_decision.as_ref() else {
+            return;
+        };
+        let text = self.text();
+        let popup = centered_rect(70, 42, frame.area());
+        frame.render_widget(Clear, popup);
+        let modal_block = Block::default()
+            .title(text.network_join_decision_title())
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT_DIM));
+        let inner = modal_block.inner(popup);
+        frame.render_widget(modal_block, popup);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        let Some(request) = modal.requests.get(modal.selected) else {
+            return;
+        };
+        let label_style = Style::default().fg(theme::TEXT_SUBTLE);
+        let mut body_lines = vec![Line::from("")];
+        body_lines.push(Line::from(vec![
+            Span::styled(
+                request.applicantName.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ({})", request.applicantDeviceId),
+                Style::default().fg(theme::TEXT_MUTED),
+            ),
+        ]));
+        body_lines.push(Line::from(vec![
+            Span::styled(format!("{}: ", text.network_join_decision_space()), label_style),
+            Span::raw(request.spaceName.clone()),
+            Span::styled("  ·  ", Style::default().fg(theme::TEXT_MUTED)),
+            Span::styled(format!("{:?}", request.status), Style::default()),
+        ]));
+        if let Some(reviewer) = request.reviewerName.as_deref() {
+            body_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}: ", text.network_join_decision_reviewer()),
+                    label_style,
+                ),
+                Span::raw(reviewer.to_string()),
+            ]));
+        }
+        if modal.requests.len() > 1 {
+            body_lines.push(Line::from(""));
+            body_lines.push(Line::from(Span::styled(
+                format!("{}/{}", modal.selected + 1, modal.requests.len()),
+                Style::default().fg(theme::TEXT_MUTED),
+            )));
+        }
+        let body = Paragraph::new(Text::from(body_lines)).wrap(Wrap { trim: false });
+        frame.render_widget(body, chunks[0]);
+
+        let hint = Paragraph::new(Line::from(Span::styled(
+            text.network_join_decision_hint(),
+            Style::default().fg(theme::TEXT_SUBTLE),
+        )));
+        frame.render_widget(hint, chunks[1]);
     }
 }
 

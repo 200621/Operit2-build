@@ -83,8 +83,8 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     let initial_chat_id_cell = Arc::new(StdMutex::new(None::<String>));
     let language_cell = Arc::new(StdMutex::new(None::<TuiLanguage>));
     let (toast_sender, toast_receiver) = mpsc::channel::<String>();
-    let pairing_toast_sender = toast_sender.clone();
     let toast_host = tui_toast_host(toast_sender);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkUiEvent>();
     let shell_args_for_core = shell_args.clone();
     let approval_bridge_for_core = approval_bridge.clone();
     let initial_chat_id_for_core = initial_chat_id_cell.clone();
@@ -120,10 +120,9 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         .expect("TUI language cell lock must not be poisoned")
         .take()
         .expect("TUI language must be initialized by CoreApplication startup");
-    let pairing_toast_task = spawn_pairing_prompt_toasts(
+    let network_event_task = spawn_network_ui_events(
         core_application.nodeServices()?.peers(),
-        pairing_toast_sender,
-        language,
+        network_event_sender,
     );
     let initial_chat_id = initial_chat_id_cell
         .lock()
@@ -154,32 +153,33 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         startup_update_prompt,
         startup_workspace_prompt_path,
         toast_receiver,
+        network_event_receiver,
     )
     .await?;
     let result = tui.run().await;
     drop(tui);
-    pairing_toast_task.abort();
+    network_event_task.abort();
     core_application.shutdown().await;
     result
 }
 
-/// Toasts the TUI whenever a new pairing prompt arrives. Core broadcasts peer
-/// changes without payloads, so fresh prompts are detected by diffing pairing
-/// ids against the previous snapshot, never by polling on a timer.
-fn spawn_pairing_prompt_toasts(
+/// Structured network events the watcher pushes to the TUI event loop.
+pub(crate) enum NetworkUiEvent {
+    /// The peer service signaled a change. Carries no data on purpose: the
+    /// link proxy futures are not `Send`, so the TUI event loop fetches the
+    /// pairing prompt and join request snapshots itself.
+    PeerChanges,
+}
+
+/// Forwards peer-service change signals to the TUI event loop. The signal
+/// carries no payload; the TUI diffs fresh snapshots against what it has
+/// shown, so nothing polls on a timer.
+fn spawn_network_ui_events(
     peers: Arc<dyn RuntimePeerService>,
-    toast_sender: mpsc::Sender<String>,
-    language: TuiLanguage,
+    events: mpsc::Sender<NetworkUiEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut changes = peers.subscribePeerChanges();
-        let prompt_ids = |prompts: &[operit_node_runtime::NodeServices::PairingPrompt]| {
-            prompts
-                .iter()
-                .map(|prompt| prompt.pairingId.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let mut seen_ids = peers.pairingPrompts().map(|ref prompts| prompt_ids(prompts)).unwrap_or_default();
         loop {
             match changes.recv().await {
                 Ok(()) => {}
@@ -188,14 +188,9 @@ fn spawn_pairing_prompt_toasts(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-            let Ok(prompts) = peers.pairingPrompts() else { continue };
-            for prompt in prompts.iter().filter(|prompt| !seen_ids.contains(&prompt.pairingId)) {
-                let _ = toast_sender.send(language.text().network_pairing_prompt_toast(
-                    &prompt.displayName,
-                    &prompt.confirmationCode,
-                ));
+            if events.send(NetworkUiEvent::PeerChanges).is_err() {
+                break;
             }
-            seen_ids = prompt_ids(&prompts);
         }
     })
 }
