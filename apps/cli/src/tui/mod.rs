@@ -47,6 +47,7 @@ use approval::TuiApprovalBridge;
 use i18n::TuiLanguage;
 use link_proxy_rs::tui_core;
 use operit_node_runtime::NodeServices::PeerTransport;
+use operit_node_runtime::RuntimePeerService::RuntimePeerService;
 use operit_core_application::CoreApplication;
 use operit_providers::chat::enhance::ConversationService::ConversationService;
 use operit_providers::chat::EnhancedAIService::EnhancedAIService;
@@ -82,6 +83,7 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     let initial_chat_id_cell = Arc::new(StdMutex::new(None::<String>));
     let language_cell = Arc::new(StdMutex::new(None::<TuiLanguage>));
     let (toast_sender, toast_receiver) = mpsc::channel::<String>();
+    let pairing_toast_sender = toast_sender.clone();
     let toast_host = tui_toast_host(toast_sender);
     let shell_args_for_core = shell_args.clone();
     let approval_bridge_for_core = approval_bridge.clone();
@@ -118,6 +120,11 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
         .expect("TUI language cell lock must not be poisoned")
         .take()
         .expect("TUI language must be initialized by CoreApplication startup");
+    let pairing_toast_task = spawn_pairing_prompt_toasts(
+        core_application.nodeServices()?.peers(),
+        pairing_toast_sender,
+        language,
+    );
     let initial_chat_id = initial_chat_id_cell
         .lock()
         .expect("TUI initial chat cell lock must not be poisoned")
@@ -151,8 +158,46 @@ pub(crate) async fn run_tui_command(args: &[String]) -> Result<(), String> {
     .await?;
     let result = tui.run().await;
     drop(tui);
+    pairing_toast_task.abort();
     core_application.shutdown().await;
     result
+}
+
+/// Toasts the TUI whenever a new pairing prompt arrives. Core broadcasts peer
+/// changes without payloads, so fresh prompts are detected by diffing pairing
+/// ids against the previous snapshot, never by polling on a timer.
+fn spawn_pairing_prompt_toasts(
+    peers: Arc<dyn RuntimePeerService>,
+    toast_sender: mpsc::Sender<String>,
+    language: TuiLanguage,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut changes = peers.subscribePeerChanges();
+        let prompt_ids = |prompts: &[operit_node_runtime::NodeServices::PairingPrompt]| {
+            prompts
+                .iter()
+                .map(|prompt| prompt.pairingId.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let mut seen_ids = peers.pairingPrompts().map(|ref prompts| prompt_ids(prompts)).unwrap_or_default();
+        loop {
+            match changes.recv().await {
+                Ok(()) => {}
+                // A lagged receiver recovers on the next recv; only a stopped
+                // peer service ends the watcher.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+            let Ok(prompts) = peers.pairingPrompts() else { continue };
+            for prompt in prompts.iter().filter(|prompt| !seen_ids.contains(&prompt.pairingId)) {
+                let _ = toast_sender.send(language.text().network_pairing_prompt_toast(
+                    &prompt.displayName,
+                    &prompt.confirmationCode,
+                ));
+            }
+            seen_ids = prompt_ids(&prompts);
+        }
+    })
 }
 
 /// Creates the toast host that feeds the active TUI event loop.
