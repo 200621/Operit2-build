@@ -258,6 +258,19 @@ impl NativePtyTerminalHost {
 }
 
 impl TerminalHost for NativePtyTerminalHost {
+    /// Resolves native terminal directories through the runtime's host VFS mapper.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        requireNativeTerminal(terminal)?;
+        self.normalizeTerminalType(terminalType)?;
+        resolveHostDirectory(workingDir)
+    }
+
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {
             platform: PLATFORM.to_string(),

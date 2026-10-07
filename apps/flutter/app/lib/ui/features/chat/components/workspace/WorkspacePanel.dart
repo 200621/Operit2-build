@@ -29,6 +29,7 @@ import 'browser/automation/WorkspaceWebVisitSessionRegistry.dart';
 import 'file_preview/WorkspaceTextDocument.dart';
 import 'file_preview/WorkspaceTextCloseDialog.dart';
 import 'terminal/WorkspaceTerminalSessions.dart';
+import 'terminal/WorkspaceTerminalLaunch.dart';
 
 class WorkspacePanel extends StatefulWidget {
   const WorkspacePanel({
@@ -360,7 +361,8 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                   child: RetainedPage(
                     active: tabIndex == selectedIndex,
                     child: Builder(
-                      builder: (_) => _buildTabContent(tab, paneIndex: paneIndex),
+                      builder: (_) =>
+                          _buildTabContent(tab, paneIndex: paneIndex),
                     ),
                   ),
                 ),
@@ -1234,25 +1236,31 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     if (terminal == null) {
       return;
     }
-    final workingDirectory = await _manualTerminalWorkingDirectory(
-      terminal.terminal,
-      terminal.terminalType,
-    );
-    final sessionId = await _terminalSessions.startPtySession(
-      sessionName: _nextManualTerminalSessionName(),
+    await launchWorkspaceTerminal(
+      context: context,
       terminal: terminal.terminal,
       terminalType: terminal.terminalType,
-      workingDirectory: workingDirectory,
-      rows: 24,
-      columns: 80,
+      launch: () async {
+        final workingDirectory = _manualTerminalWorkingDirectory();
+        final sessionId = await _terminalSessions.startPtySession(
+          sessionName: _nextManualTerminalSessionName(),
+          terminal: terminal.terminal,
+          terminalType: terminal.terminalType,
+          workingDirectory: workingDirectory,
+          rows: 24,
+          columns: 80,
+        );
+        final sessions = await _terminalSessions.listSessions();
+        final session = sessions.firstWhere(
+          (item) => item.sessionId == sessionId,
+        );
+        if (!mounted) {
+          return;
+        }
+        _updateTerminalSessionEntries(sessions);
+        _openTerminalSessionTab(session);
+      },
     );
-    final sessions = await _terminalSessions.listSessions();
-    final session = sessions.firstWhere((item) => item.sessionId == sessionId);
-    if (!mounted) {
-      return;
-    }
-    _updateTerminalSessionEntries(sessions);
-    _openTerminalSessionTab(session);
   }
 
   /// Prompts the user to choose one terminal implementation exposed by the active host.
@@ -1324,18 +1332,10 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     );
   }
 
-  /// Resolves the initial directory supported by the selected terminal host.
-  Future<String> _manualTerminalWorkingDirectory(
-    String terminal,
-    String terminalType,
-  ) async {
-    if (terminal == 'v86') {
-      return '/';
-    }
+  /// Returns a VFS locator whose filesystem is resolved by the selected terminal host.
+  String _manualTerminalWorkingDirectory() {
     if (!widget.hasBoundWorkspace) {
-      return const GeneratedCoreProxyClients(
-        ProxyCoreRuntimeBridge(),
-      ).application.operitRootPath();
+      return '/app/data';
     }
     final workspaceDirectory = widget.workspacePath?.trim();
     if (workspaceDirectory == null || workspaceDirectory.isEmpty) {

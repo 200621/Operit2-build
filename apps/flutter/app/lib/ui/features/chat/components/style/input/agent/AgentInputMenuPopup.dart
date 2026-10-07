@@ -10,7 +10,6 @@ import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
 import '../../../../../../common/CharacterAvatar.dart';
 import '../../../../../../common/icons/MaterialIconNameResolver.dart';
 import '../../../../viewmodel/ChatViewModel.dart';
-import '../../../../../settings/memory/MemoryOwnerControlsDialog.dart';
 
 class AgentInputMenuPopup extends StatefulWidget {
   const AgentInputMenuPopup({
@@ -143,20 +142,6 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
     );
     // This menu is a root OverlayEntry, not a route. Remove it before the
     // dialog is painted or it will remain above the navigator's modal barrier.
-    widget.onDismiss();
-    unawaited(dialog);
-  }
-
-  void _openMemorySettings() {
-    final chatId = widget.currentChatId;
-    if (chatId == null) return;
-    final dialog = MemoryOwnerControlsDialog.open(
-      context,
-      widget.viewModel.clients,
-      '',
-      chatCore: widget.viewModel.chatCore,
-      chatId: chatId,
-    );
     widget.onDismiss();
     unawaited(dialog);
   }
@@ -370,12 +355,6 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                           title: _memoryBusy ? '正在更新记忆…' : '手动更新记忆',
                           enabled: !_memoryBusy && widget.currentChatId != null,
                           onTap: _manualMemory,
-                        ),
-                        _ActionRow(
-                          icon: Icons.tune,
-                          title: '记忆设置',
-                          enabled: widget.currentChatId != null,
-                          onTap: _openMemorySettings,
                         ),
                       ],
                     ),

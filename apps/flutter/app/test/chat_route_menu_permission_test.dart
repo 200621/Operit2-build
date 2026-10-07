@@ -48,6 +48,7 @@ Widget _app(Widget child, {double textScale = 1}) => MaterialApp(
   ),
 );
 
+/// Verifies chat-owned menu controls, routing, and tool permissions.
 void main() {
   testWidgets('menu settings and edits use the explicit owning chat', (
     tester,
@@ -154,7 +155,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('记忆'));
       await tester.pumpAndSettle();
-      expect(find.text('记忆设置'), findsOneWidget);
+      expect(find.text('记忆设置'), findsNothing);
       expect(find.text('手动更新记忆'), findsOneWidget);
       expect(find.byType(ListTile), findsNothing);
       for (final label in ['自动更新记忆库', '提供用户资料']) {
@@ -187,7 +188,7 @@ void main() {
     });
   }
 
-  testWidgets('memory settings replace the root overlay instead of stacking', (
+  testWidgets('chat memory menu does not expose a settings entry', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(360, 800));
@@ -199,20 +200,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('记忆'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('记忆设置'));
-    await tester.pumpAndSettle();
-    expect(find.byType(AgentInputMenuPopup), findsNothing);
-    expect(find.byType(MemoryOwnerControlsDialog), findsOneWidget);
-    expect(find.text('自动提取'), findsOneWidget);
-    expect(find.text('检索'), findsOneWidget);
-    expect(find.text('历史重建'), findsOneWidget);
-    await tester.tap(find.text('历史重建'));
-    await tester.pumpAndSettle();
-    expect(find.text('此记忆库暂无绑定聊天'), findsOneWidget);
-    await tester.tap(find.text('关闭'));
-    await tester.pumpAndSettle();
+    expect(find.byType(AgentInputMenuPopup), findsOneWidget);
+    expect(find.text('记忆设置'), findsNothing);
     expect(find.byType(MemoryOwnerControlsDialog), findsNothing);
-    expect(find.byType(AgentInputMenuPopup), findsNothing);
+    expect(find.text('提供用户资料'), findsOneWidget);
+    expect(find.text('自动更新记忆库'), findsOneWidget);
+    expect(find.text('手动更新记忆'), findsOneWidget);
+    expect(
+      bridge.calls.any((call) => call.methodName == 'chatMemorySettings'),
+      isFalse,
+    );
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

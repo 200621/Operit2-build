@@ -1142,6 +1142,9 @@ impl JsEngineState {
     /// Installs every active owner so callbacks advanced by another call retain their context.
     #[allow(non_snake_case)]
     fn installActiveCallContexts(&self) {
+        CURRENT_EXECUTION_HOST.with(|host| {
+            *host.borrow_mut() = self.executionHost.clone();
+        });
         CURRENT_ACTIVE_CALL_CONTEXTS.with(|contexts| {
             *contexts.borrow_mut() = self
                 .detachedCallContexts

@@ -147,3 +147,49 @@ test('snapshot export uses host files throughout generation and saving', () => {
   assert.match(web, /pipeTo\(output\)/);
   assert.doesNotMatch(web, /readAsBytes|arrayBuffer|toList/);
 });
+
+
+/** Keeps upload writes buffered until one successful, idempotent sealing flush. */
+test('snapshot upload flushes once at sealing rather than once per chunk', () => {
+  const { staging, data } = stagingFixture();
+  const chunk = new Uint8Array(64 * 1024).fill(42);
+  staging.create('upload', 16 * chunk.byteLength);
+  const initialFlushes = data.flushes;
+  for (let index = 0; index < 16; index += 1) {
+    staging.append('upload', chunk);
+  }
+  assert.equal(data.flushes, initialFlushes);
+  assert.throws(() => staging.read('upload', 0, 4), /not sealed/);
+  assert.equal(staging.seal('upload'), 16 * chunk.byteLength);
+  assert.equal(data.flushes, initialFlushes + 1);
+  assert.equal(staging.seal('upload'), 16 * chunk.byteLength);
+  assert.equal(data.flushes, initialFlushes + 1);
+  assert.deepEqual([...staging.read('upload', chunk.byteLength - 2, 4)], [42, 42, 42, 42]);
+});
+
+/** Leaves failed flushes unsealed and rejects reads until persistence succeeds. */
+test('snapshot upload remains unsealed when the sealing flush fails', () => {
+  const { staging, data } = stagingFixture();
+  staging.create('upload', 4);
+  staging.append('upload', Uint8Array.of(1, 2, 3, 4));
+  const flush = data.flush.bind(data);
+  data.flush = () => { throw new Error('test persistence failure'); };
+  assert.throws(() => staging.seal('upload'), /persistence failure/);
+  assert.throws(() => staging.read('upload', 0, 4), /not sealed/);
+  data.flush = flush;
+  assert.equal(staging.seal('upload'), 4);
+  assert.deepEqual([...staging.read('upload', 0, 4)], [1, 2, 3, 4]);
+});
+
+/** Checks that every selected-file input and the runtime upload accept the same bounded chunks. */
+test('snapshot upload uses 1 MiB chunks while exports keep their existing bound', () => {
+  const dart = source('apps/flutter/app/lib/core/snapshot/SnapshotImportUploader.dart');
+  const runtime = source('core/crates/runtime/application/src/services/ArchiveTransferManager.rs');
+  const android = source('apps/flutter/app/android/app/src/main/kotlin/app/operit/SnapshotImportInputChannel.kt');
+  const apple = source('apps/flutter/app/ios/Runner/AppleSnapshotImportInputChannel.swift');
+  assert.match(dart, /_snapshotImportChunkSize = 1024 \* 1024/);
+  assert.match(runtime, /ARCHIVE_UPLOAD_MAX_CHUNK_BYTES: usize = 1024 \* 1024/);
+  assert.match(runtime, /ARCHIVE_TRANSFER_MAX_CHUNK_BYTES: usize = 64 \* 1024/);
+  assert.match(android, /MAX_CHUNK_SIZE = 1024 \* 1024/);
+  assert.match(apple, /min\(maxBytes, 1024 \* 1024\)/);
+});

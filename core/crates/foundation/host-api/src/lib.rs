@@ -2,6 +2,7 @@
 
 pub mod HostManager;
 pub mod FileSystemResource;
+pub mod TerminalWorkingDirectory;
 pub mod PluginSdkIpc;
 pub mod TimeUtils;
 pub mod HttpServer;
@@ -1636,6 +1637,14 @@ pub struct TerminalInfo {
 }
 
 pub trait TerminalHost: Send + Sync {
+    /// Resolves a working directory in the exact selected terminal filesystem.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String>;
     fn terminalInfo(&self) -> HostResult<TerminalInfo>;
     fn startPtySession(
         &self,

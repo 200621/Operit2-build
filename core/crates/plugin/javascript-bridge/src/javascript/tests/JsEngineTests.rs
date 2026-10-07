@@ -2942,15 +2942,25 @@ async fn completion_retains_detached_promise_context_until_host_event() {
     let host = Arc::new(TestPluginConfigExecutionHost::default());
     let engine = newTestJsEngine(host.clone());
     let (sender, mut progress) = tokio::sync::mpsc::unbounded_channel();
+    let mut params = testParams();
+    params.insert(
+        "toolPkgId".to_string(),
+        Value::String("workflow".to_string()),
+    );
     let output = engine.execute_script_function(
         r#"exports.main = function() {
             globalThis.detachedRuns = 0;
             toolCall('gate', {}).then(function() {
                 globalThis.detachedRuns++;
-                sendIntermediateResult({ owner: getEnv('CALL_OWNER'), runs: globalThis.detachedRuns });
+                NativeInterface.setEnv('DETACHED_HOST_OWNER', 'original');
+                sendIntermediateResult({
+                    owner: getEnv('CALL_OWNER'),
+                    runs: globalThis.detachedRuns,
+                    config: ToolPkg.getConfigDir()
+                });
             });
             return 'primary';
-        };"#, "main", &testParams(),
+        };"#, "main", &params,
         &BTreeMap::from([("CALL_OWNER".to_string(), "original".to_string())]),
         Some(Arc::new(move |value| { sender.send(value).unwrap(); })), true, 2, None,
     ).await;
@@ -2974,9 +2984,20 @@ async fn completion_retains_detached_promise_context_until_host_event() {
         .await;
     assert_eq!(expect_js_output(output, "next request"), "\"next\"");
     finishGatedTool(&host);
-    let resumed: Value =
-        serde_json::from_str(&progress.recv().await.expect("detached progress")).unwrap();
-    assert_eq!(resumed, serde_json::json!({"owner": "original", "runs": 1}));
+    let resumed: Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), progress.recv())
+            .await
+            .expect("Host must resume the detached continuation")
+            .expect("detached progress"),
+    ).unwrap();
+    assert_eq!(resumed, serde_json::json!({
+        "owner": "original", "runs": 1,
+        "config": "/app/data/extensions/device/plugins/configs/workflow",
+    }));
+    assert_eq!(
+        host.environment.lock().unwrap().get("DETACHED_HOST_OWNER").map(String::as_str),
+        Some("original"),
+    );
     assert_eq!(executionSessionCounts(&engine).await, (0, 0));
     assert!(
         progress.try_recv().is_err(),
@@ -3039,5 +3060,52 @@ async fn promise_continuation_respects_execution_interrupt() {
     );
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(executionSessionCounts(&engine).await, (0, 0));
+    engine.destroy();
+}
+
+/// Restores the engine Host for native config and environment calls made by Promise jobs.
+#[tokio::test(flavor = "current_thread")]
+async fn promise_jobs_restore_execution_host_for_native_calls() {
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let engine = newTestJsEngine(host.clone());
+    let mut params = testParams();
+    params.insert(
+        "toolPkgId".to_string(),
+        Value::String("workflow".to_string()),
+    );
+    let output = engine
+        .execute_script_function(
+            r#"exports.main = async function() {
+            await Promise.resolve();
+            var config = ToolPkg.getConfigDir();
+            NativeInterface.setEnv('CONTINUATION_OWNER', 'workflow');
+            return { config: config, owner: getEnv('CONTINUATION_OWNER') };
+        };"#,
+            "main",
+            &params,
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await;
+    let value: Value =
+        serde_json::from_str(&expect_js_output(output, "Promise native Host access")).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "config": "/app/data/extensions/device/plugins/configs/workflow",
+            "owner": "workflow",
+        })
+    );
+    assert_eq!(
+        host.environment
+            .lock()
+            .unwrap()
+            .get("CONTINUATION_OWNER")
+            .map(String::as_str),
+        Some("workflow")
+    );
     engine.destroy();
 }

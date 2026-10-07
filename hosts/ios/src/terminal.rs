@@ -251,6 +251,25 @@ impl IosTerminalHost {
 }
 
 impl TerminalHost for IosTerminalHost {
+    /// Resolves iSH guest paths without requiring a Linux mount on the iOS host.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        match self.requestedBackend(terminal, terminalType)? {
+            IosTerminalBackend::Ish => {
+                operit_host_api::TerminalWorkingDirectory::resolveLinuxGuestDirectory(
+                    workingDir,
+                    resolveHostDirectory,
+                )
+            }
+            IosTerminalBackend::SystemShell => resolveHostDirectory(workingDir),
+        }
+    }
+
     /// Describes iSH and the real system shell capability, including privileged availability.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         let primaryBackend = self.primaryBackend();

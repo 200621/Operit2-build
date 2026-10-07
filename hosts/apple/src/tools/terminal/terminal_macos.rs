@@ -34,6 +34,22 @@ impl AppleTerminalHost {
 }
 
 impl TerminalHost for AppleTerminalHost {
+    /// Resolves macOS working directories through the shared native PTY host.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        self.inner.resolveWorkingDirectory(
+            TERMINAL,
+            Self::nativeTerminalType(terminal, terminalType)?,
+            workingDir,
+            resolveHostDirectory,
+        )
+    }
+
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {
             platform: PLATFORM.to_string(),

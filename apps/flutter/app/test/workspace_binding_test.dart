@@ -14,13 +14,20 @@ import 'package:operit2/ui/features/chat/viewmodel/ChatViewModel.dart';
 import 'package:operit2/ui/features/chat/viewmodel/WorkspaceFileModels.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
 
-Widget _app(Widget child) => OperitTheme(
+/// Builds a localized picker host with an explicit accessibility text scale.
+Widget _app(Widget child, {double textScale = 1}) => OperitTheme(
   initialThemePreferenceSnapshot:
       UserPreferencesManager.defaultThemePreferenceSnapshot,
   initialThemeIsReady: false,
   unconfiguredChildEnabled: true,
   hostInteractionHostsEnabled: false,
   child: MaterialApp(
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(
+        context,
+      ).copyWith(textScaler: TextScaler.linear(textScale)),
+      child: child!,
+    ),
     locale: const Locale('zh'),
     supportedLocales: AppLocalizations.supportedLocales,
     localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -28,12 +35,15 @@ Widget _app(Widget child) => OperitTheme(
   ),
 );
 
+/// Verifies workspace binding, selection errors, and responsive picker layout.
 void main() {
+  /// Mounts the real picker with controlled storage and selection callbacks.
   Future<void> mountPicker(
     WidgetTester tester, {
     required Future<void> Function(String) bind,
     Future<void> Function()? pickLocal,
     List<String>? listings,
+    double textScale = 1,
   }) async {
     await tester.pumpWidget(
       _app(
@@ -57,6 +67,7 @@ void main() {
           onSelectCurrentDirectory: bind,
           onPickLocalDirectory: pickLocal,
         ),
+        textScale: textScale,
       ),
     );
     await tester.pumpAndSettle();
@@ -64,6 +75,66 @@ void main() {
 
   final bindButton = find.widgetWithText(FilledButton, '选择工作区');
   final localButton = find.widgetWithText(OutlinedButton, '选择本机文件夹');
+
+  for (final (size, textScale) in const [
+    (Size(360, 622), 1.0),
+    (Size(320, 480), 1.6),
+    (Size(360, 240), 1.0),
+  ]) {
+    testWidgets(
+      'long binding errors stay scrollable at $size and scale $textScale',
+      (tester) async {
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final message = [
+          for (var index = 0; index < 45; index++)
+            'Workspace binding failed at line $index: /project/details',
+          'END_OF_BINDING_ERROR',
+        ].join('\n');
+        var attempts = 0;
+        await mountPicker(
+          tester,
+          bind: (_) async {
+            attempts++;
+            if (attempts == 1) throw StateError(message);
+          },
+          pickLocal: () async {},
+          textScale: textScale,
+        );
+        await tester.tap(bindButton);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(
+          tester.getRect(bindButton).bottom,
+          lessThanOrEqualTo(size.height),
+        );
+        expect(
+          tester.getRect(localButton).bottom,
+          lessThanOrEqualTo(size.height),
+        );
+        final error = find.textContaining('END_OF_BINDING_ERROR');
+        expect(error, findsOneWidget);
+        final scroll = find.ancestor(
+          of: error,
+          matching: find.byType(SingleChildScrollView),
+        );
+        expect(scroll, findsOneWidget);
+        await tester.drag(scroll, const Offset(0, -100));
+        await tester.pumpAndSettle();
+        expect(
+          Scrollable.of(tester.element(error)).position.pixels,
+          greaterThan(0),
+        );
+        expect(tester.widget<Text>(error).data, contains(message));
+        await tester.tap(bindButton);
+        await tester.pumpAndSettle();
+        expect(attempts, 2);
+        expect(error, findsNothing);
+        expect(find.text('project'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   testWidgets('reconfirming a folder uses the shared runtime binding route', (
     tester,

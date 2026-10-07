@@ -23,6 +23,17 @@ mod ios {
     }
 
     impl TerminalHost for AppleTerminalHost {
+        /// Rejects directory resolution because this terminal host is unavailable.
+        fn resolveWorkingDirectory(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &dyn Fn(&str) -> HostResult<String>,
+        ) -> HostResult<String> {
+            Err(HostError::new("iOS does not expose a local PTY host"))
+        }
+
         fn terminalInfo(&self) -> HostResult<TerminalInfo> {
             Err(HostError::new("iOS does not expose a local PTY host"))
         }
@@ -125,6 +136,17 @@ mod non_apple_target {
     }
 
     impl TerminalHost for AppleTerminalHost {
+        /// Rejects directory resolution because this terminal host is unavailable.
+        fn resolveWorkingDirectory(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &dyn Fn(&str) -> HostResult<String>,
+        ) -> HostResult<String> {
+            Err(HostError::new("Apple terminal host is available only on iOS or macOS"))
+        }
+
         fn terminalInfo(&self) -> HostResult<TerminalInfo> {
             Err(HostError::new(
                 "Apple terminal host is available only on iOS or macOS",

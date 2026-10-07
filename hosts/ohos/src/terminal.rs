@@ -219,6 +219,25 @@ impl OhosTerminalHost {
 }
 
 impl TerminalHost for OhosTerminalHost {
+    /// Resolves QEMU Linux guest paths separately from native OpenHarmony paths.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        match self.backendForTerminal(terminal, terminalType)? {
+            OhosTerminalBackend::QemuVroot => {
+                operit_host_api::TerminalWorkingDirectory::resolveLinuxGuestDirectory(
+                    workingDir,
+                    resolveHostDirectory,
+                )
+            }
+            OhosTerminalBackend::NativeShell => resolveHostDirectory(workingDir),
+        }
+    }
+
     /// Returns OpenHarmony native-shell and QEMU-vroot terminal capabilities.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {

@@ -307,7 +307,19 @@ impl RuntimeTerminalService {
         rows: i32,
         cols: i32,
     ) -> Result<String, String> {
-        let resolvedWorkingDir = resolve_terminal_working_dir(&self.context, &workingDir)?;
+        let resolvedWorkingDir = self
+            .terminalHost
+            .resolveWorkingDirectory(
+                &terminal,
+                &terminalType,
+                &workingDir,
+                &|path| resolve_terminal_working_dir(&self.context, path)
+                    .map_err(operit_host_api::HostError::new),
+            )
+            .map_err(|error| format!(
+                "Cannot resolve terminal working directory for {terminal}/{terminalType} at {workingDir}: {}",
+                error.message,
+            ))?;
         let sessionId = self
             .terminalHost
             .startPtySession(
@@ -429,6 +441,7 @@ impl RuntimeTerminalService {
     }
 }
 
+/// Resolves host-owned directories after the selected terminal has dispatched its namespace.
 fn resolve_terminal_working_dir(context: &HostManager, workingDir: &str) -> Result<String, String> {
     let trimmed = workingDir.trim();
     if trimmed == "/app" || trimmed.starts_with("/app/")
@@ -441,6 +454,7 @@ fn resolve_terminal_working_dir(context: &HostManager, workingDir: &str) -> Resu
     Ok(trimmed.to_string())
 }
 
+/// Builds the host VFS used only for directories owned by the current runtime.
 fn terminal_vfs(context: &HostManager) -> Result<VisualFileSystem, String> {
     let runtimeStorageHost = context.runtimeStorageHost.as_ref().ok_or_else(|| {
         "RuntimeStorageHost is not configured for terminal working directory".to_string()
@@ -470,6 +484,16 @@ mod idle_poll_tests {
     struct TestTerminal { reads: AtomicUsize, exited: bool }
     #[allow(unused_variables)]
     impl TerminalHost for TestTerminal {
+        /// Resolves host directories without changing this stream-test host's capabilities.
+        fn resolveWorkingDirectory(
+            &self,
+            _: &str,
+            _: &str,
+            workingDir: &str,
+            resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+        ) -> HostResult<String> {
+            resolveHostDirectory(workingDir)
+        }
         fn terminalInfo(&self) -> HostResult<TerminalInfo> { unimplemented!() }
         fn startPtySession(
         &self,
