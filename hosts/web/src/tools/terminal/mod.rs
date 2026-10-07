@@ -44,6 +44,18 @@ impl WebTerminalHost {
 }
 
 impl TerminalHost for WebTerminalHost {
+    /// Starts isolated browser terminals at their only supported guest root.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        _workingDir: &str,
+        _resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        requireLinuxVmTerminalType(terminal, terminalType)?;
+        Ok("/".to_string())
+    }
+
     /// Describes the Linux VM terminal available in browser builds.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {

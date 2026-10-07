@@ -605,6 +605,22 @@ impl RuntimeSessionPublishingTerminalHost {
 }
 
 impl operit_host_api::TerminalHost for RuntimeSessionPublishingTerminalHost {
+    /// Preserves the wrapped terminal's ownership of its working-directory namespace.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> operit_host_api::HostResult<String>,
+    ) -> operit_host_api::HostResult<String> {
+        self.inner.resolveWorkingDirectory(
+            terminal,
+            terminalType,
+            workingDir,
+            resolveHostDirectory,
+        )
+    }
+
     /// Returns terminal capabilities exposed by the wrapped host.
     fn terminalInfo(&self) -> operit_host_api::HostResult<operit_host_api::TerminalInfo> {
         self.inner.terminalInfo()
