@@ -2051,18 +2051,25 @@ impl OperitTui {
                 if requests.is_empty() {
                     self.status_message = self.text().network_requests_none().to_string();
                 } else {
+                    // The list popup clips long lines, so the decision inputs
+                    // (applicant, status, assignment-version) lead on their
+                    // own line and the identifiers follow on a second line.
                     let items = requests
                         .iter()
-                        .map(|request| {
-                            format!(
-                                "{} · {:?} · Space: {} · reviewer: {} · {} · assignment-version: {}",
-                                request.applicantName,
-                                request.status,
-                                request.spaceName,
-                                request.reviewerName.as_deref().unwrap_or("not assigned"),
-                                request.requestId,
-                                request.assignmentVersion,
-                            )
+                        .flat_map(|request| {
+                            [
+                                format!(
+                                    "{} · {:?} · assignment-version: {}",
+                                    request.applicantName, request.status,
+                                    request.assignmentVersion,
+                                ),
+                                format!(
+                                    "request {} · Space: {} · reviewer: {}",
+                                    request.requestId,
+                                    request.spaceName,
+                                    request.reviewerName.as_deref().unwrap_or("not assigned"),
+                                ),
+                            ]
                         })
                         .collect::<Vec<_>>();
                     self.open_list_popup("Network join requests".to_string(), items);
@@ -2072,13 +2079,10 @@ impl OperitTui {
                 let assignment_version = args[2]
                     .parse::<u64>()
                     .map_err(|_| "assignment-version must be a non-negative integer".to_string())?;
+                let request_id = self.resolve_join_request_argument(&args[1]).await?;
                 let request = self
                     .networkControl
-                    .decideDeviceSpaceJoin(
-                        args[1].clone(),
-                        assignment_version,
-                        args[0] == "approve",
-                    )
+                    .decideDeviceSpaceJoin(request_id, assignment_version, args[0] == "approve")
                     .await?;
                 self.status_message = format!(
                     "network join request {} {}: {:?}",
@@ -2092,6 +2096,31 @@ impl OperitTui {
             }
         }
         Ok(())
+    }
+
+    /// Resolves a `/network approve|reject` argument into the pending join
+    /// request id. Accepts the exact request id, device id, or applicant name;
+    /// ambiguous names are rejected so a decision never hits the wrong request.
+    async fn resolve_join_request_argument(&self, value: &str) -> Result<String, String> {
+        let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+        if requests.iter().any(|request| request.requestId == value) {
+            return Ok(value.to_string());
+        }
+        let matches = requests
+            .iter()
+            .filter(|request| {
+                request.applicantDeviceId == value || request.applicantName == value
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [request] => Ok(request.requestId.clone()),
+            [] => Err(format!(
+                "no pending join request matches \"{value}\"; list them with /network requests"
+            )),
+            _ => Err(format!(
+                "join request name is ambiguous: {value}; use the request id from /network requests"
+            )),
+        }
     }
 
     fn handle_language_command(&mut self, args: &[String]) -> Result<(), String> {
