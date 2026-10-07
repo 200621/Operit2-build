@@ -47,6 +47,29 @@ impl Workspace {
             .expect("workspace must contain at least one folder")
     }
 
+    /// Mounts one folder and reports whether the workspace changed.
+    ///
+    /// Re-selecting an already mounted directory must stay idempotent: a path
+    /// that is mounted under another name is ignored, and a known name whose
+    /// path moved (for example after the host path is remapped into the VFS)
+    /// is rebound in place instead of failing validation with a duplicate
+    /// folder name.
+    pub fn mountFolder(&mut self, folder: WorkspaceFolder) -> bool {
+        if self.folders.iter().any(|existing| existing.path == folder.path) {
+            return false;
+        }
+        if let Some(existing) = self
+            .folders
+            .iter_mut()
+            .find(|existing| existing.name == folder.name)
+        {
+            existing.path = folder.path;
+            return true;
+        }
+        self.folders.push(folder);
+        true
+    }
+
     /// Returns the VFS paths of every mounted folder.
     pub fn folderPaths(&self) -> Vec<String> {
         self.folders
@@ -112,5 +135,56 @@ impl Workspace {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn singleFolderWorkspace(name: &str, path: &str) -> Workspace {
+        Workspace::fromSingleFolder(
+            name.to_string(),
+            name.to_string(),
+            path.to_string(),
+            1000,
+        )
+    }
+
+    #[test]
+    fn mountFolderAppendsNewFolders() {
+        let mut workspace = singleFolderWorkspace("harmoon", "/mnt/linux/home/harmoon");
+        let changed = workspace.mountFolder(WorkspaceFolder {
+            name: "debug".to_string(),
+            path: "/mnt/linux/home/harmoon/projects".to_string(),
+        });
+        assert!(changed);
+        assert_eq!(workspace.folders.len(), 2);
+        workspace.validate().expect("workspace must stay valid");
+    }
+
+    #[test]
+    fn mountFolderIgnoresAlreadyMountedPaths() {
+        let mut workspace = singleFolderWorkspace("harmoon", "/mnt/linux/home/harmoon");
+        let changed = workspace.mountFolder(WorkspaceFolder {
+            name: "home".to_string(),
+            path: "/mnt/linux/home/harmoon".to_string(),
+        });
+        assert!(!changed);
+        assert_eq!(workspace.folders.len(), 1);
+        assert_eq!(workspace.folders[0].name, "harmoon");
+    }
+
+    #[test]
+    fn mountFolderRebindsKnownNameToMovedPath() {
+        let mut workspace = singleFolderWorkspace("harmoon", "/mnt/linux/home/harmoon");
+        let changed = workspace.mountFolder(WorkspaceFolder {
+            name: "harmoon".to_string(),
+            path: "/home/harmoon".to_string(),
+        });
+        assert!(changed);
+        assert_eq!(workspace.folders.len(), 1);
+        assert_eq!(workspace.folders[0].path, "/home/harmoon");
+        workspace.validate().expect("rebind must stay valid");
     }
 }
