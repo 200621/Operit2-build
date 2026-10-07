@@ -533,6 +533,20 @@ cross-build, Gradle `assembleRelease`) and writes
 automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
 is still required for the Rust bridge.
 
+### Local Linux Android Build
+
+Linux hosts build the same chain with the NDK's `linux-x86_64` prebuilt toolchain
+(`*-clang` and `llvm-ar`, without the Windows `.cmd`/`.exe` suffixes). The Rust
+bridge binds `LIBCLANG_PATH` to `/usr/lib` by default, where most distributions
+install `libclang.so`; set `OPERIT_LIBCLANG_DIR` to override it when libclang
+lives elsewhere. All other prerequisites are shared with the Windows list above:
+host C compiler, pnpm 10.7.0 via corepack, Web Access bundle, plugin packaging,
+and the Android runtime (rootfs) artifacts.
+
+```bash
+python tools/build_scripts/build_flutter_android.py --build-name 2.0.0 --build-number 11
+```
+
 ## OpenHarmony Flutter App
 
 OpenHarmony builds require the OpenHarmony Flutter SDK maintained at:
