@@ -201,8 +201,8 @@ val operitPluginSyncPython = if (System.getProperty("os.name").lowercase().conta
 } else {
     operitRepoRoot.resolve(".venv/bin/python")
 }
-val operitIsWindows = System.getProperty("os.name").lowercase().contains("windows")
 val operitBridgeJniLibs = project.layout.projectDirectory.dir("src/main/jniLibs").asFile
+val operitIsWindows = System.getProperty("os.name").lowercase().contains("windows")
 val operitLibclangDir = when {
     System.getenv("OPERIT_LIBCLANG_DIR") != null ->
         file(System.getenv("OPERIT_LIBCLANG_DIR"))
