@@ -12,7 +12,9 @@ from common import (
     copy_required_file,
     flutter_command,
     flutter_pub_get,
+    generate_dart_proxy_artifacts,
     read_properties,
+    require_command,
     run,
     write_properties,
 )
@@ -64,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-name")
     parser.add_argument("--build-number")
     parser.add_argument("--enforce-lockfile", action="store_true")
+    parser.add_argument("--skip-proxy-generation", action="store_true")
     parser.add_argument("--skip-signing", action="store_true")
     parser.add_argument("--dist-dir", type=Path, default=DIST_DIR)
     return parser.parse_args()
@@ -101,6 +104,9 @@ def main() -> int:
         ensure_android_signing()
     flutter = flutter_command()
     configure_android_flutter_sdk(flutter)
+    require_command("cargo")
+    if not args.skip_proxy_generation:
+        generate_dart_proxy_artifacts()
     flutter_pub_get(enforce_lockfile=args.enforce_lockfile)
     command = [
         flutter,
