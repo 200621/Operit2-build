@@ -37,6 +37,87 @@ conversation orchestration, store access, and tool integration.
 - `src/stt`: built-in speech-to-text provider contracts and implementations.
 - `src/market`: provider market services.
 
+## Model Discovery Structure
+
+`ModelListFetcher.rs` owns discovery orchestration and the only network execution
+point: `defaultHttpHost().executeHttpRequest(...)`. Its private `model_list`
+modules only prepare request data and parse response data; they do not create
+HTTP clients or introduce platform-specific branches.
+
+- `model_list/mod.rs`: selects the discovery protocol once from the provider type
+  and routes request preparation and response parsing.
+- `model_list/request.rs`: shared URL/header configuration, key-pool selection,
+  Bearer authentication, Anthropic authentication, and OpenCode routing.
+- `model_list/endpoint.rs`: structural model-resource path derivation that retains
+  gateway prefixes and explicit API versions.
+- `model_list/response.rs`: catalog-declared item selection and shared model
+  metadata parsing.
+- `model_list/gemini.rs`: Gemini query-key authentication, versioned model-list
+  paths, and generation-model filtering.
+- `model_list/tests.rs`: request and model-parsing unit tests.
+
+Private functions use Rust `snake_case`; the existing public `ModelListFetcher`
+entry point remains unchanged.
+
+## OpenAI-Compatible Model Discovery Paths
+
+Operit1's Kotlin `ModelListFetcher.extractBaseUrl()` preserves the path before
+an API version segment. Directly replacing a URL's path with the catalog path
+loses that gateway prefix, so catalog discovery derives model paths structurally
+instead of overwriting the endpoint route.
+
+- Explicit `chat/completions`, `responses`, `messages`, and `models` resource
+  suffixes select the sibling `models` resource, retaining all preceding path
+  segments and their API version.
+- A base ending in a complete numeric version segment (`v1`, `v2`, or `V1`)
+  appends `models` to that configured version.
+- Other configured base paths scope the catalog operation path. Shared suffix
+  and prefix segments are merged to avoid duplicating provider namespaces.
+- Root endpoints use the catalog model path. Existing query and fragment removal
+  remains unchanged.
+
+Examples for an OpenAI-compatible catalog using `/v1/models`:
+
+| Configured endpoint path | Model-list path |
+| --- | --- |
+| `/a/b/c/v1/chat/completions` | `/a/b/c/v1/models` |
+| `/a/b/c/v1/responses` | `/a/b/c/v1/models` |
+| `/a/b/c/v2` | `/a/b/c/v2/models` |
+| `/a/b/c/chat/completions` | `/a/b/c/models` |
+| `/a/b/c` | `/a/b/c/v1/models` |
+
+Provider-specific namespaces such as `/api/v1`, `/compatible-mode/v1`, and
+`/api/coding/paas/v4` remain part of the configured route. Unlike Kotlin's
+versionless extraction branch, configured gateway paths are not reduced to the
+origin. Paths are matched by complete segments, not URL substrings.
+
+Source contract checks are in `tools/tests/openai_model_endpoint.test.mjs`.
+Rust regression cases in `model_list/tests.rs` cover nested paths, Responses,
+provider namespaces, trailing slashes, ports, and percent-encoded prefixes.
+
+## Gemini Model Discovery
+
+Both `GOOGLE` and `GEMINI_GENERIC` use the Kotlin discovery protocol: the selected
+API key is URL-encoded into the `key` query parameter. Discovery does not generate
+an `Authorization: Bearer` header for these providers. Explicit custom headers
+remain user-controlled.
+
+The configured origin is retained. Root endpoints use the catalog operation
+path; explicit `/v1` and `/v1beta` endpoints retain their version and select its
+`models` resource. Unsupported endpoint paths and missing keys produce errors
+before network execution.
+
+Only models explicitly declaring `generateContent` are listed. Their identifiers
+use the response's non-empty `baseModelId`, matching Kotlin's base-model identity,
+and are sorted by ID. Missing or malformed generation metadata is reported as an
+error rather than assuming a model's capability or inventing an identifier.
+
+Source contract checks are in `tools/tests/google_model_catalog.test.mjs`.
+These checks do not compile Rust or contact a provider. An upstream error such as
+`API_KEY_SERVICE_BLOCKED` is preserved in the returned HTTP error; changing the
+request protocol cannot establish that a real key has permission to use the
+provider service.
+
 ## Anthropic Model Discovery
 
 `ModelListFetcher` sends both `ANTHROPIC` and `ANTHROPIC_GENERIC` catalog
@@ -48,7 +129,7 @@ matching header names case-insensitively. Missing required authentication or
 an empty version header returns a configuration error before any HTTP request.
 
 Source contract checks are in `tools/tests/anthropic_model_catalog.test.mjs`;
-request-header unit tests are in `ModelListFetcher.rs`.
+request-header unit tests are in `model_list/tests.rs`.
 
 ## Boundary
 

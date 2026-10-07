@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.daily_life",
+  "version": "1.0.0",
+  "api_version": "2.0.0",
+  "main": "dist/main.js",
+  "display_name": { "zh": "日常生活工具包", "en": "Daily Life Toolkit" },
+  "description": {
+    "zh": "插件内日常生活工具：天气、持久化通知提醒、日期时间、设备状态和截图。不依赖 UI 子代理。",
+    "en": "Plugin-owned web-based weather lookup, persistent notification reminders, date/time, device status and screenshots. No UI subagent dependency."
+  },
+  "enabled_by_default": true,
+  "subpackages": [{ "id": "daily_life", "entry": "dist/tools.js" }],
+  "resources": []
+}
