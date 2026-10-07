@@ -1864,7 +1864,7 @@ impl OperitTui {
 
     /// Executes a Space control command through the runtime-owned authorization service.
     async fn handle_network_command(&mut self, args: &[String]) -> Result<(), String> {
-        const USAGE: &str = "network <show|bootstrap|audit|devices|identities|identity|admit|remove|disconnect|policy>";
+        const USAGE: &str = "network <show|bootstrap|audit|devices|identities|identity|admit|remove|disconnect|policy|token|prompts|requests|approve|reject>";
         match args.first().map(String::as_str) {
             None | Some("show") if args.len() <= 1 => {
                 let state = self.networkControl.deviceSpaceControl()?;
@@ -2021,6 +2021,71 @@ impl OperitTui {
                 self.networkControl
                     .updateDeviceSpacePolicy(args[2].clone(), args[3].clone())?;
                 self.status_message = format!("network policy updated: {}", args[2]);
+            }
+            Some("token") if args.len() == 1 => {
+                // The pairing token must stay on screen for transfer to the
+                // other device, so it goes to the popup instead of the status line.
+                let token = self.networkControl.localPairingToken()?;
+                self.open_list_popup("Network token".to_string(), vec![token]);
+            }
+            Some("prompts") if args.len() == 1 => {
+                let prompts = self.networkControl.pairingPrompts()?;
+                if prompts.is_empty() {
+                    self.status_message = self.text().network_prompts_none().to_string();
+                } else {
+                    let items = prompts
+                        .iter()
+                        .map(|prompt| {
+                            format!(
+                                "{} · code {} · {} · pairing {}",
+                                prompt.displayName, prompt.confirmationCode,
+                                prompt.peerNodeId, prompt.pairingId,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    self.open_list_popup("Network pairing requests".to_string(), items);
+                }
+            }
+            Some("requests") if args.len() == 1 => {
+                let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+                if requests.is_empty() {
+                    self.status_message = self.text().network_requests_none().to_string();
+                } else {
+                    let items = requests
+                        .iter()
+                        .map(|request| {
+                            format!(
+                                "{} · {:?} · Space: {} · reviewer: {} · {} · assignment-version: {}",
+                                request.applicantName,
+                                request.status,
+                                request.spaceName,
+                                request.reviewerName.as_deref().unwrap_or("not assigned"),
+                                request.requestId,
+                                request.assignmentVersion,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    self.open_list_popup("Network join requests".to_string(), items);
+                }
+            }
+            Some("approve" | "reject") if args.len() == 3 => {
+                let assignment_version = args[2]
+                    .parse::<u64>()
+                    .map_err(|_| "assignment-version must be a non-negative integer".to_string())?;
+                let request = self
+                    .networkControl
+                    .decideDeviceSpaceJoin(
+                        args[1].clone(),
+                        assignment_version,
+                        args[0] == "approve",
+                    )
+                    .await?;
+                self.status_message = format!(
+                    "network join request {} {}: {:?}",
+                    args[1],
+                    if args[0] == "approve" { "approved" } else { "rejected" },
+                    request.status,
+                );
             }
             _ => {
                 self.status_message = USAGE.to_string();
