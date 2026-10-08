@@ -31,7 +31,8 @@ use operit_model::MessagePartCodec::AssistantMarkupStreamState;
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_node_runtime::NodeServices::PairingPrompt;
 use operit_node_runtime::RuntimeRemoteLinkService::{
-    RuntimeDeviceSpaceTopology, RuntimeRemoteLinkService, SpaceJoinRequest,
+    RuntimeDeviceSpaceDevice, RuntimeDeviceSpaceTopology, RuntimeRemoteLinkService,
+    SpaceJoinRequest,
 };
 use operit_runtime::data::preferences::ModelConfigManager::ModelConfigManager;
 use operit_runtime::services::ChatServiceCore::ChatState;
@@ -160,6 +161,7 @@ pub(super) struct OperitTui {
     pub(super) startup_update_prompt: Option<StartupUpdatePrompt>,
     pub(super) startup_workspace_prompt: Option<StartupWorkspacePrompt>,
     pub(super) join_decision: Option<JoinDecisionModal>,
+    pub(super) device_manager: Option<DeviceManagerModal>,
     pub(super) show_config_popup: bool,
     pub(super) config_ui: ConfigUi,
     pub(super) should_quit: bool,
@@ -288,6 +290,128 @@ pub(super) struct StartupWorkspacePrompt {
 pub(super) struct JoinDecisionModal {
     pub(super) requests: Vec<SpaceJoinRequest>,
     pub(super) selected: usize,
+}
+
+/// One selectable row in the device management window: a pending join
+/// request or a known device. Row identities stay stable across snapshot
+/// merges so the selection never jumps.
+pub(super) enum DeviceManagerRow {
+    Request(SpaceJoinRequest),
+    Device(RuntimeDeviceSpaceDevice),
+}
+
+impl DeviceManagerRow {
+    pub(super) fn id(&self) -> &str {
+        match self {
+            Self::Request(request) => &request.requestId,
+            Self::Device(device) => &device.deviceId,
+        }
+    }
+}
+
+/// Actions offered by the device management window. The connection axis is
+/// a single slot derived from the restriction flag: admit and disconnect
+/// are policy-level conjugates over `disconnectedNodeIds`, never two
+/// parallel menu entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceManagerAction {
+    Admit,
+    Disconnect,
+    AssignIdentity,
+    ClearIdentity,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceManagerMode {
+    Browsing,
+    ActionMenu,
+    ConfirmRemove,
+    AssignIdentity,
+}
+
+/// Interactive device management window opened by `/network devices`.
+/// Reachability (`online` in the topology) and policy restriction
+/// (`blocked`) are independent flags: admit only lifts a restriction and
+/// never dials a connection, so an offline member offers no connection
+/// action at all.
+pub(super) struct DeviceManagerModal {
+    pub(super) topology: RuntimeDeviceSpaceTopology,
+    pub(super) blocked: BTreeSet<String>,
+    pub(super) requests: Vec<SpaceJoinRequest>,
+    pub(super) roles: BTreeMap<String, NetworkControlRole>,
+    pub(super) initialized: bool,
+    pub(super) selected: usize,
+    pub(super) mode: DeviceManagerMode,
+    /// Device the action menu / confirm / identity picker is targeting.
+    pub(super) menu_device_id: Option<String>,
+    /// Cursor inside the current menu or identity picker.
+    pub(super) menu_index: usize,
+}
+
+impl DeviceManagerModal {
+    /// Pending join requests first, then devices; render and selection both
+    /// derive from this ordering.
+    pub(super) fn rows(&self) -> Vec<DeviceManagerRow> {
+        self.requests
+            .iter()
+            .cloned()
+            .map(DeviceManagerRow::Request)
+            .chain(
+                self.topology
+                    .devices
+                    .iter()
+                    .cloned()
+                    .map(DeviceManagerRow::Device),
+            )
+            .collect()
+    }
+
+    pub(super) fn selected_row(&self) -> Option<DeviceManagerRow> {
+        self.rows().into_iter().nth(self.selected)
+    }
+
+    /// Identities ordered by display name so the picker is stable across
+    /// BTreeMap reorderings.
+    pub(super) fn sorted_roles(&self) -> Vec<&NetworkControlRole> {
+        let mut roles = self.roles.values().collect::<Vec<_>>();
+        roles.sort_by(|left, right| left.displayName.cmp(&right.displayName));
+        roles
+    }
+
+    /// Derives the action menu for one device from its current policy
+    /// state: a restricted device can only be restored, an unrestricted
+    /// foreign device can be disconnected, identities appear only when
+    /// they can apply, and the local device never offers actions at all -
+    /// identity changes would drop the capabilities the local UI itself
+    /// depends on, and leaving or demoting this device is managed from
+    /// another administrator device.
+    pub(super) fn menu_actions(&self, device_id: &str) -> Vec<DeviceManagerAction> {
+        let is_self = device_id == self.topology.currentDeviceId;
+        if is_self {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if self.blocked.contains(device_id) {
+            actions.push(DeviceManagerAction::Admit);
+        } else {
+            actions.push(DeviceManagerAction::Disconnect);
+        }
+        if !self.roles.is_empty() {
+            actions.push(DeviceManagerAction::AssignIdentity);
+        }
+        if self
+            .topology
+            .devices
+            .iter()
+            .find(|device| device.deviceId == device_id)
+            .is_some_and(|device| device.currentIdentity.is_some())
+        {
+            actions.push(DeviceManagerAction::ClearIdentity);
+        }
+        actions.push(DeviceManagerAction::Remove);
+        actions
+    }
 }
 
 #[derive(Debug)]
@@ -563,6 +687,7 @@ impl OperitTui {
             show_config_popup: false,
             config_ui: ConfigUi::new(),
             join_decision: None,
+            device_manager: None,
             should_quit: false,
         })
     }
@@ -748,6 +873,9 @@ impl OperitTui {
             .map(|request| request.requestId.clone())
             .collect();
         self.network_snapshots_seeded = true;
+        if self.device_manager.is_some() {
+            self.refresh_device_manager_snapshot().await;
+        }
     }
 
     /// Opens the pairing popup listing every pending prompt, one block per
@@ -875,7 +1003,9 @@ impl OperitTui {
             || self.startup_install_prompt.is_some()
             || self.startup_update_prompt.is_some()
             || self.startup_workspace_prompt.is_some()
-            || self.approval_bridge.current().is_some();
+            || self.approval_bridge.current().is_some()
+            || self.join_decision.is_some()
+            || self.device_manager.is_some();
         if self.compose.editor.is_some() {
             return Ok(());
         }
@@ -1228,6 +1358,11 @@ impl OperitTui {
 
         if self.join_decision.is_some() {
             self.handle_join_decision_key(key).await?;
+            return Ok(());
+        }
+
+        if self.device_manager.is_some() {
+            self.handle_device_manager_key(key).await?;
             return Ok(());
         }
 
@@ -2034,21 +2169,7 @@ impl OperitTui {
                 self.open_list_popup("Network audit".to_string(), items);
             }
             Some("devices") if args.len() == 1 => {
-                let topology = self.networkControl.deviceSpaceTopology()?;
-                let items = topology
-                    .devices
-                    .iter()
-                    .map(|device| {
-                        let label = network_device_label_by_id(&topology, &device.deviceId)?;
-                        let identity = device
-                            .currentIdentity
-                            .as_ref()
-                            .map(|value| value.displayName.as_str())
-                            .unwrap_or("No identity");
-                        Ok(format!("{label} · identity: {identity}"))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                self.open_list_popup("Network devices".to_string(), items);
+                self.open_device_manager().await;
             }
             Some("identities") if args.len() == 1 => {
                 let state = self.networkControl.deviceSpaceControl()?;
@@ -2082,55 +2203,23 @@ impl OperitTui {
                     return Ok(());
                 }
                 if args[1] == "set" && args.len() == 4 {
-                    let state = self.networkControl.deviceSpaceControl()?;
-                    let topology = self.networkControl.deviceSpaceTopology()?;
-                    let device_id = network_device_id(&topology, &args[2])?;
-                    let device_label = network_device_label_by_id(&topology, &device_id)?;
-                    let identity_id = network_role_id(&state, &args[3])?;
-                    let identity_label = state
-                        .roles
-                        .get(&identity_id)
-                        .map(|role| role.displayName.clone())
-                        .ok_or_else(|| format!("network identity does not exist: {}", args[3]))?;
-                    self.networkControl.setDeviceSpaceIdentity(
-                        NetworkControlIdentityAssignment {
-                            nodeId: device_id,
-                            roleId: identity_id,
-                        },
-                    )?;
-                    self.status_message =
-                        format!("network identity set: {device_label} · {identity_label}");
+                    self.status_message = self.network_assign_identity(&args[2], &args[3]).await?;
                     return Ok(());
                 }
                 if args[1] == "clear" && args.len() == 3 {
-                    let topology = self.networkControl.deviceSpaceTopology()?;
-                    let device_id = network_device_id(&topology, &args[2])?;
-                    self.networkControl.clearDeviceSpaceIdentity(device_id)?;
-                    self.status_message = format!("network identity cleared: {}", args[2]);
+                    self.status_message = self.network_clear_device_identity(&args[2]).await?;
                     return Ok(());
                 }
                 Err(USAGE.to_string())?
             }
             Some("admit") if args.len() == 2 => {
-                let topology = self.networkControl.deviceSpaceTopology()?;
-                let device_id = network_device_id(&topology, &args[1])?;
-                let device_label = network_device_label_by_id(&topology, &device_id)?;
-                self.networkControl.admitDeviceSpaceMember(device_id)?;
-                self.status_message = format!("network member admitted: {}", device_label);
+                self.status_message = self.network_admit_device(&args[1]).await?;
             }
             Some("remove") if args.len() == 2 => {
-                let topology = self.networkControl.deviceSpaceTopology()?;
-                let device_id = network_device_id(&topology, &args[1])?;
-                let device_label = network_device_label_by_id(&topology, &device_id)?;
-                self.networkControl.removeDeviceSpaceMember(device_id).await?;
-                self.status_message = format!("network member removed: {}", device_label);
+                self.status_message = self.network_remove_device(&args[1]).await?;
             }
             Some("disconnect") if args.len() == 2 => {
-                let topology = self.networkControl.deviceSpaceTopology()?;
-                let device_id = network_device_id(&topology, &args[1])?;
-                let device_label = network_device_label_by_id(&topology, &device_id)?;
-                self.networkControl.disconnectDeviceSpaceNode(device_id).await?;
-                self.status_message = format!("network node disconnected: {}", device_label);
+                self.status_message = self.network_disconnect_device(&args[1]).await?;
             }
             Some("policy") if args.len() == 2 && args[1] == "list" => {
                 let items = self
@@ -2193,6 +2282,67 @@ impl OperitTui {
             }
         }
         Ok(())
+    }
+
+    /// Shared device-action layer for the `/network` slash commands and the
+    /// device management window: each helper resolves the human-facing
+    /// device reference, performs exactly one control operation, and returns
+    /// the status text so both entry points cannot drift apart.
+    async fn network_admit_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl.admitDeviceSpaceMember(device_id)?;
+        Ok(format!("network member admitted: {device_label}"))
+    }
+
+    async fn network_remove_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl.removeDeviceSpaceMember(device_id).await?;
+        Ok(format!("network member removed: {device_label}"))
+    }
+
+    async fn network_disconnect_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl
+            .disconnectDeviceSpaceNode(device_id)
+            .await?;
+        Ok(format!("network node disconnected: {device_label}"))
+    }
+
+    async fn network_assign_identity(
+        &mut self,
+        device: &str,
+        identity: &str,
+    ) -> Result<String, String> {
+        let state = self.networkControl.deviceSpaceControl()?;
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        let identity_id = network_role_id(&state, identity)?;
+        let identity_label = state
+            .roles
+            .get(&identity_id)
+            .map(|role| role.displayName.clone())
+            .ok_or_else(|| format!("network identity does not exist: {identity}"))?;
+        self.networkControl.setDeviceSpaceIdentity(
+            NetworkControlIdentityAssignment {
+                nodeId: device_id,
+                roleId: identity_id,
+            },
+        )?;
+        Ok(format!("network identity set: {device_label} · {identity_label}"))
+    }
+
+    async fn network_clear_device_identity(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        self.networkControl.clearDeviceSpaceIdentity(device_id)?;
+        Ok(format!("network identity reset to default: {device}"))
     }
 
     /// Resolves a `/network approve|reject` argument into the pending join
@@ -2333,6 +2483,380 @@ impl OperitTui {
                 self.status_message = error;
             }
         }
+    }
+
+    /// Opens the device management window over a fresh control snapshot.
+    /// The window is keyboard-driven like the join decision modal; the
+    /// mouse overlay flag only keeps clicks from leaking into the
+    /// transcript underneath.
+    async fn open_device_manager(&mut self) {
+        let state = match self.networkControl.deviceSpaceControl() {
+            Ok(state) => state,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        let topology = match self.networkControl.deviceSpaceTopology() {
+            Ok(topology) => topology,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        let requests = self
+            .networkControl
+            .incomingDeviceSpaceJoins()
+            .await
+            .unwrap_or_default();
+        self.device_manager = Some(DeviceManagerModal {
+            initialized: state.initialized,
+            topology,
+            blocked: state.disconnectedNodeIds,
+            requests: requests
+                .into_iter()
+                .filter(|request| request.canApprove)
+                .collect(),
+            roles: state.roles,
+            selected: 0,
+            mode: DeviceManagerMode::Browsing,
+            menu_device_id: None,
+            menu_index: 0,
+        });
+    }
+
+    /// Re-pulls the control snapshot into an open device window, keeping
+    /// the selection on the same row identity. A device whose action menu
+    /// is open disappears from the topology, the window drops back to
+    /// browsing instead of managing a ghost row.
+    async fn refresh_device_manager_snapshot(&mut self) {
+        let selected_id = self
+            .device_manager
+            .as_ref()
+            .and_then(|modal| modal.selected_row())
+            .map(|row| row.id().to_string());
+        let Ok(state) = self.networkControl.deviceSpaceControl() else {
+            return;
+        };
+        let Ok(topology) = self.networkControl.deviceSpaceTopology() else {
+            return;
+        };
+        let requests = self
+            .networkControl
+            .incomingDeviceSpaceJoins()
+            .await
+            .unwrap_or_default();
+        let Some(modal) = self.device_manager.as_mut() else {
+            return;
+        };
+        modal.initialized = state.initialized;
+        modal.blocked = state.disconnectedNodeIds;
+        modal.roles = state.roles;
+        modal.topology = topology;
+        modal.requests = requests
+            .into_iter()
+            .filter(|request| request.canApprove)
+            .collect();
+        if let Some(menu_device_id) = modal.menu_device_id.clone() {
+            if !modal
+                .topology
+                .devices
+                .iter()
+                .any(|device| device.deviceId == menu_device_id)
+            {
+                modal.mode = DeviceManagerMode::Browsing;
+                modal.menu_device_id = None;
+                modal.menu_index = 0;
+            }
+        }
+        if let Some(selected_id) = selected_id {
+            if let Some(position) = modal
+                .rows()
+                .iter()
+                .position(|row| row.id() == selected_id)
+            {
+                modal.selected = position;
+            }
+        }
+        modal.selected = modal.selected.min(modal.rows().len().saturating_sub(1));
+    }
+
+    /// Routes keys inside the device management window by mode.
+    async fn handle_device_manager_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let mode = self
+            .device_manager
+            .as_ref()
+            .expect("device window checked above")
+            .mode;
+        match mode {
+            DeviceManagerMode::Browsing => self.handle_device_manager_browse_key(key).await,
+            DeviceManagerMode::ActionMenu => self.handle_device_manager_menu_key(key).await,
+            DeviceManagerMode::ConfirmRemove => self.handle_device_manager_confirm_key(key).await,
+            DeviceManagerMode::AssignIdentity => self.handle_device_manager_assign_key(key).await,
+        }
+    }
+
+    async fn handle_device_manager_browse_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let row_count = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.rows().len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.selected = modal.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.selected + 1 < row_count {
+                        modal.selected += 1;
+                    }
+                }
+            }
+            // Only offered while the Space control is uninitialized; boot-
+            // strapping an initialized Space again is the slash command's job.
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                let initialized = self
+                    .device_manager
+                    .as_ref()
+                    .is_some_and(|modal| modal.initialized);
+                if !initialized {
+                    match self.networkControl.bootstrapDeviceSpaceControl() {
+                        Ok(_) => self.refresh_device_manager_snapshot().await,
+                        Err(error) => self.status_message = error,
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some(row) = self
+                    .device_manager
+                    .as_ref()
+                    .and_then(|modal| modal.selected_row())
+                else {
+                    return Ok(());
+                };
+                match row {
+                    DeviceManagerRow::Request(request) => {
+                        self.open_join_decision_modal(vec![request]);
+                        if self.join_decision.is_none() {
+                            self.status_message = self.text().network_requests_none().to_string();
+                        }
+                    }
+                    DeviceManagerRow::Device(device) => {
+                        // A device without any applicable action (the local
+                        // device with no roles defined) must not open an
+                        // empty, unhighlightable menu.
+                        if self
+                            .device_manager
+                            .as_ref()
+                            .is_some_and(|modal| !modal.menu_actions(&device.deviceId).is_empty())
+                        {
+                            if let Some(modal) = self.device_manager.as_mut() {
+                                modal.mode = DeviceManagerMode::ActionMenu;
+                                modal.menu_device_id = Some(device.deviceId.clone());
+                                modal.menu_index = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.device_manager = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_device_manager_menu_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let Some((device_id, actions)) = self.device_manager.as_ref().and_then(|modal| {
+            let device_id = modal.menu_device_id.clone()?;
+            let actions = modal.menu_actions(&device_id);
+            Some((device_id, actions))
+        }) else {
+            return Ok(());
+        };
+        let menu_index = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.menu_index)
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.menu_index = modal.menu_index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.menu_index + 1 < actions.len() {
+                        modal.menu_index += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some(action) = actions.get(menu_index).copied() else {
+                    return Ok(());
+                };
+                if action == DeviceManagerAction::AssignIdentity {
+                    if let Some(modal) = self.device_manager.as_mut() {
+                        modal.mode = DeviceManagerMode::AssignIdentity;
+                        modal.menu_index = 0;
+                    }
+                    return Ok(());
+                }
+                // Removal is destructive and irreversible; everything else
+                // runs immediately.
+                if action == DeviceManagerAction::Remove {
+                    if let Some(modal) = self.device_manager.as_mut() {
+                        modal.mode = DeviceManagerMode::ConfirmRemove;
+                        modal.menu_index = 0;
+                    }
+                    return Ok(());
+                }
+                self.run_device_manager_action(&device_id, action).await;
+            }
+            KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Removal is the only destructive action, so it keeps the join
+    /// decision modal's "no side effects on a stray key" rule: only an
+    /// explicit Y removes.
+    async fn handle_device_manager_confirm_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let Some(device_id) = self
+            .device_manager
+            .as_ref()
+            .and_then(|modal| modal.menu_device_id.clone())
+        else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                self.run_device_manager_action(&device_id, DeviceManagerAction::Remove)
+                    .await;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_device_manager_assign_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let role_count = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.sorted_roles().len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.menu_index = modal.menu_index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.menu_index + 1 < role_count {
+                        modal.menu_index += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some((device_id, role_id)) = self.device_manager.as_ref().and_then(|modal| {
+                    let device_id = modal.menu_device_id.clone()?;
+                    modal
+                        .sorted_roles()
+                        .get(modal.menu_index)
+                        .map(|role| (device_id, role.roleId.clone()))
+                }) else {
+                    return Ok(());
+                };
+                self.run_device_manager_assign(&device_id, &role_id).await;
+            }
+            KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Runs one confirmed device action through the shared action layer.
+    /// Failures keep the window open so the action can be retried. The
+    /// admit feedback deliberately avoids promising a reconnection: admit
+    /// only lifts the policy restriction, the link returns on its own.
+    async fn run_device_manager_action(&mut self, device_id: &str, action: DeviceManagerAction) {
+        let result = match action {
+            DeviceManagerAction::Admit => self.network_admit_device(device_id).await,
+            DeviceManagerAction::Disconnect => self.network_disconnect_device(device_id).await,
+            DeviceManagerAction::Remove => self.network_remove_device(device_id).await,
+            DeviceManagerAction::ClearIdentity => {
+                self.network_clear_device_identity(device_id).await
+            }
+            DeviceManagerAction::AssignIdentity => return,
+        };
+        if let Some(modal) = self.device_manager.as_mut() {
+            modal.mode = DeviceManagerMode::Browsing;
+            modal.menu_device_id = None;
+            modal.menu_index = 0;
+        }
+        match result {
+            Ok(message) => {
+                self.status_message = if action == DeviceManagerAction::Admit {
+                    let label = self
+                        .device_manager
+                        .as_ref()
+                        .and_then(|modal| {
+                            modal
+                                .topology
+                                .devices
+                                .iter()
+                                .find(|device| device.deviceId == device_id)
+                        })
+                        .map(|device| device.deviceName.clone())
+                        .unwrap_or_else(|| device_id.to_string());
+                    self.text().network_devices_admitted(&label)
+                } else {
+                    message
+                };
+            }
+            Err(error) => self.status_message = error,
+        }
+        self.refresh_device_manager_snapshot().await;
+    }
+
+    async fn run_device_manager_assign(&mut self, device_id: &str, role_id: &str) {
+        let result = self.network_assign_identity(device_id, role_id).await;
+        if let Some(modal) = self.device_manager.as_mut() {
+            modal.mode = DeviceManagerMode::Browsing;
+            modal.menu_device_id = None;
+            modal.menu_index = 0;
+        }
+        match result {
+            Ok(message) => self.status_message = message,
+            Err(error) => self.status_message = error,
+        }
+        self.refresh_device_manager_snapshot().await;
     }
 
     async fn handle_approval_command(&mut self, args: &[String]) -> Result<(), String> {
@@ -3712,6 +4236,129 @@ mod tests {
     use super::*;
     use operit_model::MessagePart::MessagePartKind;
     use operit_model::MessagePartCodec::MessagePartCodec;
+    use operit_node_runtime::RuntimeRemoteLinkService::{
+        RuntimeDeviceSpaceIdentity, SpaceJoinStatus,
+    };
+    use std::collections::BTreeSet;
+
+    /// Builds a device window fixture: self plus two foreign devices, one
+    /// restricted, one carrying an identity, and one pending join request.
+    fn device_manager_fixture() -> DeviceManagerModal {
+        let device = |device_id: &str, online: bool, identity: Option<&str>| {
+            RuntimeDeviceSpaceDevice {
+                deviceId: device_id.to_string(),
+                userName: "alice".to_string(),
+                deviceName: device_id.to_string(),
+                platform: "linux".to_string(),
+                model: String::new(),
+                coreVersion: None,
+                online,
+                currentIdentity: identity.map(|display_name| RuntimeDeviceSpaceIdentity {
+                    displayName: display_name.to_string(),
+                    capabilities: Vec::new(),
+                }),
+            }
+        };
+        DeviceManagerModal {
+            topology: RuntimeDeviceSpaceTopology {
+                currentDeviceId: "self".to_string(),
+                devices: vec![
+                    device("self", true, Some("admin")),
+                    device("phone", true, Some("user")),
+                    device("tablet", false, None),
+                ],
+                connections: Vec::new(),
+            },
+            blocked: ["tablet".to_string()].into_iter().collect(),
+            requests: vec![SpaceJoinRequest {
+                requestId: "req-1".to_string(),
+                targetDeviceId: "self".to_string(),
+                applicantDeviceId: "applicant".to_string(),
+                applicantName: "carol".to_string(),
+                spaceName: "Space".to_string(),
+                status: SpaceJoinStatus::Pending,
+                createdAt: 0,
+                expiresAt: 0,
+                canApprove: true,
+                reviewerDeviceId: None,
+                reviewerName: None,
+                reviewerHops: None,
+                assignmentVersion: 0,
+                decisionApprove: None,
+            }],
+            roles: BTreeMap::new(),
+            initialized: true,
+            selected: 0,
+            mode: DeviceManagerMode::Browsing,
+            menu_device_id: None,
+            menu_index: 0,
+        }
+    }
+
+    /// Verifies pending join requests list before devices in the window.
+    #[test]
+    fn device_manager_rows_list_requests_before_devices() {
+        let rows = device_manager_fixture().rows();
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], DeviceManagerRow::Request(_)));
+        assert!(rows[1..].iter().all(|row| matches!(row, DeviceManagerRow::Device(_))));
+    }
+
+    /// The connection axis is a single state-derived slot: restricted
+    /// devices get admit, unrestricted foreign devices get disconnect, and
+    /// the local device never offers actions at all - identity changes on
+    /// self would drop the capabilities the local UI depends on.
+    #[test]
+    fn device_manager_menu_derives_connection_action_from_restriction() {
+        let modal = device_manager_fixture();
+        let actions = modal.menu_actions("tablet");
+        assert!(actions.contains(&DeviceManagerAction::Admit));
+        assert!(!actions.contains(&DeviceManagerAction::Disconnect));
+
+        let actions = modal.menu_actions("phone");
+        assert!(actions.contains(&DeviceManagerAction::Disconnect));
+        assert!(!actions.contains(&DeviceManagerAction::Admit));
+
+        assert!(modal.menu_actions("self").is_empty());
+    }
+
+    /// Identity actions appear only when they can apply, and only for
+    /// foreign devices: assignment needs a defined role, clearing needs an
+    /// assigned identity.
+    #[test]
+    fn device_manager_menu_offers_identity_actions_only_when_applicable() {
+        let mut modal = device_manager_fixture();
+        assert!(
+            !modal
+                .menu_actions("phone")
+                .contains(&DeviceManagerAction::AssignIdentity)
+        );
+        assert!(
+            modal
+                .menu_actions("phone")
+                .contains(&DeviceManagerAction::ClearIdentity)
+        );
+        assert!(
+            !modal
+                .menu_actions("tablet")
+                .contains(&DeviceManagerAction::ClearIdentity)
+        );
+        modal.roles.insert(
+            "role-1".to_string(),
+            NetworkControlRole {
+                roleId: "role-1".to_string(),
+                displayName: "user".to_string(),
+                capabilities: BTreeSet::new(),
+            },
+        );
+        assert!(
+            modal
+                .menu_actions("tablet")
+                .contains(&DeviceManagerAction::AssignIdentity)
+        );
+        // The local row stays read-only even with roles defined.
+        assert!(modal.menu_actions("self").is_empty());
+    }
 
     /// Verifies `/new` keyword options translate into the shared shell flags.
     #[test]
