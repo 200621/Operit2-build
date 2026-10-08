@@ -318,6 +318,52 @@ impl CoreSpaceStore {
         Ok(self.space()?.members.iter().any(|member| member == &nodeId))
     }
 
+    /// Ejects one remote member from the current Space. The ejected device's
+    /// member record is rewritten as its own standalone Space, so every replica
+    /// converges on the membership without it, and the remaining members are
+    /// republished at an advanced revision. The caller owns the matching
+    /// NetworkControl policy removal and pairing revocation.
+    #[allow(non_snake_case)]
+    pub fn removeRemoteMember(&self, nodeId: String) -> Result<CoreSpace, String> {
+        validateNodeId(&nodeId)?;
+        let identity = CoreNodeIdentityStore::new(self.storage.clone()).initialize()?;
+        if nodeId == identity.nodeId {
+            return Err("current device must use leave instead of removing itself".to_string());
+        }
+        let space = self.initialize()?;
+        if !space.members.iter().any(|member| member == &nodeId) {
+            return self.space();
+        }
+        let displayName = self
+            .deviceProfiles()?
+            .get(&nodeId)
+            .map(|profile| profile.displayName.clone())
+            .unwrap_or_else(defaultSpaceName);
+        let now = currentTimeMillis();
+        self.writeMemberRecord(&CoreSpaceMemberRecord {
+            spaceId: newSpaceId(),
+            spaceName: displayName,
+            spaceRevision: 1,
+            nodeId: nodeId.clone(),
+            joinedAt: now,
+            updatedAt: now,
+        })?;
+        let nextRevision = space
+            .spaceRevision
+            .checked_add(1)
+            .ok_or_else(|| "Device space revision overflow".to_string())?;
+        self.writeSpaceProjection(
+            space.spaceId,
+            space.spaceName,
+            nextRevision,
+            space
+                .members
+                .into_iter()
+                .filter(|member| member != &nodeId)
+                .collect(),
+        )
+    }
+
     /// Admits an authenticated lightweight peer to the current Space without
     /// requiring that peer to host business storage. The caller must apply the
     /// matching NetworkControl admission separately; this method owns only the
@@ -1462,6 +1508,51 @@ mod tests {
             .expect("test device profile must initialize");
     }
 
+    /// Verifies remote member ejection rewrites the member as a standalone
+    /// Space, advances the projection, and is idempotent for non-members.
+    #[test]
+    fn remove_remote_member_tombstones_member_and_advances_projection() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let store = CoreSpaceStore::new(host.clone());
+        initializeTestDeviceProfile(&store);
+        let peerNodeId = "core-peer-eject";
+        let joined = store
+            .admitRemoteMember(
+                peerNodeId.to_string(),
+                "Ejected device".to_string(),
+                "test".to_string(),
+                "test".to_string(),
+                "test".to_string(),
+            )
+            .expect("remote member must be admitted first");
+        assert!(store.contains(peerNodeId.to_string()).unwrap());
+
+        let space = store
+            .removeRemoteMember(peerNodeId.to_string())
+            .expect("remote member must be removed");
+        assert!(!space.members.iter().any(|member| member == peerNodeId));
+        assert_eq!(space.spaceRevision, joined.spaceRevision + 1);
+        assert!(!store.contains(peerNodeId.to_string()).unwrap());
+
+        // Idempotent: removing an absent member keeps the projection stable.
+        let stable = store
+            .removeRemoteMember(peerNodeId.to_string())
+            .expect("removing an absent member must not fail");
+        assert_eq!(stable.spaceRevision, space.spaceRevision);
+    }
+
+    /// Verifies the current device cannot eject itself through the remote path.
+    #[test]
+    fn remove_remote_member_rejects_the_current_device() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let store = CoreSpaceStore::new(host.clone());
+        initializeTestDeviceProfile(&store);
+        let identity = CoreNodeIdentityStore::new(host).initialize().unwrap();
+        assert!(store
+            .removeRemoteMember(identity.nodeId)
+            .is_err());
+    }
+
     /// Verifies that repeating the same paired Space observation records no new transaction.
     #[test]
     fn observe_paired_space_is_idempotent_for_identical_membership() {
@@ -1706,9 +1797,6 @@ mod tests {
         control
             .removeMember("peer-archive".to_string())
             .expect("administrator must revoke a member");
-        assert!(control
-            .nodeIsRemoved("peer-archive")
-            .expect("member removal must materialize"));
         assert!(!control
             .nodeHasCapability("peer-archive", "storage.provide", None)
             .expect("revoked capability query must succeed"));

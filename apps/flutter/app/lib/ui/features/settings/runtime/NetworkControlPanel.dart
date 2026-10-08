@@ -274,7 +274,6 @@ class _NetworkControlDialogState extends State<_NetworkControlDialog> {
   Widget _statusTab(BuildContext context, AppLocalizations l10n) {
     final devices = <generated.RuntimeDeviceSpaceDevice>[
       ...topology.devices,
-      ...topology.removedDevices,
     ];
     final directory = _DeviceDirectory(devices);
     return ListView(
@@ -293,9 +292,6 @@ class _NetworkControlDialogState extends State<_NetworkControlDialog> {
     _DeviceDirectory directory,
     AppLocalizations l10n,
   ) {
-    final removed = topology.removedDevices.any(
-      (candidate) => candidate.deviceId == device.deviceId,
-    );
     final identity = device.currentIdentity;
     final capabilityText = identity == null
         ? l10n.settingsRuntimeControlNoIdentity
@@ -306,21 +302,19 @@ class _NetworkControlDialogState extends State<_NetworkControlDialog> {
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         leading: Icon(
-          removed || !device.online
-              ? Icons.link_off_outlined
-              : Icons.devices_outlined,
-          color: removed || !device.online
-              ? Theme.of(context).colorScheme.error
-              : Theme.of(context).colorScheme.primary,
+          device.online ? Icons.devices_outlined : Icons.link_off_outlined,
+          color: device.online
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.error,
         ),
         title: Text(directory.label(device.deviceId)),
         subtitle: Text(
           '${l10n.settingsRuntimeControlDeviceId}: ${directory.id(device.deviceId)}\n'
           '${l10n.settingsRuntimeControlCurrentIdentity}: ${identity == null ? l10n.settingsRuntimeControlNoIdentity : _identityDisplayName(identity.displayName, l10n)}\n'
           '${l10n.settingsRuntimeControlCurrentCapabilities}: $capabilityText\n'
-          '${removed ? l10n.settingsRuntimeControlRemoved : (device.online ? l10n.settingsRuntimeControlOnline : l10n.settingsRuntimeControlOffline)}',
+          '${device.online ? l10n.settingsRuntimeControlOnline : l10n.settingsRuntimeControlOffline}',
         ),
-        trailing: _deviceActions(context, device, removed, l10n),
+        trailing: _deviceActions(context, device, l10n),
       ),
     );
   }
@@ -329,25 +323,20 @@ class _NetworkControlDialogState extends State<_NetworkControlDialog> {
   Widget? _deviceActions(
     BuildContext context,
     generated.RuntimeDeviceSpaceDevice device,
-    bool removed,
     AppLocalizations l10n,
   ) {
-    if (removed) {
-      if (!_hasCapability(topology, 'network.members.join')) {
-        return null;
-      }
-      return IconButton(
-        tooltip: l10n.settingsRuntimeControlAdmitDevice,
-        onPressed: () => _commit(
-          context,
-          () => clients.server.runtimeRemoteLinkService.admitDeviceSpaceMember(
-            deviceId: device.deviceId,
-          ),
-        ),
-        icon: const Icon(Icons.person_add_alt_1_outlined),
-      );
-    }
     final actions = <Widget>[
+      if (device.deviceId != topology.currentDeviceId &&
+          _hasCapability(topology, 'network.members.join'))
+        MenuItemButton(
+          onPressed: () => _commit(
+            context,
+            () => clients.server.runtimeRemoteLinkService.admitDeviceSpaceMember(
+              deviceId: device.deviceId,
+            ),
+          ),
+          child: Text(l10n.settingsRuntimeControlAdmitDevice),
+        ),
       if (device.currentIdentity != null &&
           _hasCapability(topology, 'network.identity.manage'))
         MenuItemButton(

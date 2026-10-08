@@ -29,7 +29,6 @@ pub(crate) fn network_device_id(
     if topology
         .devices
         .iter()
-        .chain(&topology.removedDevices)
         .any(|device| device.deviceId == label)
     {
         return Ok(label.to_string());
@@ -76,14 +75,13 @@ pub(crate) fn network_device_labels(
     topology: &RuntimeDeviceSpaceTopology,
 ) -> BTreeMap<String, String> {
     let mut counts = BTreeMap::new();
-    for device in topology.devices.iter().chain(&topology.removedDevices) {
+    for device in topology.devices.iter() {
         *counts.entry(network_device_label(device)).or_insert(0usize) += 1;
     }
     let mut occurrences = BTreeMap::new();
     topology
         .devices
         .iter()
-        .chain(&topology.removedDevices)
         .map(|device| {
             let base = network_device_label(device);
             let occurrence = occurrences.entry(base.clone()).or_insert(0usize);

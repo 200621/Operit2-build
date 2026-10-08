@@ -556,7 +556,7 @@ impl CoreNodeRouter {
         let members = [&self.localNodeId, &peer.to_string()];
         if peer == self.localNodeId || !control.initialized || control.spaceId != space.spaceId
             || members.iter().any(|node| !space.members.contains(node)
-                || !control.memberNodeIds.contains(*node) || control.removedNodeIds.contains(*node)
+                || !control.memberNodeIds.contains(*node)
                 || control.disconnectedNodeIds.contains(*node)) {
             return Ok(None);
         }

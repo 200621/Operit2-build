@@ -251,7 +251,7 @@ def exercise(a, b, transport):
     b.command('control', 'device', 'disconnect', a.node)
     assert a.node in b.command('control', 'show')['disconnectedNodeIds']
     b.command('control', 'device', 'remove', a.node)
-    assert a.node in b.command('control', 'show')['removedNodeIds']
+    assert a.node not in b.command('control', 'show')['memberNodeIds']
     print(f'PASS {transport}: pairing, approvals, leave/rejoin, reject/cancel/stale decision, roles/policy, bidirectional automatic prefs/chat sync and remote chat watches, disconnect/remove', flush=True)
 
 

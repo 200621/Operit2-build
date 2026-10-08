@@ -263,7 +263,11 @@ impl HostRuntimePeerService {
             return sendError(&raw, helloRequest.requestId, error("Invalid pairing identity/purpose")).await;
         }
         if matches!(hello.purpose.as_str(), "session" | "space") {
-            self.requirePeerConnectionAllowed(&hello.nodeId)?;
+            if let Err(revoked) = self.requirePeerConnectionAllowed(&hello.nodeId) {
+                // 回报撤销原因而不是静默断开：静默关闭会被客户端误报成
+                // PEER_SECURITY correlation mismatch，无法与传输故障区分。
+                return sendError(&raw, helloRequest.requestId, revoked).await;
+            }
         }
         // 沿用持久化的 sessionId/sessionSecret；配对事务仍受过期时间和尝试上限保护。
         let saved = match hello.purpose.as_str() {

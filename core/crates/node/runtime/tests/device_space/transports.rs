@@ -317,6 +317,297 @@ async fn real_tcp_single_pairing_admission_enables_scoped_return_channel() {
     result.unwrap();
 }
 
+/// Space removal deletes the local pairing credentials together with the
+/// membership grant, so the same device can pair again instead of being
+/// refused with PEER_ALREADY_PAIRED. The removed side must still forget its
+/// own stale outbound record first: pairing credentials are node-local, so
+/// an offline removal cannot wipe the remote half.
+#[tokio::test]
+async fn real_tcp_space_remove_deletes_pairing_and_allows_repairing() {
+    use crate::HostRuntimePeerService::HostRuntimePeerService;
+    use crate::PeerStateStore::{PeerHostConfig, PeerHostPortMode, PeerStateStore};
+    use operit_host_api::HostManager::HostManager;
+    use operit_host_native_common::NativeTcpHost;
+    use operit_link::protocol::LinkDeviceInfo;
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (macRouter, mac) = approvalService("remove-mac");
+    let (iosRouter, ios) = approvalService("remove-ios");
+    let macRouter = Arc::new(macRouter);
+    let iosRouter = Arc::new(iosRouter);
+    let makeHost = |router: &CoreNodeRouter| {
+        Arc::new(HostManager {
+            runtimeStorageHost: Some(router.localCore.runtimeStorageHost()),
+            tcpHost: Some(Arc::new(NativeTcpHost)),
+            hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
+            ..HostManager::default()
+        })
+    };
+    let macPeer = HostRuntimePeerService::new(
+        makeHost(&macRouter),
+        &macRouter,
+        LinkDeviceInfo {
+            platform: "mac".into(),
+            model: "test".into(),
+        },
+    )
+    .unwrap();
+    let iosPeer = HostRuntimePeerService::new(
+        makeHost(&iosRouter),
+        &iosRouter,
+        LinkDeviceInfo {
+            platform: "ios".into(),
+            model: "test".into(),
+        },
+    )
+    .unwrap();
+    macRouter
+        .installNodeServices(NodeServices::new(macPeer.clone()))
+        .unwrap();
+    iosRouter
+        .installNodeServices(NodeServices::new(iosPeer.clone()))
+        .unwrap();
+    for router in [&macRouter, &iosRouter] {
+        PeerStateStore::new(router.localCore.runtimeStorageHost())
+            .saveHostConfig(&PeerHostConfig {
+                bindAddress: "127.0.0.1:0".into(),
+                token: "test-token".into(),
+                transports: vec![PeerTransport::Tcp],
+                discoveryEnabled: false,
+                portMode: PeerHostPortMode::Automatic,
+                updatedAt: 1,
+            })
+            .unwrap();
+    }
+    iosPeer.startListening(&[PeerTransport::Tcp]).await.unwrap();
+    let address = PeerStateStore::new(iosRouter.localCore.runtimeStorageHost())
+        .hostConfig()
+        .unwrap()
+        .unwrap()
+        .bindAddress;
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        let pairing = macPeer
+            .startPairing(
+                PeerEndpoint {
+                    nodeId: "remove-ios".into(),
+                    address: address.clone(),
+                },
+                PeerTransport::Tcp,
+                Some("test-token"),
+            )
+            .await
+            .unwrap();
+        let code = iosPeer
+            .pairingPrompts()
+            .unwrap()
+            .into_iter()
+            .find(|prompt| prompt.pairingId == pairing.pairingId)
+            .unwrap()
+            .confirmationCode;
+        macPeer.finishPairing(&pairing.pairingId, &code).await.unwrap();
+        let request = mac.requestDeviceSpaceJoin("remove-ios".into()).await.unwrap();
+        ios.incomingDeviceSpaceJoins().await.unwrap();
+        ios.decideDeviceSpaceJoin(request.requestId, request.assignmentVersion, true)
+            .await
+            .unwrap();
+        assert!(iosPeer.pairedPeers().unwrap().iter().any(|p| p.nodeId == "remove-mac"));
+
+        // Removal ejects the device from the Space and deletes the inbound
+        // session, pending records and Space channel.
+        ios.removeDeviceSpaceMember("remove-mac".into()).await.unwrap();
+        assert!(!iosPeer.pairedPeers().unwrap().iter().any(|p| p.nodeId == "remove-mac"));
+        assert!(iosRouter.spaceChannelScope("remove-mac").unwrap().is_none());
+        let iosStore = PeerStateStore::new(iosRouter.localCore.runtimeStorageHost());
+        assert!(iosStore
+            .records::<crate::PeerStateStore::StoredInbound>(
+                operit_util::RuntimeStorageLayout::RUNTIME_LINK_ACCESS_INBOUND_SESSIONS_PATH
+            )
+            .unwrap()
+            .is_empty());
+        // The policy forgets the device completely and the Space ejects it:
+        // a fresh pairing plus a new join approval is the only way back.
+        let state = iosRouter.networkControlStore.currentState().unwrap();
+        assert!(!state.memberNodeIds.contains("remove-mac"));
+        assert!(!state.disconnectedNodeIds.contains("remove-mac"));
+        assert!(!iosRouter.spaceStore.contains("remove-mac".into()).unwrap());
+
+        // The removed device keeps its stale outbound record until it forgets it.
+        assert!(macPeer.pairedPeers().unwrap().iter().any(|p| p.nodeId == "remove-ios"));
+        macPeer.removePairedPeer("remove-ios").await.unwrap();
+        assert!(macPeer.pairedPeers().unwrap().is_empty());
+
+        // Re-pairing the same node succeeds instead of PEER_ALREADY_PAIRED.
+        let repaired = macPeer
+            .startPairing(
+                PeerEndpoint {
+                    nodeId: "remove-ios".into(),
+                    address,
+                },
+                PeerTransport::Tcp,
+                Some("test-token"),
+            )
+            .await
+            .unwrap();
+        assert_ne!(repaired.pairingId, pairing.pairingId);
+        let code = iosPeer
+            .pairingPrompts()
+            .unwrap()
+            .into_iter()
+            .find(|prompt| prompt.pairingId == repaired.pairingId)
+            .unwrap()
+            .confirmationCode;
+        macPeer.finishPairing(&repaired.pairingId, &code).await.unwrap();
+        assert!(macPeer.pairedPeers().unwrap().iter().any(|p| p.nodeId == "remove-ios"));
+        assert!(iosPeer.pairedPeers().unwrap().iter().any(|p| p.nodeId == "remove-mac"));
+
+        // The forgotten join history must not block a fresh application, and
+        // approval readmits the device through the ordinary join lifecycle.
+        let rejoined = mac.requestDeviceSpaceJoin("remove-ios".into()).await.unwrap();
+        ios.incomingDeviceSpaceJoins().await.unwrap();
+        ios.decideDeviceSpaceJoin(rejoined.requestId.clone(), rejoined.assignmentVersion, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            mac.refreshDeviceSpaceJoin(rejoined.requestId)
+                .await
+                .unwrap()
+                .status,
+            SpaceJoinStatus::Joined
+        );
+    })
+    .await;
+    macPeer.stop().await.unwrap();
+    iosPeer.stop().await.unwrap();
+    result.unwrap();
+}
+
+/// A dialer refused by the listener's Space gate receives the revocation
+/// reason instead of a silent close, which clients cannot tell apart from a
+/// transport or correlation failure.
+#[tokio::test]
+async fn real_tcp_listener_gate_reports_revocation_to_dialer() {
+    use crate::HostRuntimePeerService::HostRuntimePeerService;
+    use crate::PeerStateStore::{PeerHostConfig, PeerHostPortMode, PeerStateStore};
+    use operit_host_api::HostManager::HostManager;
+    use operit_host_native_common::NativeTcpHost;
+    use operit_link::protocol::LinkDeviceInfo;
+    let _guard = routeTestGlobalLock().lock().await;
+    installTestRuntimeScheduler();
+    let (macRouter, mac) = approvalService("gate-mac");
+    let (iosRouter, ios) = approvalService("gate-ios");
+    let macRouter = Arc::new(macRouter);
+    let iosRouter = Arc::new(iosRouter);
+    let makeHost = |router: &CoreNodeRouter| {
+        Arc::new(HostManager {
+            runtimeStorageHost: Some(router.localCore.runtimeStorageHost()),
+            tcpHost: Some(Arc::new(NativeTcpHost)),
+            hostRuntimeTaskSchedulerHost: Some(defaultHostRuntimeTaskSchedulerHost()),
+            ..HostManager::default()
+        })
+    };
+    let macPeer = HostRuntimePeerService::new(
+        makeHost(&macRouter),
+        &macRouter,
+        LinkDeviceInfo {
+            platform: "mac".into(),
+            model: "test".into(),
+        },
+    )
+    .unwrap();
+    let iosPeer = HostRuntimePeerService::new(
+        makeHost(&iosRouter),
+        &iosRouter,
+        LinkDeviceInfo {
+            platform: "ios".into(),
+            model: "test".into(),
+        },
+    )
+    .unwrap();
+    macRouter
+        .installNodeServices(NodeServices::new(macPeer.clone()))
+        .unwrap();
+    iosRouter
+        .installNodeServices(NodeServices::new(iosPeer.clone()))
+        .unwrap();
+    for router in [&macRouter, &iosRouter] {
+        PeerStateStore::new(router.localCore.runtimeStorageHost())
+            .saveHostConfig(&PeerHostConfig {
+                bindAddress: "127.0.0.1:0".into(),
+                token: "test-token".into(),
+                transports: vec![PeerTransport::Tcp],
+                discoveryEnabled: false,
+                portMode: PeerHostPortMode::Automatic,
+                updatedAt: 1,
+            })
+            .unwrap();
+    }
+    iosPeer.startListening(&[PeerTransport::Tcp]).await.unwrap();
+    let address = PeerStateStore::new(iosRouter.localCore.runtimeStorageHost())
+        .hostConfig()
+        .unwrap()
+        .unwrap()
+        .bindAddress;
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        let pairing = macPeer
+            .startPairing(
+                PeerEndpoint {
+                    nodeId: "gate-ios".into(),
+                    address,
+                },
+                PeerTransport::Tcp,
+                Some("test-token"),
+            )
+            .await
+            .unwrap();
+        let code = iosPeer
+            .pairingPrompts()
+            .unwrap()
+            .into_iter()
+            .find(|prompt| prompt.pairingId == pairing.pairingId)
+            .unwrap()
+            .confirmationCode;
+        macPeer.finishPairing(&pairing.pairingId, &code).await.unwrap();
+        let request = mac.requestDeviceSpaceJoin("gate-ios".into()).await.unwrap();
+        ios.incomingDeviceSpaceJoins().await.unwrap();
+        ios.decideDeviceSpaceJoin(request.requestId, request.assignmentVersion, true)
+            .await
+            .unwrap();
+
+        // The Space owner revokes the member without syncing the policy to it,
+        // so the dialer's own gate still lets the connection attempt through.
+        ios.disconnectDeviceSpaceNode("gate-mac".into()).await.unwrap();
+        iosPeer.disconnectPeer("gate-mac").await.unwrap();
+        macPeer.disconnectPeer("gate-ios").await.unwrap();
+        let refused = macPeer
+            .call(
+                "gate-ios",
+                RoutedCoreRequest {
+                    spaceId: "gate-space".into(),
+                    originNodeId: "gate-mac".into(),
+                    targetNodeId: "gate-ios".into(),
+                    ttl: 0,
+                    routeKind: RoutedCoreRequestKind::Target,
+                    payload: CoreCallRequest::new(
+                        "revoked",
+                        NODE_SPACE_TARGET,
+                        "snapshot",
+                        CoreValue::Null,
+                    ),
+                },
+            )
+            .await;
+        assert_eq!(
+            refused.result.unwrap_err().code,
+            "PEER_CONNECTION_REVOKED",
+            "the listener must report the policy gate instead of closing silently"
+        );
+    })
+    .await;
+    macPeer.stop().await.unwrap();
+    iosPeer.stop().await.unwrap();
+    result.unwrap();
+}
+
 /// Exercises shared pairing with client-only Host capabilities and no TCP or listener on the initiator.
 #[tokio::test]
 async fn outbound_only_hosts_pair_over_http_and_websocket() {
@@ -538,7 +829,9 @@ async fn listener_capabilities_validate_all_transports_before_binding() {
         );
     }
     peer.startListening(&[PeerTransport::Tcp]).await.unwrap();
-    assert_eq!(binds.load(Ordering::SeqCst), 1);
+    // Another process may already hold the automatic port; the fallback retry
+    // then binds twice while still binding only the requested transport.
+    assert!(binds.load(Ordering::SeqCst) >= 1);
     let config = store.hostConfig().unwrap().unwrap();
     assert!(config.discoveryEnabled);
     assert_eq!(
