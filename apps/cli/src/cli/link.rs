@@ -709,7 +709,7 @@ fn run_link_control_identity_command(
             if cli_json_mode() {
                 emit_cli_json(serde_json::json!({ "deviceId": deviceId, "cleared": true }));
             } else {
-                println!("Cleared identity from \"{deviceName}\"");
+                println!("Reset identity of \"{deviceName}\" to the default user");
             }
             Ok(())
         }
