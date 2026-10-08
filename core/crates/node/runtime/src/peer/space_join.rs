@@ -217,9 +217,28 @@ pub(super) fn outgoing(service: &RuntimeRemoteLinkService) -> Result<Vec<SpaceJo
     Ok(records)
 }
 
-/// Receives applicant commands; cancellation never depends on reviewer discovery.
-pub(super) fn receive(service: &RuntimeRemoteLinkService, peer: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
+/// Forgets every join record that references one applicant device. Device
+/// removal must not leave an old Pending/Approved decision blocking the
+/// device's next application.
+pub(super) fn purgeDevice(service: &RuntimeRemoteLinkService, deviceId: &str) -> Result<(), String> {
     let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
+    let mut requestIds = Vec::new();
+    for path in [INBOUND, INBOX] {
+        for (id, record) in store(service).records::<Record>(path)? {
+            if record.request.applicantDeviceId == deviceId {
+                requestIds.push(id.clone());
+                store(service).deleteRecord(path, &id).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    for id in requestIds {
+        store(service).deleteRecord(RESULTS, &id).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Receives applicant commands; cancellation never depends on reviewer discovery.
+pub(super) fn receive(service: &RuntimeRemoteLinkService, peer: &str, request: CoreCallRequest) -> Result<CoreValue, String> {    let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
     paired(service, peer, true)?;
     let current = service.spaceStore.initialize()?;
     let now = currentTimeMillis();

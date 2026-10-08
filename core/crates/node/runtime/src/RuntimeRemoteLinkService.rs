@@ -132,7 +132,6 @@ pub struct RuntimeDeviceSpaceConnection {
 pub struct RuntimeDeviceSpaceTopology {
     pub currentDeviceId: String,
     pub devices: Vec<RuntimeDeviceSpaceDevice>,
-    pub removedDevices: Vec<RuntimeDeviceSpaceDevice>,
     pub connections: Vec<RuntimeDeviceSpaceConnection>,
 }
 
@@ -263,12 +262,7 @@ impl RuntimeRemoteLinkService {
     /// Returns the converged Space membership owned by this CoreNode.
     #[allow(non_snake_case)]
     pub fn deviceSpace(&self) -> Result<CoreSpace, String> {
-        let mut space = self.spaceStore.initialize()?;
-        let removedNodeIds = self.networkControlStore.currentState()?.removedNodeIds;
-        space
-            .members
-            .retain(|nodeId| !removedNodeIds.contains(nodeId));
-        Ok(space)
+        self.spaceStore.initialize()
     }
 
     /// Reads a complete overview, retrying if membership changes during the read.
@@ -396,11 +390,17 @@ impl RuntimeRemoteLinkService {
         self.networkControlStore.admitMember(deviceId).map(|_| ())
     }
 
-    /// Removes a member authorization and immediately ends its local Peer Link.
+    /// Forgets a device completely: the Space policy drops every record for it,
+    /// the Space membership ejects it, its join-request history is deleted, and
+    /// every local pairing credential is removed while its live Peer Link ends.
+    /// The device returns to stranger state — reconnecting requires a fresh
+    /// pairing plus a new join approval.
     #[allow(non_snake_case)]
     pub async fn removeDeviceSpaceMember(&self, deviceId: String) -> Result<(), String> {
         self.networkControlStore.removeMember(deviceId.clone())?;
-        self.nodeServices()?.peers().disconnectPeer(&deviceId).await
+        self.spaceStore.removeRemoteMember(deviceId.clone())?;
+        space_join::purgeDevice(self, &deviceId)?;
+        self.nodeServices()?.peers().removePairedPeer(&deviceId).await
             .map_err(|error| error.to_string())
     }
 
@@ -417,30 +417,15 @@ impl RuntimeRemoteLinkService {
     pub fn deviceSpaceTopology(&self) -> Result<RuntimeDeviceSpaceTopology, String> {
         let space = self.spaceStore.initialize()?;
         let controlState = self.networkControlStore.currentState()?;
-        let removedNodeIds = controlState.removedNodeIds.clone();
         let profiles = self.spaceStore.deviceProfiles()?;
         let currentDeviceId = self.nodeRouter.localNodeId();
         let activePeers = self
             .nodeServices()?.peers()
             .activePeerNodeIds()
             .map_err(|error| error.to_string())?;
-        let removedDevices = removedNodeIds
-            .iter()
-            .map(|deviceId| {
-                let profile = profiles.get(deviceId).ok_or_else(|| {
-                    format!("Device profile is missing for removed device: {deviceId}")
-                })?;
-                Ok(runtimeDeviceSpaceDevice(
-                    profile,
-                    false,
-                    runtimeDeviceSpaceIdentity(&controlState, deviceId),
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
         let devices = space
             .members
             .iter().cloned()
-            .filter(|deviceId| !removedNodeIds.contains(deviceId))
             .map(|deviceId| {
                 let profile = profiles.get(&deviceId).ok_or_else(|| {
                     format!("Device profile is missing in the current device space: {deviceId}")
@@ -462,10 +447,6 @@ impl RuntimeRemoteLinkService {
             .spaceStore
             .deviceConnectionsForSpace(&space)?
             .into_iter()
-            .filter(|connection| {
-                !removedNodeIds.contains(&connection.firstDeviceId)
-                    && !removedNodeIds.contains(&connection.secondDeviceId)
-            })
             .map(|connection| {
                 let first = devicesById.get(&connection.firstDeviceId).ok_or_else(|| {
                     format!(
@@ -499,7 +480,6 @@ impl RuntimeRemoteLinkService {
         Ok(RuntimeDeviceSpaceTopology {
             currentDeviceId,
             devices,
-            removedDevices,
             connections,
         })
     }
@@ -649,7 +629,7 @@ impl RuntimeRemoteLinkService {
         }
         let policy = self.networkControlStore.validateSpacePolicy(&snapshot.space.spaceId, &snapshot.controlOperations)?;
         for node in &snapshot.space.members {
-            if !policy.memberNodeIds.contains(node) || policy.removedNodeIds.contains(node) {
+            if !policy.memberNodeIds.contains(node) {
                 return Err(format!("Space snapshot contains an unauthorized member: {node}"));
             }
         }

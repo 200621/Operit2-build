@@ -210,16 +210,25 @@ async fn exhausted_route_ttl_is_rejected_without_forwarding() {
     assert_eq!(peers[1].calls.lock().unwrap().len(), beforeCalls);
 }
 
-/// Verifies revoked target membership blocks existing live routes without requiring socket disconnection.
+/// Verifies an ejected target cannot be reached through still connected peers.
 #[tokio::test]
-async fn revoked_target_cannot_be_reached_through_still_connected_peers() {
+async fn removed_target_cannot_be_reached_through_still_connected_peers() {
     let _guard = routeTestGlobalLock().lock().await;
     installTestRuntimeScheduler();
     let (routers, peers) = routedMesh("route-revocation");
+    let removed = routers[3].localNodeId();
     let operation = routers[0]
         .networkControlStore
-        .removeMember(routers[3].localNodeId())
+        .removeMember(removed.clone())
         .unwrap();
+    for router in routers.iter() {
+        if router.localNodeId() != removed {
+            router
+                .spaceStore
+                .removeRemoteMember(removed.clone())
+                .unwrap();
+        }
+    }
     for router in routers.iter().skip(1) {
         router
             .networkControlStore
@@ -229,12 +238,15 @@ async fn revoked_target_cannot_be_reached_through_still_connected_peers() {
     assert!(peers[2]
         .activePeerNodeIds()
         .unwrap()
-        .contains(&routers[3].localNodeId()));
+        .contains(&removed));
     assert!(!routers[0]
-        .nodeIsReachable(&routers[3].localNodeId())
+        .nodeIsReachable(&removed)
         .unwrap());
     let response = routedRead(&routers[0], &routers[3]).await;
-    assert_eq!(response.result.unwrap_err().code, "CORE_NODE_REVOKED");
+    assert_eq!(
+        response.result.unwrap_err().code,
+        "CORE_NODE_NOT_IN_SPACE"
+    );
 }
 
 /// Verifies ownership movement is replicated once and stale compare-and-set cannot overwrite it.

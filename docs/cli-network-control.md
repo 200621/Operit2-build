@@ -84,6 +84,10 @@ control device remove <device-id>
 审批角色需要同时具备 `approve`（`network.approval`）和 `join`（`network.members.join`）。
 普通成员不能修改网络策略，CLI 不会替它提升权限。
 
+`control device disconnect` 保留成员与配对，仅禁止直连和路由中转，`control device admit` 可恢复；
+`control device remove` 彻底遗忘设备：清除策略记录与加入申请历史、把它移出空间成员并删除本侧配对凭证。
+被移除设备回到陌生人状态，重新接入需要重新配对并重新申请加入，不存在移除黑名单。
+
 ## 在同一进程里执行业务命令
 
 ```text

@@ -209,7 +209,6 @@ class _DeviceSpaceBridge extends _GeneratedFlowBridge {
         },
         'topology': {
           'currentDeviceId': 'ios',
-          'removedDevices': <Object?>[],
           'connections': <Object?>[],
           'devices': [
             for (final id in members)

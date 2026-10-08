@@ -107,7 +107,6 @@ pub struct NetworkControlState {
     pub memberNodeIds: BTreeSet<String>,
     pub roles: BTreeMap<String, NetworkControlRole>,
     pub deviceIdentityIds: BTreeMap<String, String>,
-    pub removedNodeIds: BTreeSet<String>,
     pub disconnectedNodeIds: BTreeSet<String>,
     pub policies: BTreeMap<String, String>,
 }
@@ -209,19 +208,14 @@ impl NetworkControlStore {
         Ok(hasCapability(&state, nodeId, capability, targetNodeId))
     }
 
-    /// Returns whether one node has been removed from the current Space policy.
-    #[allow(non_snake_case)]
-    pub fn nodeIsRemoved(&self, nodeId: &str) -> Result<bool, String> {
-        validateNodeId(nodeId)?;
-        Ok(self.currentState()?.removedNodeIds.contains(nodeId))
-    }
-
     /// Returns whether a node is prohibited from being used as a direct connection or route hop.
     #[allow(non_snake_case)]
     pub fn nodeIsDisconnected(&self, nodeId: &str) -> Result<bool, String> {
         validateNodeId(nodeId)?;
-        let state = self.currentState()?;
-        Ok(state.removedNodeIds.contains(nodeId) || state.disconnectedNodeIds.contains(nodeId))
+        Ok(self
+            .currentState()?
+            .disconnectedNodeIds
+            .contains(nodeId))
     }
 
     /// Returns the current Space members explicitly permitted to carry a routed later hop.
@@ -243,11 +237,7 @@ impl NetworkControlStore {
     ) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
         let space = self.spaceStore.initialize()?;
         let state = self.materializeState(&space.spaceId)?;
-        let blockedNodeIds = state
-            .removedNodeIds
-            .union(&state.disconnectedNodeIds)
-            .cloned()
-            .collect();
+        let blockedNodeIds = state.disconnectedNodeIds.clone();
         let relayNodeIds = space
             .members
             .into_iter()
@@ -279,10 +269,13 @@ impl NetworkControlStore {
         self.submitLocalCommand(NetworkControlCommand::RevokeRole { nodeId })
     }
 
-    /// Removes a member from the current Space authorization policy.
+    /// Forgets a member completely: every policy record for the device is
+    /// cleared, so it may only return through a fresh pairing and a new join
+    /// approval. Replay is idempotent; capability and sole-administrator
+    /// guards stay in the audited command replay.
     #[allow(non_snake_case)]
     pub fn removeMember(&self, nodeId: String) -> Result<SyncOperation, String> {
-        self.requireKnownSpaceMember(&nodeId)?;
+        validateNodeId(&nodeId)?;
         self.submitLocalCommand(NetworkControlCommand::RemoveMember { nodeId })
     }
 
@@ -310,7 +303,7 @@ impl NetworkControlStore {
     pub fn validateSpaceAdmission(&self, targetSpaceId: &str, sourceSpaceId: &str,
         members: &BTreeSet<String>, operations: &[SyncOperation]) -> Result<(), String> {
         let state = self.validateSpacePolicy(targetSpaceId, operations)?;
-        if !members.is_subset(&state.memberNodeIds) || !members.is_disjoint(&state.removedNodeIds) {
+        if !members.is_subset(&state.memberNodeIds) {
             return Err("Merged Space membership is not authorized by the target policy".into());
         }
         let mut ordered = operations.to_vec();
@@ -474,7 +467,6 @@ impl NetworkControlStore {
             memberNodeIds: BTreeSet::new(),
             roles: builtinRoles(),
             deviceIdentityIds: BTreeMap::new(),
-            removedNodeIds: BTreeSet::new(),
             disconnectedNodeIds: BTreeSet::new(),
             policies: BTreeMap::new(),
         };
@@ -729,9 +721,6 @@ fn authorizeAndApplyCommand(
     if record.issuerNodeId != originNodeId {
         return Err("network control issuer does not match operation origin".to_string());
     }
-    if state.removedNodeIds.contains(&record.issuerNodeId) {
-        return Err("removed node cannot issue network control commands".to_string());
-    }
     match &record.command {
         NetworkControlCommand::Bootstrap { initialAdminNodeId } => {
             if state.initialized {
@@ -777,9 +766,6 @@ fn authorizeAndApplyCommand(
                     assignment.roleId
                 )
             })?;
-            if state.removedNodeIds.contains(&assignment.nodeId) {
-                return Err("removed device cannot receive an identity".to_string());
-            }
             if !state.memberNodeIds.contains(&assignment.nodeId) {
                 return Err("identity target has not been admitted to the Space".to_string());
             }
@@ -827,7 +813,6 @@ fn authorizeAndApplyCommand(
                 "network.members.join",
                 Some(nodeId),
             )?;
-            state.removedNodeIds.remove(nodeId);
             state.disconnectedNodeIds.remove(nodeId);
             state.memberNodeIds.insert(nodeId.clone());
             if !state.deviceIdentityIds.contains_key(nodeId) {
@@ -843,7 +828,6 @@ fn authorizeAndApplyCommand(
                 requireCapability(state, &record.issuerNodeId, "network.members.join", Some(nodeId))?;
             }
             for nodeId in nodeIds {
-                state.removedNodeIds.remove(nodeId);
                 state.disconnectedNodeIds.remove(nodeId);
                 state.memberNodeIds.insert(nodeId.clone());
                 state.deviceIdentityIds.entry(nodeId.clone()).or_insert_with(|| "user".into());
@@ -860,10 +844,11 @@ fn authorizeAndApplyCommand(
             if nodeIsSoleAdministrator(state, nodeId) {
                 return Err("Space control policy must retain an administrator".to_string());
             }
+            // 彻底遗忘：设备回到陌生人状态，不保留任何标记或成员记录。
+            // 重新接入只能重新配对并重新申请加入。
             state.deviceIdentityIds.remove(nodeId);
-            state.memberNodeIds.insert(nodeId.clone());
-            state.removedNodeIds.insert(nodeId.clone());
-            state.disconnectedNodeIds.insert(nodeId.clone());
+            state.memberNodeIds.remove(nodeId);
+            state.disconnectedNodeIds.remove(nodeId);
             Ok(())
         }
         NetworkControlCommand::DisconnectNode { nodeId } => {
@@ -919,7 +904,7 @@ fn hasCapability(
     capability: &str,
     targetNodeId: Option<&str>,
 ) -> bool {
-    if !state.initialized || state.removedNodeIds.contains(nodeId) {
+    if !state.initialized {
         return false;
     }
     let Some(identityId) = state.deviceIdentityIds.get(nodeId) else {
@@ -939,9 +924,7 @@ fn clearingIdentityLeavesNoAdministrator(state: &NetworkControlState, nodeId: &s
         .deviceIdentityIds
         .iter()
         .any(|(existingNodeId, identityId)| {
-            existingNodeId != nodeId
-                && identityId == "admin"
-                && !state.removedNodeIds.contains(existingNodeId)
+            existingNodeId != nodeId && identityId == "admin"
         })
 }
 
@@ -949,14 +932,11 @@ fn clearingIdentityLeavesNoAdministrator(state: &NetworkControlState, nodeId: &s
 #[allow(non_snake_case)]
 fn nodeIsSoleAdministrator(state: &NetworkControlState, nodeId: &str) -> bool {
     matches!(state.deviceIdentityIds.get(nodeId), Some(identityId) if identityId == "admin")
-        && !state.removedNodeIds.contains(nodeId)
         && !state
             .deviceIdentityIds
             .iter()
             .any(|(existingNodeId, identityId)| {
-                existingNodeId != nodeId
-                    && identityId == "admin"
-                    && !state.removedNodeIds.contains(existingNodeId)
+                existingNodeId != nodeId && identityId == "admin"
             })
 }
 
