@@ -770,8 +770,27 @@ fn is_storage_link(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Resolves the deepest existing ancestor so platform aliases such as
+/// Android's /data/user/0 become their physical targets before validation.
+fn resolve_existing_prefix(path: &Path) -> PathBuf {
+    let mut prefix = path.to_path_buf();
+    let mut tail = Vec::new();
+    while !prefix.as_os_str().is_empty() && !prefix.exists() {
+        match (prefix.parent(), prefix.file_name()) {
+            (Some(parent), Some(name)) => { tail.push(name.to_os_string()); prefix = parent.to_path_buf(); }
+            _ => break,
+        }
+    }
+    match fs::canonicalize(&prefix) {
+        Ok(mut resolved) => { for part in tail.iter().rev() { resolved.push(part); } resolved }
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// Validates an absolute data directory independently of business bootstrap parsing.
 fn absolute_root(path: &Path) -> Result<PathBuf, String> {
+    let resolved = resolve_existing_prefix(path);
+    let path = resolved.as_path();
     if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)) {
         return Err("Data roots must be normalized absolute directories".into());
     }
