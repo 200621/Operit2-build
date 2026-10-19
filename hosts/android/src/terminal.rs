@@ -23,7 +23,9 @@ use crate::runtime_common::requiredAndroidRuntimePath;
 use std::ptr;
 
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
-const PTY_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// Raised from 1MB: long command outputs were silently truncated at the head
+/// by the ring buffer. 16MB stays a bounded rolling window.
+const PTY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PTY_PROMPT_MARKER_PREFIX: &[u8] = b"\x1b]133;OperitPrompt=";
 const PTY_PROMPT_MARKER_END: u8 = 7;
 const COMMAND_CANCEL_SETTLE_TIMEOUT_MS: u64 = 3000;
