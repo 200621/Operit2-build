@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::package::{LocalizedText, ToolPackage};
 use crate::toolpkg::ToolPkgApiVersion::{
-    currentToolPkgApiVersionText, requireSupportedToolPkgApiVersion, ToolPkgApiVersion,
+    defaultToolPkgApiVersionText, requireSupportedToolPkgApiVersion, ToolPkgApiVersion,
 };
 use crate::toolpkg::ToolPkgCommonPluginConstants::*;
 use crate::toolpkg::ToolPkgTemplateModels::{
@@ -633,7 +633,7 @@ pub struct ToolPkgManifest {
     pub toolpkgId: String,
     #[serde(default)]
     pub version: String,
-    #[serde(rename = "api_version", default = "currentToolPkgApiVersionText")]
+    #[serde(rename = "api_version", default = "defaultToolPkgApiVersionText")]
     pub apiVersion: String,
     /// Names the self-contained TypeScript client distributed to dependent packages.
     #[serde(rename = "public_api", default)]
@@ -2629,17 +2629,24 @@ mod logo_tests {
 mod api_compatibility_tests {
     use super::*;
 
-    /// Verifies archive loading preserves the declared API contract through registration and runtime metadata.
+    /// Verifies omitted and explicit API contracts reach registration, runtime metadata, and prerequisites.
     #[test]
-    fn loads_explicit_legacy_and_current_contracts() {
-        for version in ["1.0.0", "1.0.1", "2.0.0"] {
-            let manifest = serde_json::json!({
+    fn loads_omitted_and_explicit_api_contracts() {
+        for (declared, version) in [
+            (None, "1.0.0"),
+            (Some("1.0.0"), "1.0.0"),
+            (Some("1.0.1"), "1.0.1"),
+            (Some("2.0.0"), "2.0.0"),
+        ] {
+            let mut manifest = serde_json::json!({
                 "schema_version": 1,
                 "toolpkg_id": "compat_fixture",
-                "api_version": version,
                 "main": "main.js"
-            })
-            .to_string();
+            });
+            if let Some(declared) = declared {
+                manifest["api_version"] = serde_json::json!(declared);
+            }
+            let manifest = manifest.to_string();
             let entries = BTreeMap::from([
                 ("manifest.json".to_string(), manifest),
                 ("main.js".to_string(), "exports.registerToolPkg = function() {};".to_string()),
@@ -2843,15 +2850,15 @@ mod api_compatibility_tests {
         assert!(templates[0].file_bytes("main.js").is_none());
     }
 
-    /// Keeps the existing current-contract default explicit and rejects undeclared future contracts.
+    /// Defaults omitted manifest versions to the original contract and rejects unadmitted future versions.
     #[test]
-    fn preserves_manifest_default_and_rejects_future_contracts() {
+    fn defaults_manifest_to_v1_and_rejects_future_contracts() {
         let manifest = parseToolPkgManifest(
-            r#"{"toolpkg_id":"current_fixture","main":"main.js"}"#,
+            r#"{"toolpkg_id":"legacy_fixture","main":"main.js"}"#,
             "manifest.json",
         )
-        .expect("current manifest must parse");
-        assert_eq!(manifest.apiVersion, "2.0.0");
+        .expect("legacy manifest must parse");
+        assert_eq!(manifest.apiVersion, "1.0.0");
         for version in ["1.0.2", "2.0.1", "3.0.0"] {
             assert!(requireSupportedToolPkgApiVersion(version).is_err());
         }

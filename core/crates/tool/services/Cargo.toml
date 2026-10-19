@@ -11,7 +11,7 @@ documentation = "https://docs.rs/operit-tools"
 
 [features]
 default = ["javascript"]
-javascript = ["dep:quickjs-wasm-rs", "dep:wasm-bindgen", "dep:web-sys"]
+javascript = []
 
 [dependencies]
 async-trait.workspace = true
@@ -42,17 +42,6 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 url = "2"
 uuid.workspace = true
 zip.workspace = true
-
-[target.'cfg(all(not(target_arch = "wasm32"), not(any(target_os = "android", target_os = "ios", target_env = "ohos"))))'.dependencies]
-rquickjs.workspace = true
-
-[target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-rquickjs = { workspace = true, features = ["bindgen"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-quickjs-wasm-rs = { version = "3.1.0", optional = true }
-wasm-bindgen = { version = "0.2", optional = true }
-web-sys = { version = "0.3", features = ["Window", "XmlHttpRequest"], optional = true }
 
 [build-dependencies]
 operit-plugin-sdk-codegen = { version = "=2.0.0-preview.15", path = "../../plugin/codegen" }

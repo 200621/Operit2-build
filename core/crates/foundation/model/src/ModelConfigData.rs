@@ -338,6 +338,14 @@ impl Default for ModelContextSpec {
     }
 }
 
+impl ModelContextSpec {
+    /// Converts the persisted kilo-token limit into an absolute token budget.
+    #[allow(non_snake_case)]
+    pub fn maxContextTokens(&self) -> i32 {
+        (f64::from(self.maxContextLength) * 1000.0).clamp(0.0, f64::from(i32::MAX)) as i32
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct ModelSummarySettings {
@@ -356,6 +364,19 @@ impl Default for ModelSummarySettings {
                 ModelConfigDefaults::DEFAULT_ENABLE_SUMMARY_BY_MESSAGE_COUNT,
             summaryMessageCountThreshold:
                 ModelConfigDefaults::DEFAULT_SUMMARY_MESSAGE_COUNT_THRESHOLD,
+        }
+    }
+}
+
+impl ModelSummarySettings {
+    /// Returns the threshold as a context ratio, accepting legacy percent values.
+    #[allow(non_snake_case)]
+    pub fn tokenThresholdRatio(&self) -> f64 {
+        let threshold = f64::from(self.summaryTokenThreshold);
+        if threshold > 1.0 {
+            (threshold / 100.0).clamp(0.0, 1.0)
+        } else {
+            threshold.clamp(0.0, 1.0)
         }
     }
 }
@@ -678,4 +699,42 @@ pub fn default_deepseek_model() -> ModelProfile {
         BuiltinToolExclusivity::CanMixWithExternalTools,
     )]);
     model
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_budget_uses_decimal_kilo_tokens() {
+        assert_eq!(
+            ModelContextSpec {
+                maxContextLength: 128.0
+            }
+            .maxContextTokens(),
+            128_000
+        );
+        assert_eq!(
+            ModelContextSpec {
+                maxContextLength: 1000.0
+            }
+            .maxContextTokens(),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn summary_threshold_accepts_ratio_and_legacy_percent() {
+        let ratio = ModelSummarySettings {
+            summaryTokenThreshold: 0.7,
+            ..ModelSummarySettings::default()
+        };
+        assert!((ratio.tokenThresholdRatio() - 0.7).abs() < 1e-6);
+
+        let percent = ModelSummarySettings {
+            summaryTokenThreshold: 70.0,
+            ..ModelSummarySettings::default()
+        };
+        assert!((percent.tokenThresholdRatio() - 0.7).abs() < 1e-6);
+    }
 }

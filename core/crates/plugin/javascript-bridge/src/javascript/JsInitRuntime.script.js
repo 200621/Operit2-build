@@ -221,21 +221,35 @@
     // Explicit Promise continuations (including lowered async functions) belong to
     // their subscribing call, not to the call which happens to resolve a shared Promise.
     var originalThen = Promise.prototype.then;
+    /** Captures subscription ownership even after that call's session was cancelled. */
     Promise.prototype.then = function(onFulfilled, onRejected) {
         var ownerCallId = normalizeCallId(root.__operitCurrentCallId);
-        if (!getCallState(ownerCallId)) {
+        if (!ownerCallId) {
             return originalThen.call(this, onFulfilled, onRejected);
         }
+        /** Runs each continuation under its subscribing call's exact identity. */
         function bindContinuation(handler) {
             if (typeof handler !== 'function') return handler;
+            /** Isolates cancelled callbacks from the surrounding live runtime. */
             return function(value) {
                 var ownerState = getCallState(ownerCallId);
-                // Never borrow another session if the originating call was cancelled.
-                if (!ownerState) {
-                    return handler(value);
-                }
                 var previousCallId = normalizeCallId(root.__operitCurrentCallId);
                 var previousRuntime = root.__operit_call_runtime_ref;
+                if (!ownerState) {
+                    root.__operitCurrentCallId = ownerCallId;
+                    delete root.__operit_call_runtime_ref;
+                    try { return handler(value); }
+                    finally {
+                        if (normalizeCallId(root.__operitCurrentCallId) === ownerCallId) {
+                            root.__operitCurrentCallId = liveCallId(previousCallId);
+                            if (root.__operitCurrentCallId && previousRuntime && typeof previousRuntime === 'object') {
+                                root.__operit_call_runtime_ref = previousRuntime;
+                            } else {
+                                delete root.__operit_call_runtime_ref;
+                            }
+                        }
+                    }
+                }
                 ownerState.activatedAt = nextCallActivation();
                 root.__operitCurrentCallId = ownerCallId;
                 root.__operit_call_runtime_ref = ownerState.callRuntime;

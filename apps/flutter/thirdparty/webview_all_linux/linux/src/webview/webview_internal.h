@@ -3,6 +3,10 @@
 
 #include "plugin/webview_all_linux_plugin_private.h"
 
+// Dispatches pointer input accepted by Flutter's platform-view hit test.
+void dispatch_linux_webview_pointer(LinuxWebView* webview, FlValue* args,
+                                    FlMethodCall* method_call);
+
 void send_event(LinuxWebView *webview, FlValue *event);
 void update_history(LinuxWebView *webview);
 void emit_url_change(LinuxWebView *webview);

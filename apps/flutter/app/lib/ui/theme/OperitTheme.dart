@@ -265,9 +265,7 @@ class _OperitThemeState extends State<OperitTheme> {
               widget.initialThemePreferenceSnapshot.themeMode;
     return _OperitThemeScope(
       controller: _controller,
-      child: Stack(
-        alignment: Alignment.topLeft,
-        fit: StackFit.expand,
+      child: ThemeRenderStack(
         children: <Widget>[
           if (retainApplication)
             Offstage(

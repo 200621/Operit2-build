@@ -95,7 +95,22 @@ args 发送。接收侧检查序号和认证标签，解密并恢复原始 Call�
 
 匿名连接不能进入普通业务 dispatch。认证后每个业务入口仍重校授权。
 配对授权方向、Space 成员准入、业务权限分别检查，单向配对不产生反向授权。
-当前握手使用 `PeerStateStore::PAIRING_SERVICE_VERSION = 1`。
+
+握手包含两个独立版本：
+
+* `PeerStateStore::PAIRING_SERVICE_VERSION = 1` 是持久化凭据格式
+  （`StoredInbound` / `StoredOutbound`），保持不变；已有配对继续有效。
+* `Hello.pairingProtocol` / `HelloReply.pairingProtocol` 协商新配对流程，当前为 `2`。
+  新建配对要求双方都支持 `2`；旧版本会收到 `PAIRING_PROTOCOL_UPGRADE_REQUIRED`，
+  需要先升级，而不是静默退回旧确认方式。
+
+`start` 阶段仍以 X25519 + transcript 绑定交换临时密钥并把 root 存入 pending。
+`finish` 阶段不再发送可用 root 离线校验的 `HMAC(root, id||code)`，而是把六位配对码
+作为 SPAKE2（Ed25519 group）口令：PAKE 消息通过 transcript 派生的身份串绑定到本次
+交换，PAKE 输出再与 start root、finish transcript 一起 HKDF 出长期 session secret。
+因此主动中间人即使分别与两端完成 X25519 交换，也必须通过完整在线交换逐次猜测配对码，
+无法离线验证。确认次数同时受单个 pending 的 5 次上限和跨会话令牌桶（按来源与全局
+两层）限制；`start` 也受创建速率限制，避免通过轮换会话放大猜测窗口。
 
 HTTP 承载统一的 Link 消息。配对、认证和会话管理使用相同的 Call 消息入口，
 由 Peer runtime 校验身份和权限。

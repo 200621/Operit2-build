@@ -103,7 +103,7 @@ class _DataRescueScreenState extends State<_DataRescueScreen> {
 
   /// Opens the raw startup record and reports malformed configuration without hiding it.
   Future<void> _open() async {
-    await _run('正在获取独占存储访问权限…', () async {
+    await _run('正在获取独占存储访问权限，请关闭其他 Operit 窗口及后台会话…', () async {
       final startup = await _map({'operation': 'open'});
       final defaults = Map<String, Object?>.from(
         startup['defaultRoots']! as Map,

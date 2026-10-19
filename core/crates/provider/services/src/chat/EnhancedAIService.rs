@@ -2944,7 +2944,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Retains the completed reply and dispatches its existing completion callbacks.
+    /// Retains the completed reply and publishes its completion notification.
     fn finalizeAssistantResponse(
         &mut self,
         context: &mut MessageExecutionContext,
@@ -2955,12 +2955,9 @@ impl EnhancedAIService {
         participantName: Option<String>,
         avatarUri: Option<String>,
         notifyReplyOverride: Option<bool>,
-        callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
+        _callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
     ) {
         self.shared_state().last_reply_content = Some(content.to_string());
-        if let Some(callbacks) = callbacks {
-            callbacks.onTokenLimitExceeded();
-        }
         self.notifyReplyCompleted(chatId, participantName, avatarUri, notifyReplyOverride);
     }
 

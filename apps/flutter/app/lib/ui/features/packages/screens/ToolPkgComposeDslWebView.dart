@@ -762,26 +762,14 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
     super.dispose();
   }
 
-  /// Linux hosts the WebView in a native GTK overlay above Flutter's entire
-  /// layer tree, so a covering route would otherwise paint behind it. Other
-  /// platforms composite platform views with Flutter and keep the view visible.
-  bool get _hidesPlatformViewUnderCoveringRoutes =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
-
+  /// Composes the WebView with Flutter overlays through the shared platform view.
   @override
   Widget build(BuildContext context) {
     final errorText = _error;
-    // Keep the page mounted but stop painting it while a dialog route is on
-    // top; the Linux widget hides its native overlay once it is not painted.
-    final route = ModalRoute.of(context);
-    final hidePlatformView =
-        _hidesPlatformViewUnderCoveringRoutes &&
-        route != null &&
-        !route.isCurrent;
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        Offstage(offstage: hidePlatformView, child: _webViewWidget),
+        _webViewWidget,
         if (_progress > 0 && _progress < 100)
           const Positioned(
             top: 0,

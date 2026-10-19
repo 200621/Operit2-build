@@ -1043,6 +1043,7 @@ class _ProviderEditorDialogState extends State<_ProviderEditorDialog> {
         child: Form(
           key: _formKey,
           child: SingleChildScrollView(
+            padding: const EdgeInsets.only(top: 12, bottom: 8),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -4853,7 +4854,7 @@ class _ModelInlineSettingsFormState extends State<_ModelInlineSettingsForm> {
     _enableSummary = summary.enableSummary;
     final rawContext = widget.initialConfig.context.maxContextLength;
     final normalizedContext = rawContext >= 10000
-        ? (rawContext / 1024).roundToDouble()
+        ? (rawContext / 1000).roundToDouble()
         : rawContext;
     _maxContextLengthController = TextEditingController(
       text: normalizedContext > 0

@@ -5854,6 +5854,10 @@ fn buildConditionCapabilitiesSnapshot(
             ConditionValue::Bool(platformName == "web"),
         ),
         (
+            "platform.ohos".to_string(),
+            ConditionValue::Bool(platformName == "ohos"),
+        ),
+        (
             "ui.virtual_display".to_string(),
             ConditionValue::Bool(false),
         ),
@@ -5907,6 +5911,34 @@ fn hasToolPkgExtension(sourcePath: &str) -> bool {
         .extension()
         .and_then(|value| value.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("toolpkg"))
+}
+
+#[cfg(test)]
+mod condition_platform_tests {
+    use super::*;
+
+    /// Exposes each supported platform flag through the shared condition capability snapshot.
+    #[test]
+    fn platform_flags_include_ohos_without_matching_other_platforms() {
+        let platforms = [
+            (HostPlatform::Windows, "windows"),
+            (HostPlatform::Linux, "linux"),
+            (HostPlatform::Android, "android"),
+            (HostPlatform::Macos, "macos"),
+            (HostPlatform::Ios, "ios"),
+            (HostPlatform::Web, "web"),
+            (HostPlatform::Ohos, "ohos"),
+        ];
+        for (platform, name) in &platforms {
+            let mut environment = HostEnvironmentDescriptor::android();
+            environment.platform = platform.clone();
+            let capabilities = buildConditionCapabilitiesSnapshot(&environment);
+            assert_eq!(capabilities.get("platform.name"), Some(&ConditionValue::Str((*name).into())));
+            for (_, flag) in &platforms {
+                assert_eq!(capabilities.get(&format!("platform.{flag}")), Some(&ConditionValue::Bool(name == flag)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

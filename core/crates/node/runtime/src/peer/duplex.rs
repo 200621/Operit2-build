@@ -622,6 +622,7 @@ mod tests {
             listeners:AsyncMutex::default(),connections:Mutex::default(),pooledChannels:Mutex::default(),liveChannels:Mutex::default(),callableInbound:Mutex::default(),dialStates:Mutex::default(),advertisements:Mutex::default(),slots:Arc::new(tokio::sync::Semaphore::new(2)),
             active:Mutex::default(),changes:broadcast::channel(32).0,availability:Mutex::new(None),lifecycle:AsyncMutex::new(()),mutation:Mutex::new(()),
             connectLocks:Mutex::default(),sharedSessions:Mutex::default(),
+            pairingThrottle:Mutex::new(PairingThrottle::default()),
         })};(service,router)
     }
     #[test]

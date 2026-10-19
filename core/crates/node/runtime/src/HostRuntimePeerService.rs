@@ -24,7 +24,20 @@ use live_channel::LiveChannel;
 #[path = "peer/duplex.rs"] mod duplex;
 #[path = "peer/space_channel.rs"] mod space_channel;
 #[path = "peer/availability.rs"] mod availability;
+#[path = "peer/pairing_throttle.rs"] mod pairing_throttle;
+use pairing_throttle::{pairingSource, PairingThrottle};
 const HANDSHAKE: &str = "$peer.pairing";
+
+/// Pairing handshake protocol. Version 2 replaces the old
+/// `HMAC(root, id||code)` confirmation, which an active man in the middle could
+/// verify offline, with a SPAKE2 exchange keyed by the six-digit code. Stored
+/// session credentials stay version 1: only new pairings negotiate this.
+const PAIRING_PROTOCOL_VERSION: u32 = 2;
+/// Rejects a pairing whose peer still speaks the offline-verifiable protocol.
+const PAIRING_PROTOCOL_UPGRADE_REQUIRED: &str =
+    "Both devices must run a version with the SPAKE2 pairing protocol";
+/// Confirmation guesses allowed for one pending pairing.
+const PAIRING_MAX_ATTEMPTS: u8 = 5;
 
 const PAIRING_LIFETIME_MS: i64 = 300_000;
 /// Advertises that this device accepts calls over a connection the peer opened,
@@ -103,13 +116,32 @@ struct Hello {
     version: u32, nodeId: String, expectedNodeId: String, info: LinkDeviceInfo,
     public: Vec<u8>, purpose: String, sessionId: String,
     #[serde(default)] duplex: bool,
+    /// Pairing handshake protocol. Version 2 requires SPAKE2 confirmation;
+    /// older peers omit it and may not create new pairings.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pairingProtocol: Option<u32>,
 }
 #[derive(Serialize, Deserialize)]
-struct HelloReply { transcript: crypto::Transcript, info: LinkDeviceInfo, #[serde(default)] duplex: bool }
+struct HelloReply {
+    transcript: crypto::Transcript, info: LinkDeviceInfo, #[serde(default)] duplex: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pairingProtocol: Option<u32>,
+}
 #[derive(Serialize, Deserialize)]
-struct Authorization { keyProof: Vec<u8> }
+struct Authorization {
+    keyProof: Vec<u8>,
+    /// SPAKE2 message for a `finish` handshake. It is only processed after the
+    /// sender proved knowledge of the pairing root, so unauthenticated traffic
+    /// cannot make this device derive a PAKE key.
+    #[serde(default, skip_serializing_if = "Option::is_none")] spake: Option<Vec<u8>>,
+}
 #[derive(Serialize, Deserialize)]
-struct Authorized { proof: Vec<u8>, pairingId: String }
+struct Authorized {
+    proof: Vec<u8>,
+    pairingId: String,
+    /// SPAKE2 message for the receiver side of a `finish` handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")] spake: Option<Vec<u8>>,
+    /// Proof that the receiver derived the same code-authenticated secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")] spakeProof: Option<Vec<u8>>,
+}
 
 /// Resource policy chosen by the embedding app, independent of OS/transport.
 #[derive(Clone, Copy)]
@@ -159,6 +191,8 @@ struct State {
     lifecycle: AsyncMutex<()>,
     connectLocks: Mutex<BTreeMap<String, Weak<AsyncMutex<()>>>>,
     sharedSessions: Mutex<BTreeMap<String, Arc<Channel>>>,
+    /// Cross-session budgets for unauthenticated pairing work.
+    pairingThrottle: Mutex<PairingThrottle>,
     /// 本节点的配对/撤销持久化操作串行化，不持锁执行网络 I/O。
     mutation: Mutex<()>,
 }
@@ -210,6 +244,7 @@ impl HostRuntimePeerService {
                 lifecycle: AsyncMutex::new(()),
                 connectLocks: Mutex::new(BTreeMap::new()),
                 sharedSessions: Mutex::new(BTreeMap::new()),
+                pairingThrottle: Mutex::new(PairingThrottle::default()),
                 mutation: Mutex::new(()),
             }),
         });
@@ -272,14 +307,20 @@ impl HostRuntimePeerService {
         self.state.link.connect(self.state.host.clone(), PeerEndpoint { nodeId: self.state.nodeId.clone(), address: String::new() }, target, transport).await.map_err(error)
     }
     /// Exchanges ephemeral keys and verifies identity-bound proofs over every transport.
+    ///
+    /// `pairingCode` is present only for the `finish` handshake. It turns the
+    /// six-digit code into a SPAKE2 password instead of an offline-verifiable
+    /// MAC message. On success the returned secret is the SPAKE2-derived session
+    /// key; for `start` it remains the X25519 root stored in the pending record.
     async fn handshake(&self, raw: Arc<dyn PeerConnection>, purpose: &str, sessionId: &str,
-        saved: Option<&[u8]>,
+        saved: Option<&[u8]>, pairingCode: Option<&str>,
     ) -> Result<(Arc<Channel>, String, LinkDeviceInfo, Vec<u8>, String), CoreLinkError> {
         let (private, public) = crypto::ephemeral()?;
         let hello = Hello { version: PAIRING_SERVICE_VERSION, nodeId: self.state.nodeId.clone(),
             expectedNodeId: raw.target().nodeId.clone(),
             info: self.state.store.announcedDeviceInfo(&self.state.info), public: public.clone(),
-            purpose: purpose.into(), sessionId: sessionId.into(), duplex: DUPLEX_CHANNELS };
+            purpose: purpose.into(), sessionId: sessionId.into(), duplex: DUPLEX_CHANNELS,
+            pairingProtocol: Some(PAIRING_PROTOCOL_VERSION) };
         let reply: HelloReply = rawCall(&raw, "hello", &hello).await?;
         let t = &reply.transcript;
         if t.version != PAIRING_SERVICE_VERSION || t.clientNodeId != self.state.nodeId || t.clientPublic != public
@@ -288,21 +329,58 @@ impl HostRuntimePeerService {
             || (!sessionId.is_empty() && t.sessionId != sessionId) {
             return Err(error("Handshake identity/transcript mismatch"));
         }
+        if matches!(purpose, "start" | "finish")
+            && reply.pairingProtocol != Some(PAIRING_PROTOCOL_VERSION) {
+            return Err(CoreLinkError::new(
+                "PAIRING_PROTOCOL_UPGRADE_REQUIRED",
+                PAIRING_PROTOCOL_UPGRADE_REQUIRED,
+            ));
+        }
         let context = crypto::transcript(t)?;
         let dh = crypto::agree(private, &t.serverPublic)?;
         let root = crypto::derive(&dh, &context, b"operit-pairing-root-v1")?;
         let key = match saved { Some(saved) => crypto::derive(&dh, saved, &context)?, None => root };
+        let finishing = purpose == "finish";
+        let spake = if finishing {
+            let code = pairingCode.ok_or_else(|| error("Pairing confirmation code is required"))?;
+            let startRoot = saved.ok_or_else(|| error("Pairing confirmation root is missing"))?;
+            let (clientId, serverId) = crypto::pairingIdentities(&context);
+            let (state, message) = crypto::spakeStart(true, code.as_bytes(), &clientId, &serverId)?;
+            let state = (state, startRoot.to_vec());
+            (Some(state), Some(message))
+        } else {
+            (None, None)
+        };
         let accepted: Authorized = rawCall(&raw, "authorize", &Authorization {
             keyProof: crypto::proof(&key, &context, b"client"),
+            spake: spake.1,
         }).await?;
         crypto::verify(&key, &context, b"server", &accepted.proof)?;
         if accepted.pairingId != t.sessionId { return Err(error("Pairing correlation mismatch")); }
+        let storedSecret = match spake.0 {
+            Some((state, startRoot)) => {
+                let serverMessage = accepted.spake.ok_or_else(|| CoreLinkError::new(
+                    "PAIRING_PROTOCOL_UPGRADE_REQUIRED",
+                    PAIRING_PROTOCOL_UPGRADE_REQUIRED,
+                ))?;
+                let spakeKey = crypto::spakeFinish(state, &serverMessage)?;
+                let sessionSecret = crypto::pairingSessionSecret(&spakeKey, &startRoot, &context)?;
+                let proof = accepted.spakeProof.ok_or_else(|| error("Pairing confirmation proof is missing"))?;
+                crypto::verify(&sessionSecret, &context, b"server-spake", &proof)?;
+                sessionSecret.to_vec()
+            }
+            None => root.to_vec(),
+        };
         let id = t.sessionId.clone(); let peerNodeId = t.serverNodeId.clone();
         let peerDuplex = reply.duplex; let info = reply.info;
-        let channel = Channel::new(raw, &key, &context, true)?;
+        let channelKey = if finishing {
+            let secret: [u8; 32] = storedSecret.as_slice().try_into().map_err(|_| error("Invalid pairing secret"))?;
+            secret
+        } else { key };
+        let channel = Channel::new(raw, &channelKey, &context, true)?;
         channel.setPeerDuplex(peerDuplex);
         channel.setSpaceScoped(purpose == "space");
-        Ok((channel, id, info, root.to_vec(), peerNodeId))
+        Ok((channel, id, info, storedSecret, peerNodeId))
     }
     /// Gets the per-peer pool lock without retaining a global lock during network I/O.
     fn channelPool(&self, node: &str) -> Arc<AsyncMutex<Vec<Arc<MultiplexedChannel>>>> {
@@ -576,7 +654,7 @@ impl HostRuntimePeerService {
         }
         let root = BASE64.decode(&secret).map_err(|_| error("Invalid stored credential"))?;
         let raw = self.raw(target, transport).await?;
-        let result = self.handshake(raw.clone(), purpose, &sessionId, Some(&root)).await;
+        let result = self.handshake(raw.clone(), purpose, &sessionId, Some(&root), None).await;
         let (channel, _, _, _, _) = match result { Ok(result) => result, Err(e) => { raw.close().await; return Err(e); } };
         let reusable = if purpose == "session" && raw.requiresSessionReuse() {
             match self.supportsSessionReturn(&channel).await {
@@ -633,12 +711,19 @@ impl HostRuntimePeerService {
                 return sendError(&raw, helloRequest.requestId, revoked).await;
             }
         }
+        if matches!(hello.purpose.as_str(), "start" | "finish")
+            && hello.pairingProtocol != Some(PAIRING_PROTOCOL_VERSION) {
+            return sendError(&raw, helloRequest.requestId, CoreLinkError::new(
+                "PAIRING_PROTOCOL_UPGRADE_REQUIRED", PAIRING_PROTOCOL_UPGRADE_REQUIRED)).await;
+        }
         // 沿用持久化的 sessionId/sessionSecret；配对事务仍受过期时间和尝试上限保护。
         let saved = match hello.purpose.as_str() {
             "start" => None,
-            "finish" => { let p = self.pending(true, &hello.sessionId)?;
-                if p.clientDeviceId != hello.nodeId { return Err(error("Pairing identity mismatch")); }
-                Some(p.root) },
+            "finish" => match self.pending(true, &hello.sessionId) {
+                Ok(p) if p.clientDeviceId == hello.nodeId => Some(p.root),
+                Ok(_) => return sendError(&raw, helloRequest.requestId, error("Pairing identity mismatch")).await,
+                Err(e) => return sendError(&raw, helloRequest.requestId, e).await,
+            },
             "space" => Some(BASE64.decode(&self.spaceInbound(&hello.sessionId, &hello.nodeId)?.secret)
                 .map_err(|_| error("Invalid Space credential"))?),
             _ => {
@@ -648,6 +733,22 @@ impl HostRuntimePeerService {
                 Some(BASE64.decode(&record.sessionSecret).map_err(|_| error("Invalid stored credential"))?)
             },
         };
+        // A six-digit code is only safe when guessing it costs an online
+        // exchange. A finish token is charged only after its pending record
+        // checks out, so random ids cannot drain the global budget.
+        let source = pairingSource(&raw);
+        let allowed = {
+            let mut throttle = self.state.pairingThrottle.lock().unwrap();
+            match hello.purpose.as_str() {
+                "start" => throttle.allowCreation(&source, currentTimeMillis()),
+                "finish" => throttle.allowConfirmation(&source, currentTimeMillis()),
+                _ => true,
+            }
+        };
+        if !allowed {
+            return sendError(&raw, helloRequest.requestId, CoreLinkError::new(
+                "PAIRING_RATE_LIMITED", "Too many pairing attempts; wait before trying again")).await;
+        }
         let (private, public) = crypto::ephemeral()?;
         let id = if hello.purpose == "start" { uuid::Uuid::new_v4().to_string() } else { hello.sessionId.clone() };
         let transcript = crypto::Transcript { version: PAIRING_SERVICE_VERSION, sessionId: id.clone(),
@@ -658,45 +759,85 @@ impl HostRuntimePeerService {
         let root = crypto::derive(&dh, &context, b"operit-pairing-root-v1")?;
         let key = match &saved { Some(saved) => crypto::derive(&dh, saved, &context)?, None => root };
         sendValue(&raw, helloRequest.requestId, HelloReply { transcript, duplex: DUPLEX_CHANNELS,
-            info: self.state.store.announcedDeviceInfo(&self.state.info) }).await?;
+            info: self.state.store.announcedDeviceInfo(&self.state.info),
+            pairingProtocol: Some(PAIRING_PROTOCOL_VERSION) }).await?;
         let request = self.readHandshake(&raw, "authorize").await?;
         let authorization: Authorization = fromCoreValue(request.args).map_err(|e| error(e.to_string()))?;
+        // The X25519 proof authenticates this channel and costs no guess, so
+        // reject it before a confirmation attempt is recorded.
+        if let Err(e) = crypto::verify(&key, &context, b"client", &authorization.keyProof) {
+            return sendError(&raw, request.requestId, e).await;
+        }
+        let mut confirmation = None;
         let admission = (|| {
-            crypto::verify(&key, &context, b"client", &authorization.keyProof)?;
-            if hello.purpose == "start" {
-                let _guard = self.state.mutation.lock().unwrap();
-                // The initiator may have forgotten this one-way pairing. A new
-                // challenge is allowed, but must not revoke the old credential.
-                self.state.store.putPending(RUNTIME_LINK_ACCESS_PENDING_PAIRINGS_PATH, &id, &Pending {
-                    version: PAIRING_SERVICE_VERSION, id: id.clone(), clientDeviceId: hello.nodeId.clone(), peerNodeId: self.state.nodeId.clone(),
-                    endpoint: String::new(), transport: raw.transport(), info: hello.info.clone(),
-                    root: root.to_vec(), expires: currentTimeMillis() + PAIRING_LIFETIME_MS, attempts: 0,
-                    confirmationCode: Some(crypto::pairingCode()?),
-                }, currentTimeMillis(), self.state.limits.pendingPairings).map_err(error)?;
-                self.changed();
+            match hello.purpose.as_str() {
+                "start" => {
+                    let _guard = self.state.mutation.lock().unwrap();
+                    // The initiator may have forgotten this one-way pairing. A new
+                    // challenge is allowed, but must not revoke the old credential.
+                    self.state.store.putPending(RUNTIME_LINK_ACCESS_PENDING_PAIRINGS_PATH, &id, &Pending {
+                        version: PAIRING_SERVICE_VERSION, id: id.clone(), clientDeviceId: hello.nodeId.clone(), peerNodeId: self.state.nodeId.clone(),
+                        endpoint: String::new(), transport: raw.transport(), info: hello.info.clone(),
+                        root: root.to_vec(), expires: currentTimeMillis() + PAIRING_LIFETIME_MS, attempts: 0,
+                        confirmationCode: Some(crypto::pairingCode()?),
+                    }, currentTimeMillis(), self.state.limits.pendingPairings).map_err(error)?;
+                    self.changed();
+                }
+                "finish" => {
+                    let _guard = self.state.mutation.lock().unwrap();
+                    let mut pending = self.pending(true, &id)?;
+                    if pending.attempts >= PAIRING_MAX_ATTEMPTS {
+                        return Err(error("Confirmation attempt limit reached"));
+                    }
+                    // Persist the guess before running the PAKE so a crash or a
+                    // concurrent confirmation cannot refund attempts.
+                    pending.attempts += 1;
+                    self.state.store.putRecord(RUNTIME_LINK_ACCESS_PENDING_PAIRINGS_PATH, &id, &pending).map_err(error)?;
+                    let code = pending.confirmationCode.as_deref()
+                        .ok_or_else(|| error("Receiver confirmation missing"))?;
+                    let clientMessage = authorization.spake.as_deref().ok_or_else(|| CoreLinkError::new(
+                        "PAIRING_PROTOCOL_UPGRADE_REQUIRED", PAIRING_PROTOCOL_UPGRADE_REQUIRED))?;
+                    let (clientId, serverId) = crypto::pairingIdentities(&context);
+                    let (state, message) = crypto::spakeStart(false, code.as_bytes(), &clientId, &serverId)?;
+                    let spakeKey = crypto::spakeFinish(state, clientMessage)?;
+                    let sessionSecret = crypto::pairingSessionSecret(&spakeKey, &pending.root, &context)?;
+                    confirmation = Some((message, sessionSecret));
+                }
+                _ => {},
             }
             Ok(())
         })();
         if let Err(e) = admission { return sendError(&raw, request.requestId, e).await; }
-        sendValue(&raw, request.requestId, Authorized { proof: crypto::proof(&key, &context, b"server"), pairingId: id.clone() }).await?;
+        let (spakeMessage, sessionSecret) = match confirmation {
+            Some((message, secret)) => (Some(message), Some(secret)),
+            None => (None, None),
+        };
+        sendValue(&raw, request.requestId, Authorized {
+            proof: crypto::proof(&key, &context, b"server"),
+            pairingId: id.clone(),
+            spake: spakeMessage,
+            spakeProof: sessionSecret.as_ref().map(|secret| crypto::proof(secret, &context, b"server-spake")),
+        }).await?;
         if hello.purpose == "start" { return Ok(()); }
-        let channel = Channel::new(raw.clone(), &key, &context, false)?;
+        // The confirmation channel is keyed by the PAKE secret bound to the code
+        // and transcript, not by the X25519 root an active relay could learn.
+        let channelKey = sessionSecret.unwrap_or(key);
+        let channel = Channel::new(raw.clone(), &channelKey, &context, false)?;
         channel.setPeerDuplex(hello.duplex);
         if hello.purpose == "finish" {
             let Some(PeerMessage::Request(CoreLinkRequest::Call(request))) = channel.receive().await? else { return Err(error("Encrypted confirmation Call required")); };
             if request.target != HANDSHAKE || request.methodName != "finish" { return Err(error("Confirmation required before business")); }
             let proof: Vec<u8> = fromCoreValue(request.args).map_err(|e| error(e.to_string()))?;
+            let sessionSecret = sessionSecret.ok_or_else(|| error("Pairing confirmation secret is missing"))?;
             let mut replacing = false;
             let result = (|| {
                 let _guard = self.state.mutation.lock().unwrap();
-                let mut pending = self.pending(true, &id)?;
-                if pending.attempts >= 5 { return Err(error("Confirmation attempt limit reached")); }
-                pending.attempts += 1;
-                self.state.store.putRecord(RUNTIME_LINK_ACCESS_PENDING_PAIRINGS_PATH, &id, &pending).map_err(error)?;
-                let code = pending.confirmationCode.as_deref().ok_or_else(|| error("Receiver confirmation missing"))?;
-                crypto::verify(&pending.root, id.as_bytes(), code.as_bytes(), &proof)?;
+                let pending = self.pending(true, &id)?;
+                // Only a peer that entered the same code derives this key; a
+                // wrong guess fails here after the attempt was already counted.
+                crypto::verify(&sessionSecret, id.as_bytes(), b"finish", &proof)?;
                 let record = StoredInbound { deviceId: hello.nodeId.clone(), deviceInfo: hello.info.clone(),
-                    pairingServiceVersion: PAIRING_SERVICE_VERSION, sessionSecret: BASE64.encode(&pending.root) };
+                    pairingServiceVersion: PAIRING_SERVICE_VERSION, sessionSecret: BASE64.encode(&sessionSecret) };
                 // A first pairing follows the upstream confirmation path.
                 // Only a retained pairing needs revocation, after its new code
                 // is verified. Reuse the same cleanup as explicit local unpair.
@@ -840,7 +981,7 @@ impl RuntimePeerService for HostRuntimePeerService {
             let result = if transport == PeerTransport::Serial {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(20),
-                    self.handshake(raw.clone(), "start", "", None),
+                    self.handshake(raw.clone(), "start", "", None, None),
                 )
                 .await
                 {
@@ -848,7 +989,7 @@ impl RuntimePeerService for HostRuntimePeerService {
                     Err(_) => Err(error("Serial pairing handshake timed out")),
                 }
             } else {
-                self.handshake(raw.clone(), "start", "", None).await
+                self.handshake(raw.clone(), "start", "", None, None).await
             };
             raw.close().await;
             match result {
@@ -898,7 +1039,7 @@ impl RuntimePeerService for HostRuntimePeerService {
             let _guard = self.state.mutation.lock().unwrap();
             let mut p = self.pending(false, id)?;
             self.ensureDeviceUnpaired(&p.peerNodeId)?;
-            if p.attempts >= 5 { return Err(error("Confirmation attempt limit reached")); }
+            if p.attempts >= PAIRING_MAX_ATTEMPTS { return Err(error("Confirmation attempt limit reached")); }
             p.attempts += 1;
             self.state.store.putRecord(RUNTIME_LINK_ACCESS_PENDING_OUTBOUND_PAIRINGS_PATH, id, &p).map_err(error)?;
             // The receiver alone generates the six-digit user code. The encrypted
@@ -910,14 +1051,21 @@ impl RuntimePeerService for HostRuntimePeerService {
             p
         };
         let raw = self.raw(PeerEndpoint { nodeId: pending.peerNodeId.clone(), address: pending.endpoint.clone() }, pending.transport).await?;
+        let mut sessionSecret = None;
         let confirmation = async {
-            let (channel, _, _, _, _) = self.handshake(raw.clone(), "finish", id, Some(&pending.root)).await?;
+            let (channel, _, _, confirmedSecret, _) = self.handshake(
+                raw.clone(), "finish", id, Some(&pending.root), Some(code),
+            ).await?;
+            // The SPAKE2 exchange already proved that both sides entered the
+            // same six-digit code. This final Call is only the commit marker and
+            // is encrypted with the code-authenticated channel key.
             let request = CoreCallRequest::new(uuid::Uuid::new_v4().to_string(), HANDSHAKE, "finish",
-                toCoreValue(crypto::proof(&pending.root, id.as_bytes(), code.as_bytes())).map_err(|e| error(e.to_string()))?);
+                toCoreValue(crypto::proof(&confirmedSecret, id.as_bytes(), b"finish")).map_err(|e| error(e.to_string()))?);
             match channel.exchange(CoreLinkRequest::Call(request.clone())).await? {
                 CoreLinkResponse::Call(r) if r.requestId == request.requestId => { r.result?; },
                 _ => return Err(error("Confirmation response mismatch")),
             }
+            sessionSecret = Some(confirmedSecret);
             Ok::<_, CoreLinkError>(())
         };
         // A USB UART has no EOF when the remote handshake rejects/closes.
@@ -929,6 +1077,7 @@ impl RuntimePeerService for HostRuntimePeerService {
             }
         } else { confirmation.await };
         raw.close().await; result?;
+        let sessionSecret = sessionSecret.ok_or_else(|| error("Pairing confirmation secret is missing"))?;
         {
             let _guard = self.state.mutation.lock().unwrap();
             self.pending(false, id)?; // 撤销/取消不能被正在完成的网络事务重新授予权限。
@@ -936,7 +1085,7 @@ impl RuntimePeerService for HostRuntimePeerService {
             self.state.store.putRecord(RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS_PATH, id, &StoredOutbound {
                 endpoint: pending.endpoint, sessionId: id.into(), deviceId: self.state.nodeId.clone(), peerNodeId: pending.peerNodeId.clone(),
                 peerDeviceInfo: pending.info.clone(), pairingServiceVersion: PAIRING_SERVICE_VERSION,
-                sessionSecret: BASE64.encode(&pending.root), transport: transportName(pending.transport).into(),
+                sessionSecret: BASE64.encode(&sessionSecret), transport: transportName(pending.transport).into(),
             }).map_err(error)?;
             self.state.store.deleteRecord(RUNTIME_LINK_ACCESS_PENDING_OUTBOUND_PAIRINGS_PATH, id).map_err(error)?;
             self.state.active.lock().unwrap().insert(pending.peerNodeId.clone());
@@ -1422,6 +1571,7 @@ mod dial_route_tests {
             active: Mutex::default(), changes: broadcast::channel(32).0, availability: Mutex::new(None),
             lifecycle: AsyncMutex::new(()), mutation: Mutex::new(()),
             connectLocks: Mutex::default(), sharedSessions: Mutex::default(),
+            pairingThrottle: Mutex::new(PairingThrottle::default()),
         })}
     }
 

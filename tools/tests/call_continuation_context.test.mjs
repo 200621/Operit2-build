@@ -44,20 +44,115 @@ test("cancelled callbacks preserve their own identity and restore the outer call
   const result = vm.runInContext(`
     var resolveCancelled;
     var pending = new Promise(function(resolve) { resolveCancelled = resolve; });
-    __operitRegisterCallSession('cancelled-owner', {});
+    var cancelled = __operitRegisterCallSession('cancelled-owner', {});
+    cancelled.callRuntime = { callId: 'cancelled-owner' };
     __operitActivateCall('cancelled-owner');
     var completion = pending.then(function() {
-      if (__operitCurrentCallId !== 'cancelled-owner' || __operitGetCallState(__operitCurrentCallId) !== null) {
+      if (__operitCurrentCallId !== 'cancelled-owner' || __operitGetCallState(__operitCurrentCallId) !== null || typeof __operit_call_runtime_ref !== 'undefined') {
         throw new Error('Callback borrowed another live session');
       }
       throw new Error('original cancelled callback failure');
     });
     __operitCancelCallSession('cancelled-owner');
-    __operitRegisterCallSession('outer-owner', {});
+    var outer = __operitRegisterCallSession('outer-owner', {});
+    outer.callRuntime = { callId: 'outer-owner' };
     __operitActivateCall('outer-owner');
     resolveCancelled();
     completion;
   `, sandbox);
   await assert.rejects(result, /original cancelled callback failure/u);
   assert.equal(vm.runInContext("__operitCurrentCallId", sandbox), "outer-owner");
+  assert.equal(vm.runInContext("__operit_call_runtime_ref === outer.callRuntime", sandbox), true);
+  assert.equal(vm.runInContext("__operitGetCallState('cancelled-owner')", sandbox), null);
+});
+
+/** Fulfillment, rejection and nested subscriptions retain cancelled ownership without runtime access. */
+test("cancelled fulfillment and rejection keep their identity through nested continuations", async () => {
+  for (const rejected of [false, true]) {
+    const sandbox = vm.createContext({});
+    vm.runInContext(bootstrap, sandbox);
+    const result = vm.runInContext(`
+      var settle;
+      var pending = new Promise(function(resolve, reject) { settle = ${rejected ? 'reject' : 'resolve'}; });
+      var reports = [];
+      var cancelled = __operitRegisterCallSession('cancelled-owner', {});
+      cancelled.callRuntime = { callId: 'cancelled-owner' };
+      __operitActivateCall('cancelled-owner');
+      /** Records the actual callback identity and runtime availability. */
+      function record(value) {
+        reports.push({ callId: __operitCurrentCallId, hasSession: __operitGetCallState(__operitCurrentCallId) !== null,
+          hasRuntime: typeof __operit_call_runtime_ref !== 'undefined', value: value });
+        return value;
+      }
+      /** Subscribes another callback while the cancelled identity owns the continuation. */
+      function continuation(value) {
+        record(value);
+        return Promise.resolve(value).then(record);
+      }
+      var completion = pending.then(continuation, continuation);
+      __operitCancelCallSession('cancelled-owner');
+      var outer = __operitRegisterCallSession('outer-owner', {});
+      outer.callRuntime = { callId: 'outer-owner' };
+      __operitActivateCall('outer-owner');
+      settle('settled');
+      completion;
+    `, sandbox);
+    assert.equal(await result, "settled");
+    assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(reports)", sandbox)), [
+      { callId: "cancelled-owner", hasSession: false, hasRuntime: false, value: "settled" },
+      { callId: "cancelled-owner", hasSession: false, hasRuntime: false, value: "settled" },
+    ]);
+    assert.equal(vm.runInContext("__operitCurrentCallId", sandbox), "outer-owner");
+    assert.equal(vm.runInContext("__operit_call_runtime_ref === outer.callRuntime", sandbox), true);
+  }
+});
+
+/** A cancelled continuation cannot restore an outer runtime cancelled during that callback. */
+test("cancelled callbacks do not restore an outer session removed during execution", async () => {
+  const sandbox = vm.createContext({});
+  vm.runInContext(bootstrap, sandbox);
+  const result = vm.runInContext(`
+    var resolvePending;
+    var pending = new Promise(function(resolve) { resolvePending = resolve; });
+    __operitRegisterCallSession('cancelled-owner', {});
+    __operitActivateCall('cancelled-owner');
+    var completion = pending.then(function() {
+      __operitCancelCallSession('outer-owner');
+      return 'completed';
+    });
+    __operitCancelCallSession('cancelled-owner');
+    var outer = __operitRegisterCallSession('outer-owner', {});
+    outer.callRuntime = { callId: 'outer-owner' };
+    __operitActivateCall('outer-owner');
+    resolvePending();
+    completion;
+  `, sandbox);
+  assert.equal(await result, "completed");
+  assert.equal(vm.runInContext("__operitCurrentCallId", sandbox), "");
+  assert.equal(vm.runInContext("typeof __operit_call_runtime_ref", sandbox), "undefined");
+  assert.equal(vm.runInContext("__operitGetCallState('outer-owner')", sandbox), null);
+});
+
+/** Completing one asynchronous hook preserves the context restored by its finalization. */
+test("completed callbacks preserve the surviving call context selected by finalization", async () => {
+  const sandbox = vm.createContext({});
+  vm.runInContext(bootstrap, sandbox);
+  const result = vm.runInContext(`
+    var outer = __operitRegisterCallSession('suspended-owner', {});
+    outer.callRuntime = { callId: 'suspended-owner' };
+    __operitActivateCall('suspended-owner');
+    var hook = __operitRegisterCallSession('hook', {});
+    hook.callRuntime = { callId: 'hook' };
+    hook.previousCallId = 'suspended-owner';
+    hook.previousCallRuntime = outer.callRuntime;
+    __operitActivateCall('hook');
+    Promise.resolve().then(function() {
+      __operitCancelCallSession('hook');
+      return 'hook completed';
+    });
+  `, sandbox);
+  assert.equal(await result, "hook completed");
+  assert.equal(vm.runInContext("__operitCurrentCallId", sandbox), "suspended-owner");
+  assert.equal(vm.runInContext("__operit_call_runtime_ref === outer.callRuntime", sandbox), true);
+  assert.equal(vm.runInContext("__operitGetCallState('hook')", sandbox), null);
 });

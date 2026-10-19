@@ -203,8 +203,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  // Dialog routes must preserve the platform view and its loaded page on every host.
   testWidgets(
-    'hides the native WebView below a dialog route only where needed',
+    'keeps the WebView mounted and visible beneath dialog routes',
     (tester) async {
       final platform = _ThemeTestPlatform();
       WebViewPlatform.instance = platform;
@@ -231,20 +232,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      /// Reads the nearest Offstage above the native view, which is the
-      /// production visibility wrapper rather than route chrome.
-      bool nativeViewOffstage() => tester
-          .widget<Offstage>(
-            find
-                .ancestor(
-                  of: find.byType(WebViewWidget, skipOffstage: false),
-                  matching: find.byType(Offstage, skipOffstage: false),
-                )
-                .first,
-          )
-          .offstage;
-
-      expect(nativeViewOffstage(), isFalse);
+      final webView = find.byType(WebViewWidget);
+      expect(webView, findsOneWidget);
+      final element = tester.element(webView);
+      final events = List<String>.of(platform.controller.events);
       final context = tester.element(find.byType(ComposeDslWebView));
       unawaited(
         showDialog<void>(
@@ -254,23 +245,20 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('dialog'), findsOneWidget);
-      // Only Linux paints the native WebView above Flutter's layer tree.
-      expect(
-        nativeViewOffstage(),
-        defaultTargetPlatform == TargetPlatform.linux,
-      );
+      expect(webView, findsOneWidget);
+      expect(tester.element(webView), same(element));
+      expect(platform.controller.events, events);
 
       Navigator.of(context).pop();
       await tester.pumpAndSettle();
-      expect(nativeViewOffstage(), isFalse);
+      expect(webView, findsOneWidget);
+      expect(tester.element(webView), same(element));
+      expect(platform.controller.events, events);
 
       await tester.pumpWidget(const SizedBox());
       await tester.pumpAndSettle();
     },
-    variant: TargetPlatformVariant(<TargetPlatform>{
-      TargetPlatform.linux,
-      TargetPlatform.android,
-    }),
+    variant: TargetPlatformVariant(TargetPlatform.values.toSet()),
   );
 }
 

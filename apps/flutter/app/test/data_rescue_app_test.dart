@@ -58,6 +58,8 @@ void main() {
       expect(host.operations, ['open']);
       expect(find.textContaining('启动配置损坏'), findsOneWidget);
       expect(find.widgetWithText(FilledButton, '确认数据目录'), findsOneWidget);
+      await tester.ensureVisible(find.text('确认数据目录'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('确认数据目录'));
       await tester.pumpAndSettle();
       expect(host.operations, ['open', 'configure']);
@@ -72,12 +74,15 @@ void main() {
       final host = _MaintenanceHost(pending: true);
       await tester.pumpWidget(DataRescueApp(request: host.request));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('确认数据目录'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('确认数据目录'));
       await tester.pumpAndSettle();
       expect(host.selectedRoots!['runtimeRoot'], '/recovery/runtime');
       expect(host.selectedRoots!['workspaceRoot'], '/recovery/workspaces');
       expect(host.selectedRoots!['cliConfigRoot'], '/recovery/cli');
       await tester.ensureVisible(find.text('完成中断的导入'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('完成中断的导入'));
       await tester.pumpAndSettle();
       expect(host.operations, ['open', 'configure', 'resumeRestore']);

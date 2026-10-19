@@ -1,8 +1,10 @@
 //! Runtime 的密钥交换和 AEAD；PeerLink 始终只看到标准 Link Call。
 use operit_link::*;
 use operit_peer_link::{PeerConnection, PeerMessage};
+use rand_core::{CryptoRng, RngCore};
 use ring::{aead, agreement, digest, hkdf, hmac, rand::{SecureRandom, SystemRandom}};
 use serde::{Deserialize, Serialize};
+use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -47,7 +49,129 @@ pub(super) fn verify(key: &[u8], context: &[u8], role: &[u8], supplied: &[u8]) -
 }
 /// A receiver-only, fixed-width code; leading zeroes are significant.
 pub(super) fn pairingCode() -> Result<String, CoreLinkError> {
-    Ok(format!("{:06}", u32::from_be_bytes(random()?[..4].try_into().unwrap()) % 1_000_000))
+    // Reject the non-uniform tail instead of introducing a modulo bias in the
+    // only secret an online attacker gets to guess.
+    loop {
+        let value = u32::from_be_bytes(random()?[..4].try_into().unwrap());
+        if value < 4_294_000_000 {
+            return Ok(format!("{:06}", value % 1_000_000));
+        }
+    }
+}
+
+/// Supplies SPAKE2 with entropy derived from the Host-backed ring source.
+///
+/// SPAKE2 asks its RNG for one 64-byte scalar seed and cannot report an entropy
+/// failure from `fill_bytes`. Seeding an HMAC-SHA256 DRBG here keeps every
+/// platform (including ESP32 and WASM) on the same random source, turns an
+/// entropy failure into an ordinary error, and removes any length ceiling a
+/// fixed seed would impose on the caller.
+struct SeededRng {
+    key: [u8; 32],
+    counter: u64,
+    block: [u8; 32],
+    offset: usize,
+}
+impl SeededRng {
+    fn new() -> Result<Self, CoreLinkError> {
+        Ok(Self { key: random()?, counter: 0, block: [0; 32], offset: 32 })
+    }
+    fn refill(&mut self) {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.key);
+        let message = self.counter.to_be_bytes();
+        self.block.copy_from_slice(hmac::sign(&key, &message).as_ref());
+        self.counter = self.counter.wrapping_add(1);
+        self.offset = 0;
+    }
+}
+impl RngCore for SeededRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for byte in dest {
+            if self.offset == self.block.len() { self.refill(); }
+            *byte = self.block[self.offset];
+            self.offset += 1;
+        }
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+impl CryptoRng for SeededRng {}
+
+/// Binds one SPAKE2 exchange to the exact X25519 transcript.
+///
+/// Both identities include the transcript hash, so messages cannot be replayed
+/// into a different session or spliced between pairing attempts.
+pub(super) fn pairingIdentities(context: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut client = b"operit-pairing-client-v2".to_vec();
+    client.extend_from_slice(context);
+    let mut server = b"operit-pairing-server-v2".to_vec();
+    server.extend_from_slice(context);
+    (client, server)
+}
+
+/// Starts one SPAKE2 exchange for the pairing confirmation code.
+///
+/// The code never appears on the wire and is never used as a MAC message. An
+/// active man in the middle that saw the earlier X25519 exchange can therefore
+/// only test one guessed code by completing a full online exchange, which the
+/// per-pairing attempt budget bounds.
+pub(super) fn spakeStart(
+    client: bool,
+    code: &[u8],
+    clientId: &[u8],
+    serverId: &[u8],
+) -> Result<(Spake2<Ed25519Group>, Vec<u8>), CoreLinkError> {
+    let password = Password::new(code);
+    let idA = Identity::new(clientId);
+    let idB = Identity::new(serverId);
+    let rng = SeededRng::new()?;
+    Ok(if client {
+        Spake2::start_a_with_rng(&password, &idA, &idB, rng)
+    } else {
+        Spake2::start_b_with_rng(&password, &idA, &idB, rng)
+    })
+}
+
+/// Completes SPAKE2 and returns the raw password-authenticated key.
+///
+/// A wrong code still produces a key, so callers must prove possession of the
+/// derived session secret before committing any credential.
+pub(super) fn spakeFinish(
+    state: Spake2<Ed25519Group>,
+    peerMessage: &[u8],
+) -> Result<Vec<u8>, CoreLinkError> {
+    state
+        .finish(peerMessage)
+        .map_err(|_| error("Pairing confirmation message rejected"))
+}
+
+/// Derives the long-lived session secret from the PAKE output.
+///
+/// The start-phase root and the finish transcript are both included so the
+/// secret is bound to the exact pairing transaction. The X25519 root alone is
+/// not a credential: an active man in the middle knows it, but does not know the
+/// SPAKE2 output without guessing the code online.
+pub(super) fn pairingSessionSecret(
+    spakeKey: &[u8],
+    startRoot: &[u8],
+    context: &[u8],
+) -> Result<[u8; 32], CoreLinkError> {
+    let mut salt = Vec::with_capacity(startRoot.len() + context.len());
+    salt.extend_from_slice(startRoot);
+    salt.extend_from_slice(context);
+    derive(spakeKey, &salt, b"operit-pairing-session-v2")
 }
 
 #[cfg(test)]
@@ -59,6 +183,50 @@ mod pairing_code_tests {
             assert_eq!(code.len(), 6);
             assert!(code.bytes().all(|b| b.is_ascii_digit()));
         }
+    }
+}
+
+#[cfg(test)]
+mod spake_tests {
+    use super::*;
+
+    /// Both sides of a matching code derive the same key even though the code
+    /// never appears on the wire.
+    #[test]
+    fn matching_codes_agree() {
+        let (client, clientMessage) = spakeStart(true, b"123456", b"client", b"server").unwrap();
+        let (server, serverMessage) = spakeStart(false, b"123456", b"client", b"server").unwrap();
+        let clientKey = spakeFinish(client, &serverMessage).unwrap();
+        let serverKey = spakeFinish(server, &clientMessage).unwrap();
+        assert_eq!(clientKey, serverKey);
+    }
+
+    /// A wrong guess still completes the PAKE but cannot produce the peer's key,
+    /// so every guess costs a full online exchange.
+    #[test]
+    fn mismatched_codes_diverge() {
+        let (client, clientMessage) = spakeStart(true, b"123456", b"client", b"server").unwrap();
+        let (server, serverMessage) = spakeStart(false, b"654321", b"client", b"server").unwrap();
+        let clientKey = spakeFinish(client, &serverMessage).unwrap();
+        let serverKey = spakeFinish(server, &clientMessage).unwrap();
+        assert_ne!(clientKey, serverKey);
+        let context = b"context";
+        assert_ne!(
+            pairingSessionSecret(&clientKey, b"root", context).unwrap(),
+            pairingSessionSecret(&serverKey, b"root", context).unwrap(),
+        );
+    }
+
+    /// The stored credential is bound to the pairing transcript and start root,
+    /// so a recorded PAKE message cannot be replayed into another session.
+    #[test]
+    fn session_secret_is_bound_to_transcript_and_root() {
+        let key = [7u8; 32];
+        let first = pairingSessionSecret(&key, b"root-a", b"context-a").unwrap();
+        let second = pairingSessionSecret(&key, b"root-b", b"context-a").unwrap();
+        let third = pairingSessionSecret(&key, b"root-a", b"context-b").unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, third);
     }
 }
 /// 整个 transcript 编码绑定版本、双方身份、两份公钥和服务端随机挑战。

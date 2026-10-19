@@ -356,8 +356,7 @@ impl MessageCoordinationDelegate {
             .modelConfigManager
             .getResolvedModelConfig(&modelProviderId, &modelId)
             .map_err(|error| error.to_string())?;
-        let maxTokens = (chatContextSettings.context.maxContextLength * 1024.0)
-            .clamp(0.0, i32::MAX as f32) as i32;
+        let maxTokens = chatContextSettings.context.maxContextTokens();
         let mut variantMessage = self
             .messageProcessingDelegate
             .regenerateAiMessageVariant(RegenerateAiMessageVariantRequest {
@@ -375,7 +374,7 @@ impl MessageCoordinationDelegate {
                 replyToMessage: None,
                 enableThinking,
                 maxTokens,
-                tokenUsageThreshold: chatContextSettings.summary.summaryTokenThreshold as f64,
+                tokenUsageThreshold: chatContextSettings.summary.tokenThresholdRatio(),
                 chatProviderIdOverride,
                 chatModelIdOverride,
             })
@@ -634,6 +633,15 @@ impl MessageCoordinationDelegate {
                 return Err(error.to_string());
             }
         };
+        if turnOptions.persistTurn && !isContinuation && !isAutoContinuation && !isResume {
+            self.maybeSummarizeBeforeSend(
+                enhancedAiService,
+                &configuration,
+                chatId.clone(),
+                promptFunctionType.clone(),
+            )
+            .await;
+        }
         let runtimeChatHistory = match chatHistoryOverride {
             Some(history) => history,
             None => self
@@ -665,6 +673,7 @@ impl MessageCoordinationDelegate {
                 attachments,
                 replyToMessage,
                 enableThinking,
+                // Compaction runs before dispatch; provider-side per-round limits stay off.
                 maxTokens: 0,
                 tokenUsageThreshold: 0.0,
                 chatProviderIdOverride,
@@ -732,6 +741,89 @@ impl MessageCoordinationDelegate {
             self.removePendingAutoContinuation(chatId);
         }
         Ok(result.completion)
+    }
+
+    #[allow(non_snake_case)]
+    /// Compresses an existing conversation before a new turn exceeds the model budget.
+    async fn maybeSummarizeBeforeSend(
+        &mut self,
+        enhancedAiService: &mut EnhancedAIService,
+        configuration: &ChatConfigurationResult,
+        chatId: String,
+        promptFunctionType: PromptFunctionType,
+    ) {
+        if self.isSummarizing {
+            return;
+        }
+        let providerId = configuration.profile.modelBinding.providerId.clone();
+        let modelId = configuration.profile.modelBinding.modelId.clone();
+        let settings = match self
+            .messageProcessingDelegate
+            .modelConfigManager
+            .getResolvedModelConfig(&providerId, &modelId)
+        {
+            Ok(settings) => settings,
+            Err(_) => return,
+        };
+        if !settings.summary.enableSummary {
+            return;
+        }
+        let threshold = settings.summary.tokenThresholdRatio();
+        if threshold <= 0.0 {
+            return;
+        }
+        let messages = self
+            .chatHistoryDelegate
+            .getRuntimeChatHistory(chatId.clone());
+        if messages.is_empty() {
+            return;
+        }
+        let mut currentTokens = self
+            .tokenStatisticsDelegate
+            .getLastCurrentWindowSize(Some(chatId.clone()));
+        if currentTokens <= 0 {
+            currentTokens = self
+                .chatHistoryDelegate
+                .chatHistoryManager
+                .loadChatHistory(chatId.clone())
+                .ok()
+                .flatten()
+                .map(|chat| chat.currentWindowSize)
+                .unwrap_or(0);
+        }
+        let maxTokens = settings.context.maxContextTokens();
+        let shouldSummarize = AIMessageManager::shouldGenerateSummary(
+            messages,
+            currentTokens,
+            maxTokens,
+            threshold,
+            true,
+            settings.summary.enableSummaryByMessageCount,
+            settings.summary.summaryMessageCountThreshold,
+        );
+        if !shouldSummarize {
+            return;
+        }
+        ChainLogger::verbose_with_level(
+            SEND_CHAIN,
+            "send.summary.before_turn",
+            &[
+                ("chatId", chatId.clone()),
+                ("currentTokens", currentTokens.to_string()),
+                ("maxTokens", maxTokens.to_string()),
+                ("threshold", threshold.to_string()),
+            ],
+            operit_util::AppLogger::VERBOSE_LEVEL_2,
+        );
+        self.summarizeHistory(
+            enhancedAiService,
+            false,
+            Some(promptFunctionType),
+            Some(chatId),
+            Some(providerId),
+            Some(modelId),
+            None)
+        .await;
     }
 
     #[allow(non_snake_case)]
@@ -1023,7 +1115,7 @@ impl MessageCoordinationDelegate {
                 } else {
                     self.messageProcessingDelegate
                         .setSuppressIdleCompletedStateForChat(currentChatId.clone(), false);
-                    self.sendMessageInternal(
+                    Box::pin(self.sendMessageInternal(
                         enhancedAiService,
                         continuationPromptType,
                         true,
@@ -1039,7 +1131,7 @@ impl MessageCoordinationDelegate {
                         None,
                         false,
                         None,
-                        ChatTurnOptions::default(), None)
+                        ChatTurnOptions::default(), None))
                     .await;
                 }
             }

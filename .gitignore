@@ -220,3 +220,7 @@ artifacts/*
 apps/flutter/app/web/runtime/generated/*
 # Developer-local Flutter macOS signing identity (never includes a private key).
 apps/flutter/app/macos/Runner/Configs/Signing.local.xcconfig
+
+# Build-owned Flutter engine font resources
+apps/flutter/app/web/fonts/
+tools/theme/preview/web/fonts/

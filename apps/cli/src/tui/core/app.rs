@@ -5437,8 +5437,7 @@ impl OperitTui {
             .getResolvedModelConfig(&model_ref.provider_id, &model_ref.model_id)
             .await
             .map_err(|error| error.to_string())?;
-        let effective_context_length = config.context.maxContextLength;
-        let max_tokens = (effective_context_length * 1024.0) as i64;
+        let max_tokens = i64::from(config.context.maxContextTokens());
         let current_window_size = self.current_window_size_cache;
         if max_tokens <= 0 {
             return Ok(self

@@ -37,9 +37,10 @@ The archive parser accepts explicitly declared `api_version` values `1.0.0`,
 `1.0.1`, and `2.0.0`. The original version is retained for registration and execution.
 Unknown releases remain rejected until admitted explicitly.
 
-Omitted `api_version` retains the existing Operit2 meaning (`2.0.0`). Legacy
-archives relying on the original application's omitted-version rule must declare
-`1.0.0`; their origin is not inferred from filenames or source text.
+Omitted `api_version` selects the original ToolPkg contract (`1.0.0`), including
+its compatibility adapters and effective runtime prerequisites. Explicit `1.0.0`,
+`1.0.1`, and `2.0.0` declarations retain their exact versions. New Operit2 packages
+must declare `2.0.0`; versions are not inferred from filenames or source text.
 Standalone scripts executed outside a ToolPkg context use the current SDK contract.
 
 The runtime method builder supports:
@@ -105,8 +106,10 @@ Environment interpretation follows the old API, not the OS running Operit2:
 - `/app` and `/mnt` paths returned by current resource/config APIs remain VFS paths.
 - Unmapped Android roots and unsupported environment names are explicit errors.
 
-Actual mount availability is decided by the existing host/VFS implementation.
-This adapter does not create mounts, emulate Android/Linux filesystems, or bypass
+The conditional `v1_runtime` package executes the supported Linux file operations
+in the same terminal filesystem used by legacy commands. Other VFS addresses are
+handled by the existing host/VFS implementation. The adapter does not create
+mounts, emulate Android/Linux filesystems, or bypass
 host permissions. In particular, a Linux environment call on a host without that
 mount fails. Legacy content-URI access is not implemented by this mapping.
 
@@ -182,6 +185,75 @@ Explicit stricter bounds remain in effect; incompatible upper bounds are errors.
 Legacy `SoftwareSettings` management is explicitly excluded from this repair.
 Role/model configuration and memory-profile binding adapters are not installed.
 
+### Terminal and runtime script packages
+
+`compat/v1/runtime.js` installs after the public structured `toolCall` bridge.
+It uses the existing per-call API dispatcher and the built-in `v1_runtime` script
+package. Rust selects the package state using its host condition capabilities;
+`platform.ohos` is exposed alongside the other platform booleans.
+
+| Package state | Legacy terminal | Node tool | Package commands |
+| --- | --- | --- | --- |
+| Windows | Existing Git Bash host (`bash`) | Existing PowerShell host | Native; no APK shim |
+| Linux | Native Bash | Native Bash | Native; no APK shim |
+| macOS | Native Bash | Native Bash | Native; no APK shim |
+| Android | Existing proot Bash | Existing proot Bash | Explicit apt/apt-get to APK mapping |
+| iOS | Existing iSH shell | Existing iSH shell | Explicit apt/apt-get to APK mapping |
+| OHOS | Existing QEMU-vroot shell | Existing QEMU-vroot shell | Explicit apt/apt-get to APK mapping |
+| Web | Existing Buildroot V86 shell | Existing Buildroot V86 shell | Native; no APK shim |
+
+For API 1.0.0 and 1.0.1, `Tools.System.terminal.create/exec` dispatch to that
+package. These exact historical tool identities also dispatch there:
+
+- `super_admin:terminal`
+- `code_runner:run_javascript_node`
+- `ffmpeg:ffmpeg_execute`
+- `ffmpeg:ffmpeg_info`
+
+API 2.0.0 retains canonical host calls and tool identities. Native host errors,
+nonzero exit codes and timeouts are retained. Program helpers reject unsuccessful
+execution. Node source uses UTF-8 hex encoding before native invocation because
+Windows PowerShell 5.1 strips embedded double quotes in native arguments.
+
+Alpine states install command shims in the existing home directory. The supported
+apt grammar is `update`, `install`, `remove`, and `purge`, with explicit options
+and package-name mappings, including `python3-pip` to `py3-pip`,
+`build-essential` to `build-base`, and `libssl-dev` to `openssl-dev`. The shims
+execute real APK commands; unsupported options/packages are errors. Native
+Linux/Windows commands and Web Buildroot never run this APK shim.
+
+The managed-filesystem bridge covers text/binary read/write, existence checks,
+mkdir, delete, move, copy and unzip. Cross-environment file copies transfer
+actual Base64 bytes through the canonical host filesystem and the selected
+terminal filesystem. Writes are bounded to avoid native argument limits and
+preserve Unicode surrogate pairs. ZIP extraction rejects escaping entries and
+symbolic links. The marketplace questionnaire spelling `Files.makeDirectory`
+binds to the existing v1 `mkdir` adapter.
+
+Required executables remain real host requirements: Windows legacy shell tools
+need the existing Git Bash host; managed file operations need Python, Node tools
+need Node, and FFmpeg tools need FFmpeg. This layer does not translate arbitrary
+Bash source into PowerShell, add Ubuntu, install new runtime images, or reproduce
+Linux `/proc` on Windows. Hardcoded `/root` paths remain subject to native write
+permissions. Web Buildroot has no Bash or dynamic npm/pip package installation.
+
+### Marketplace archive audit (2026-10-19)
+
+The downloaded marketplace archives for TA's pocket phone 1.5.2, questionnaire
+0.1.0, enhanced questionnaire 1.8.0, and WeChat iLink bridge 2.5.3 all omit
+`api_version`, so their loading contract is 1.0.0. Actual entry registration,
+initial Compose rendering, and the original questionnaire submit callback were
+checked using the production dispatcher and registration scripts for both
+1.0.0 and 1.0.1. These checks do not establish full host execution equivalence.
+
+The pocket phone uses the terminal and explicit Linux Files APIs covered above.
+The iLink bridge uses the legacy terminal, Node and FFmpeg tool identities now
+routed by this adapter. Its old Android installed-package search directory and
+`/proc` process scanning remain package-specific portability issues. The
+enhanced questionnaire also uses an Android Java clipboard API. A separately
+audited two-person phone archive 1.1.4 is missing its registered
+`ui/phone.ui.js`; runtime adaptation cannot restore an absent archive member.
+
 ## Scope and outstanding work
 
 This is not a claim that every historical plugin runs unchanged. Copying the
@@ -205,7 +277,7 @@ contract fixtures, not in a second loader or platform-specific Flutter code.
 ```powershell
 .venv/Scripts/python.exe plugins/tools/sync_v1_types.py check
 tsc -p core/crates/plugin/sdk/src/compat/v1/tsconfig.json
-node --test tools/tests/toolpkg_api_compatibility.test.mjs tools/tests/toolpkg_v1_adapters.test.mjs tools/tests/plugin_bridge_contracts.test.mjs
+node --test tools/tests/toolpkg_api_compatibility.test.mjs tools/tests/toolpkg_v1_adapters.test.mjs tools/tests/toolpkg_v1_runtime.test.mjs tools/tests/plugin_bridge_contracts.test.mjs
 ```
 
 The TypeScript check intentionally skips checking upstream declaration bodies,
@@ -213,3 +285,8 @@ while checking adapter use of both contracts under strict mode. This isolates
 upstream global declaration conventions from adapter implementation checking.
 Rust archive-loading and version-admission tests are included in the SDK source;
 they require a separate Rust test run and are not exercised by the Node checks.
+
+The runtime compatibility tests additionally execute Node through real Windows
+PowerShell/Git Bash, test APK argument mapping with an argv-recording executable,
+and exercise Python file operations and bounded resource writes in temporary
+directories. They do not boot Android, iOS, OHOS or V86 runtimes.
