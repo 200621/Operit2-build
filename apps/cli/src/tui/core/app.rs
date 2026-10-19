@@ -32,11 +32,11 @@ use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_node_runtime::NodeServices::{
     DiscoveredPeer, PairedPeer, PairingPrompt, PeerTransport, PendingPairing,
 };
-use operit_node_runtime::SpaceDoctor::{diagnose as space_diagnose, SpaceHealthReport};
 use operit_node_runtime::RuntimeRemoteLinkService::{
     RuntimeDeviceSpaceDevice, RuntimeDeviceSpaceTopology, RuntimePairedDevice,
     RuntimePairedDeviceStatus, RuntimeRemoteLinkService, SpaceJoinRequest, SpaceJoinStatus,
 };
+use operit_node_runtime::SpaceDoctor::{diagnose as space_diagnose, SpaceHealthReport};
 use operit_runtime::services::ChatServiceCore::ChatState;
 use operit_runtime::services::RuntimeHostInteractionService::RuntimeHostInteractionToolPermissionRequest;
 use operit_tools::tools::ToolPermissionSystem::AiPermissionMode;
@@ -51,8 +51,8 @@ use super::commands::{expand_plugin_command, keyword_options_for, TuiPluginComma
 use super::config;
 use super::config::ConfigUi;
 use super::helpers::{short_chat_label, split_command_line};
-use super::input::InputHistory;
 use super::i18n::{TuiLanguage, TuiText, TuiTextKey};
+use super::input::InputHistory;
 use super::link_proxy_rs::{TuiContentStreamEventInfo, TuiCore};
 pub(super) use super::outgoing_joins::space_join_is_active;
 use super::peer_discovery::spawn_peer_discovery;
@@ -1812,10 +1812,7 @@ impl OperitTui {
         // List popups opened from the hub render above it, so they must also
         // receive keys first; otherwise a hub key would fire under the popup
         // (the hub's discover, audit, policy, token and leave shortcuts).
-        if self.show_list_popup
-            && self.discover_select_pending
-            && key.code == KeyCode::Enter
-        {
+        if self.show_list_popup && self.discover_select_pending && key.code == KeyCode::Enter {
             self.start_pair_wizard_from_discovery().await;
             return Ok(());
         }
@@ -2661,17 +2658,12 @@ impl OperitTui {
                 if args[1] == "update" && args.len() >= 3 {
                     let state = self.networkControl.deviceSpaceControl()?;
                     let role_id = network_role_id(&state, &args[2])?;
-                    let display_name = args
-                        .get(3)
-                        .cloned()
-                        .ok_or_else(|| USAGE.to_string())?;
+                    let display_name = args.get(3).cloned().ok_or_else(|| USAGE.to_string())?;
                     self.networkControl
                         .updateDeviceSpaceRole(NetworkControlRole {
                             roleId: role_id,
                             displayName: display_name,
-                            capabilities: network_capabilities(
-                                args.get(4..).unwrap_or(&[]),
-                            )?,
+                            capabilities: network_capabilities(args.get(4..).unwrap_or(&[]))?,
                         })?;
                     self.status_message = format!("network identity updated: {}", args[2]);
                     return Ok(());
@@ -2741,7 +2733,11 @@ impl OperitTui {
                 self.status_message = format!(
                     "network join request {} {}: {:?}",
                     args[1],
-                    if args[0] == "approve" { "approved" } else { "rejected" },
+                    if args[0] == "approve" {
+                        "approved"
+                    } else {
+                        "rejected"
+                    },
                     request.status,
                 );
             }
@@ -2798,7 +2794,9 @@ impl OperitTui {
         let topology = self.networkControl.deviceSpaceTopology()?;
         let device_id = network_device_id(&topology, device)?;
         let device_label = network_device_label_by_id(&topology, &device_id)?;
-        self.networkControl.removeDeviceSpaceMember(device_id).await?;
+        self.networkControl
+            .removeDeviceSpaceMember(device_id)
+            .await?;
         Ok(format!("network member removed: {device_label}"))
     }
 
@@ -2827,13 +2825,14 @@ impl OperitTui {
             .get(&identity_id)
             .map(|role| role.displayName.clone())
             .ok_or_else(|| format!("network identity does not exist: {identity}"))?;
-        self.networkControl.setDeviceSpaceIdentity(
-            NetworkControlIdentityAssignment {
+        self.networkControl
+            .setDeviceSpaceIdentity(NetworkControlIdentityAssignment {
                 nodeId: device_id,
                 roleId: identity_id,
-            },
-        )?;
-        Ok(format!("network identity set: {device_label} · {identity_label}"))
+            })?;
+        Ok(format!(
+            "network identity set: {device_label} · {identity_label}"
+        ))
     }
 
     async fn network_clear_device_identity(&mut self, device: &str) -> Result<String, String> {
@@ -2986,7 +2985,9 @@ impl OperitTui {
             return Err(format!("no paired device matches {device_id}"));
         };
         if !peer.outbound {
-            return Err(format!("network join requires an outbound pairing with {label}"));
+            return Err(format!(
+                "network join requires an outbound pairing with {label}"
+            ));
         }
         let request = self
             .networkControl
@@ -3042,9 +3043,11 @@ impl OperitTui {
                 .collect::<Vec<_>>();
             match matches.as_slice() {
                 [request] => request.requestId.clone(),
-                _ => return Err(format!(
+                _ => {
+                    return Err(format!(
                     "no outgoing join request matches \"{value}\"; list them with /network joins"
-                )),
+                ))
+                }
             }
         };
         let request = self
@@ -3066,7 +3069,11 @@ impl OperitTui {
         let text = self.text();
         let items = vec![
             format!("{}: {}", text.network_leave_space_label(), space.spaceName),
-            format!("{}: {}", text.network_leave_members_label(), space.members.len()),
+            format!(
+                "{}: {}",
+                text.network_leave_members_label(),
+                space.members.len()
+            ),
             text.network_leave_warning().to_string(),
         ];
         self.open_list_popup(text.network_leave_title().to_string(), items);
@@ -3124,9 +3131,7 @@ impl OperitTui {
         }
         let matches = requests
             .iter()
-            .filter(|request| {
-                request.applicantDeviceId == value || request.applicantName == value
-            })
+            .filter(|request| request.applicantDeviceId == value || request.applicantName == value)
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [request] => Ok(request.requestId.clone()),
@@ -3243,7 +3248,10 @@ impl OperitTui {
             .networkControl
             .decideDeviceSpaceJoin(request_id.clone(), request.assignmentVersion, approve)
             .await;
-        let modal = self.join_decision.as_mut().expect("join modal checked above");
+        let modal = self
+            .join_decision
+            .as_mut()
+            .expect("join modal checked above");
         match decision {
             Ok(updated) => {
                 self.status_message = format!(
@@ -3368,7 +3376,10 @@ impl OperitTui {
         let Ok(topology) = self.networkControl.deviceSpaceTopology() else {
             return;
         };
-        let space_name = self.networkControl.deviceSpace().map(|space| space.spaceName);
+        let space_name = self
+            .networkControl
+            .deviceSpace()
+            .map(|space| space.spaceName);
         let listening = self
             .networkControl
             .localHostConfig()
@@ -3459,7 +3470,9 @@ impl OperitTui {
                             self.open_device_manager_for(&device.deviceId).await;
                         }
                     }
-                    Some(NetworkHubRow::Peer { deviceId, label, .. }) => {
+                    Some(NetworkHubRow::Peer {
+                        deviceId, label, ..
+                    }) => {
                         // A rejected join is ordinary peer feedback; it must
                         // never tear down the TUI loop.
                         match self.network_join_target(&deviceId, &label).await {
@@ -3477,7 +3490,10 @@ impl OperitTui {
                 }
             }
             KeyCode::Char('u') | KeyCode::Char('U') => {
-                if let Some(NetworkHubRow::Peer { deviceId, label, .. }) = selected_row {
+                if let Some(NetworkHubRow::Peer {
+                    deviceId, label, ..
+                }) = selected_row
+                {
                     self.network_unpair_confirm(&deviceId, &label);
                 }
             }
@@ -3531,7 +3547,11 @@ impl OperitTui {
             None => (None, None),
         };
         self.pair_wizard = Some(PairWizardModal {
-            stage: if autostart { PairStage::Code } else { PairStage::Address },
+            stage: if autostart {
+                PairStage::Code
+            } else {
+                PairStage::Address
+            },
             field: PairField::Address,
             address,
             transportIndex: transport_index.min(PAIR_WIZARD_TRANSPORTS.len() - 1),
@@ -3552,7 +3572,10 @@ impl OperitTui {
             return;
         };
         if wizard.address.trim().is_empty() {
-            let message = self.text().network_pair_wizard_address_required().to_string();
+            let message = self
+                .text()
+                .network_pair_wizard_address_required()
+                .to_string();
             if let Some(wizard) = self.pair_wizard.as_mut() {
                 wizard.error = Some(message);
             }
@@ -3636,7 +3659,11 @@ impl OperitTui {
     /// Sends the join request for the freshly paired peer and closes the
     /// wizard; the background refresher reports the reviewer's decision.
     async fn pair_wizard_join(&mut self) {
-        let Some(peer) = self.pair_wizard.as_ref().and_then(|wizard| wizard.peer.clone()) else {
+        let Some(peer) = self
+            .pair_wizard
+            .as_ref()
+            .and_then(|wizard| wizard.peer.clone())
+        else {
             return;
         };
         let label = paired_peer_label(&peer);
@@ -3686,10 +3713,9 @@ impl OperitTui {
                             }
                         }
                     }
-                    (
-                        KeyCode::Char(ch),
-                        PairField::Address,
-                    ) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                    (KeyCode::Char(ch), PairField::Address)
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                    {
                         if let Some(wizard) = self.pair_wizard.as_mut() {
                             match wizard.field {
                                 PairField::Address => wizard.address.push(ch),
@@ -3747,7 +3773,10 @@ impl OperitTui {
     fn start_peer_discovery(&mut self) {
         if !self.discover_in_flight {
             self.discover_in_flight = true;
-            spawn_peer_discovery(self.networkControl.clone(), self.network_event_sender.clone());
+            spawn_peer_discovery(
+                self.networkControl.clone(),
+                self.network_event_sender.clone(),
+            );
         }
         self.set_transient_status_message(self.text().network_discover_running().to_string());
     }
@@ -3953,11 +3982,7 @@ impl OperitTui {
             }
         }
         if let Some(selected_id) = selected_id {
-            if let Some(position) = modal
-                .rows()
-                .iter()
-                .position(|row| row.id() == selected_id)
-            {
+            if let Some(position) = modal.rows().iter().position(|row| row.id() == selected_id) {
                 modal.selected = position;
             }
         }
@@ -4523,9 +4548,9 @@ impl OperitTui {
                 };
                 self.close_list_popup();
                 match self.networkControl.removePairedDevice(device_id).await {
-                    Ok(()) => self.set_transient_status_message(
-                        self.text().network_unpair_done(&label),
-                    ),
+                    Ok(()) => {
+                        self.set_transient_status_message(self.text().network_unpair_done(&label))
+                    }
                     Err(error) => self.status_message = status_error_line(&error),
                 }
                 self.refresh_network_hub();
@@ -4698,7 +4723,9 @@ impl OperitTui {
             return Ok(());
         }
 
-        self.core.runCoreCommand(&shell_args.new_chat_command_args()).await
+        self.core
+            .runCoreCommand(&shell_args.new_chat_command_args())
+            .await
             .map_err(|error| error.to_string())?;
         self.refresh_core_snapshot().await?;
         let chat_id = self.current_chat_id()?;
@@ -4938,7 +4965,9 @@ impl OperitTui {
                     }
                 }
                 "chatHistoriesFlow" => {
-                    if let Some(value) = self.core.decodeStateFlowEvent::<Vec<ChatHistory>>(&event)? {
+                    if let Some(value) =
+                        self.core.decodeStateFlowEvent::<Vec<ChatHistory>>(&event)?
+                    {
                         self.chats = chat_histories_to_list(value);
                         if let Some(chat_id) = self.current_chat_id_cache.clone() {
                             self.select_chat_by_id(&chat_id);
@@ -4993,7 +5022,10 @@ impl OperitTui {
         let messageTimestamp = info.messageTimestamp;
         let traceFingerprint = if tui_sync_trace_enabled() {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&serde_json::to_vec(&markdown).map_err(|error| error.to_string())?, &mut hash);
+            std::hash::Hash::hash(
+                &serde_json::to_vec(&markdown).map_err(|error| error.to_string())?,
+                &mut hash,
+            );
             Some(std::hash::Hasher::finish(&hash))
         } else {
             None
@@ -5036,10 +5068,13 @@ impl OperitTui {
             self.update_cached_content_stream_message(messageTimestamp, parts);
         }
         if let Some(fingerprint) = traceFingerprint {
-            AppLogger::trace("TuiSyncMeasure", &format!(
-                "event.applied streamId={} sequence={} fingerprint={:016x} eventType={}",
-                streamId, eventSequence, fingerprint, markdown.eventType
-            ));
+            AppLogger::trace(
+                "TuiSyncMeasure",
+                &format!(
+                    "event.applied streamId={} sequence={} fingerprint={:016x} eventType={}",
+                    streamId, eventSequence, fingerprint, markdown.eventType
+                ),
+            );
         }
         if is_content_stream_boundary_event(&markdown.eventType) {
             AppLogger::trace(
@@ -5290,8 +5325,7 @@ impl OperitTui {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        if let Some(message) =
-            space_membership_notice(self.text(), &previous, &members, &name_for)
+        if let Some(message) = space_membership_notice(self.text(), &previous, &members, &name_for)
         {
             self.set_transient_status_message(message);
         }
@@ -5489,7 +5523,9 @@ impl OperitTui {
         if let Some(active) = identities.iter().find(|identity| identity.id == active_id) {
             lines.push(text.control_status_identity(&active.id, &active.name));
         }
-        lines.push(text.control_status_version(env!("CARGO_PKG_VERSION"), operit_runtime::CORE_VERSION));
+        lines.push(
+            text.control_status_version(env!("CARGO_PKG_VERSION"), operit_runtime::CORE_VERSION),
+        );
         if let Ok(topology) = self.networkControl.deviceSpaceTopology() {
             lines.push(text.control_status_node(&topology.currentDeviceId));
             if let Some(device) = topology
@@ -5539,7 +5575,11 @@ impl OperitTui {
             .map(|mode| mode.name().to_string())
             .unwrap_or_else(|error| error.to_string());
         lines.push(text.control_status_approval(&mode));
-        let prompts = self.networkControl.pairingPrompts().unwrap_or_default().len();
+        let prompts = self
+            .networkControl
+            .pairingPrompts()
+            .unwrap_or_default()
+            .len();
         let joins = self
             .networkControl
             .incomingDeviceSpaceJoins()
@@ -5578,21 +5618,17 @@ impl OperitTui {
 
     async fn load_package_panel(&mut self) -> Result<ControlPanelData, String> {
         let mut data = ControlPanelData::empty();
-        data.rows = self.load_extension_rows("package", None).await?;
+        data.rows = self.load_extension_rows("package").await?;
         Ok(data)
     }
 
     async fn load_plugin_panel(&mut self) -> Result<ControlPanelData, String> {
         let mut data = ControlPanelData::empty();
-        data.rows = self.load_extension_rows("plugin", Some("toolpkg")).await?;
+        data.rows = self.load_extension_rows("plugin").await?;
         Ok(data)
     }
 
-    async fn load_extension_rows(
-        &mut self,
-        kind: &str,
-        issue_kind: Option<&str>,
-    ) -> Result<Vec<ControlPanelRow>, String> {
+    async fn load_extension_rows(&mut self, kind: &str) -> Result<Vec<ControlPanelRow>, String> {
         let mut rows = Vec::new();
         let loaded = self
             .run_control_core_json(&[kind, "list"])
@@ -5696,7 +5732,11 @@ impl OperitTui {
                 .get("packageKind")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if issue_kind.is_some_and(|expected| package_kind != expected) {
+            let source_path = issue
+                .get("sourcePath")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !extension_issue_belongs_to(kind, package_kind, source_path) {
                 continue;
             }
             let display = issue
@@ -5823,12 +5863,18 @@ impl OperitTui {
             let Some(id) = item.get("id").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            let name = item.get("name").and_then(serde_json::Value::as_str).unwrap_or(id);
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id);
             let command = item
                 .get("command")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let url = item.get("url").and_then(serde_json::Value::as_str).unwrap_or_default();
+            let url = item
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
             let endpoint = if !command.is_empty() {
                 command.to_string()
             } else if !url.is_empty() {
@@ -5888,10 +5934,7 @@ impl OperitTui {
         })
     }
 
-    async fn run_control_core_json(
-        &mut self,
-        args: &[&str],
-    ) -> Result<serde_json::Value, String> {
+    async fn run_control_core_json(&mut self, args: &[&str]) -> Result<serde_json::Value, String> {
         let mut command = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
         command.push("--json".to_string());
         let output = self
@@ -6169,9 +6212,11 @@ impl OperitTui {
     }
 
     async fn handle_control_panel_confirm_key(&mut self, key: KeyEvent) -> Result<(), String> {
-        let Some((pending, row)) = self.control_panel.as_ref().map(|panel| {
-            (panel.pending, panel.pending_row.clone())
-        }) else {
+        let Some((pending, row)) = self
+            .control_panel
+            .as_ref()
+            .map(|panel| (panel.pending, panel.pending_row.clone()))
+        else {
             return Ok(());
         };
         let confirmed = matches!(
@@ -6493,10 +6538,19 @@ impl OperitTui {
                 }
             }
         } else if row.issue {
-            lines.push(format!("source: {}", row.source_path.as_deref().unwrap_or("")));
-            lines.push(format!("kind: {}", row.package_kind.as_deref().unwrap_or("")));
+            lines.push(format!(
+                "source: {}",
+                row.source_path.as_deref().unwrap_or("")
+            ));
+            lines.push(format!(
+                "kind: {}",
+                row.package_kind.as_deref().unwrap_or("")
+            ));
             lines.push(format!("code: {}", row.code.as_deref().unwrap_or("")));
-            lines.push(format!("package: {}", row.package_name.as_deref().unwrap_or("")));
+            lines.push(format!(
+                "package: {}",
+                row.package_name.as_deref().unwrap_or("")
+            ));
             lines.push(row.detail.clone());
         } else if row.id.starts_with("error-") {
             lines.push(row.detail.clone());
@@ -6509,7 +6563,10 @@ impl OperitTui {
                 _ => None,
             };
             if let Some(command) = command {
-                match self.run_control_core_text(&[command, "show", &row.id]).await {
+                match self
+                    .run_control_core_text(&[command, "show", &row.id])
+                    .await
+                {
                     Ok(loaded) => {
                         if !loaded.is_empty() {
                             lines = loaded;
@@ -6552,14 +6609,22 @@ impl OperitTui {
 
     async fn handle_character_command(&mut self, args: &[String]) -> Result<(), String> {
         let default_args = vec!["list".to_string()];
-        let args = if args.is_empty() || args == ["choose"] { &default_args } else { args };
+        let args = if args.is_empty() || args == ["choose"] {
+            &default_args
+        } else {
+            args
+        };
         self.handle_plugin_core_command("character", args).await;
         Ok(())
     }
 
     async fn handle_group_command(&mut self, args: &[String]) -> Result<(), String> {
         let default_args = vec!["list".to_string()];
-        let args = if args.is_empty() || args == ["choose"] { &default_args } else { args };
+        let args = if args.is_empty() || args == ["choose"] {
+            &default_args
+        } else {
+            args
+        };
         self.handle_plugin_core_command("group", args).await;
         Ok(())
     }
@@ -6621,7 +6686,8 @@ impl OperitTui {
             return Ok(());
         }
         if args.first().map(String::as_str) == Some("toggle") {
-            self.status_message = "skills have no enable state; use /skill to load or delete them".to_string();
+            self.status_message =
+                "skills have no enable state; use /skill to load or delete them".to_string();
             return Ok(());
         }
         self.run_extension_cli_command("skill", args).await;
@@ -6675,7 +6741,11 @@ impl OperitTui {
 
     async fn handle_tag_command(&mut self, args: &[String]) -> Result<(), String> {
         let default_args = vec!["list".to_string()];
-        let args = if args.is_empty() || args == ["choose"] { &default_args } else { args };
+        let args = if args.is_empty() || args == ["choose"] {
+            &default_args
+        } else {
+            args
+        };
         self.handle_plugin_core_command("tag", args).await;
         Ok(())
     }
@@ -6835,7 +6905,9 @@ pub(super) fn parse_peer_transport(value: &str) -> Result<PeerTransport, String>
 /// Parses the address and transport for code-confirmed manual pairing.
 fn parse_pair_arguments(args: &[String]) -> Result<(String, PeerTransport), String> {
     const USAGE: &str = "usage: network pair <address> <http|ws|tcp|serial|bluetooth>";
-    let [address, transport] = args else { return Err(USAGE.to_string()); };
+    let [address, transport] = args else {
+        return Err(USAGE.to_string());
+    };
     Ok((address.clone(), parse_peer_transport(transport)?))
 }
 
@@ -6896,7 +6968,9 @@ pub(super) fn refreshed_decision_queue(
     fresh: &[SpaceJoinRequest],
     selected: usize,
 ) -> (Vec<SpaceJoinRequest>, usize) {
-    let selected_id = current.get(selected).map(|request| request.requestId.clone());
+    let selected_id = current
+        .get(selected)
+        .map(|request| request.requestId.clone());
     let requests = fresh
         .iter()
         .filter(|request| request.canApprove)
@@ -7017,20 +7091,26 @@ pub(super) fn space_health_report_lines(text: TuiText, report: &SpaceHealthRepor
             ],
         ));
     }
-    items.push(text.render(
-        TuiTextKey::NetworkDoctorProjection,
-        &[
-            ("entries", report.projection.projectionEntries.to_string()),
-            (
-                "journal_only",
-                report.projection.journalOnlyOperationIds.len().to_string(),
-            ),
-            (
-                "projection_only",
-                report.projection.projectionOnlyOperationIds.len().to_string(),
-            ),
-        ],
-    ));
+    items.push(
+        text.render(
+            TuiTextKey::NetworkDoctorProjection,
+            &[
+                ("entries", report.projection.projectionEntries.to_string()),
+                (
+                    "journal_only",
+                    report.projection.journalOnlyOperationIds.len().to_string(),
+                ),
+                (
+                    "projection_only",
+                    report
+                        .projection
+                        .projectionOnlyOperationIds
+                        .len()
+                        .to_string(),
+                ),
+            ],
+        ),
+    );
     for pair in &report.pairs {
         items.push(text.render(
             TuiTextKey::NetworkDoctorPeer,
@@ -7046,24 +7126,25 @@ pub(super) fn space_health_report_lines(text: TuiText, report: &SpaceHealthRepor
     // D3 join review state: committed/recoverable/reassignable are the
     // Approving-exit signals, and only recoverable records are not findings.
     for join in &report.joins {
-        items.push(text.render(
-            TuiTextKey::NetworkDoctorJoin,
-            &[
-                ("request", join.requestId.clone()),
-                (
-                    "status",
-                    join_status_label(text, &join.status).to_string(),
-                ),
-                (
-                    "reviewer",
-                    join.reviewerDeviceId.clone().unwrap_or_else(|| "-".to_string()),
-                ),
-                ("version", join.assignmentVersion.to_string()),
-                ("committed", flag(join.committed)),
-                ("recoverable", flag(join.recoverable)),
-                ("reassignable", flag(join.reassignable)),
-            ],
-        ));
+        items.push(
+            text.render(
+                TuiTextKey::NetworkDoctorJoin,
+                &[
+                    ("request", join.requestId.clone()),
+                    ("status", join_status_label(text, &join.status).to_string()),
+                    (
+                        "reviewer",
+                        join.reviewerDeviceId
+                            .clone()
+                            .unwrap_or_else(|| "-".to_string()),
+                    ),
+                    ("version", join.assignmentVersion.to_string()),
+                    ("committed", flag(join.committed)),
+                    ("recoverable", flag(join.recoverable)),
+                    ("reassignable", flag(join.reassignable)),
+                ],
+            ),
+        );
     }
     if report.findings.is_empty() {
         items.push(text.network_doctor_findings_none().to_string());
@@ -7144,6 +7225,27 @@ fn extension_candidate_belongs_to(kind: &str, package_kind: &str) -> bool {
     }
 }
 
+/// Returns whether a load failure belongs to the plugin panel.
+///
+/// ToolPkg parse failures stay with plugins even when an older record labeled
+/// them as ordinary packages. Script and metadata failures stay with packages.
+fn extension_issue_belongs_to(kind: &str, package_kind: &str, source_path: &str) -> bool {
+    let is_plugin = matches!(
+        package_kind,
+        "toolpkg" | "market_toolpkg" | "bundled_toolpkg"
+    ) || source_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(source_path)
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("toolpkg"));
+    if kind == "plugin" {
+        is_plugin
+    } else {
+        !is_plugin
+    }
+}
+
 /// Reads a bounded tail from the runtime log. A headless node can run for
 /// weeks, so the panel never loads the whole file just to show recent lines.
 fn read_log_tail(path: &str, max_lines: usize) -> Vec<String> {
@@ -7188,8 +7290,8 @@ mod tests {
     /// Builds a device window fixture: self plus two foreign devices, one
     /// restricted, one carrying an identity, and one pending join request.
     fn device_manager_fixture() -> DeviceManagerModal {
-        let device = |device_id: &str, online: bool, identity: Option<&str>| {
-            RuntimeDeviceSpaceDevice {
+        let device =
+            |device_id: &str, online: bool, identity: Option<&str>| RuntimeDeviceSpaceDevice {
                 deviceId: device_id.to_string(),
                 userName: "alice".to_string(),
                 deviceName: device_id.to_string(),
@@ -7203,8 +7305,7 @@ mod tests {
                     displayName: display_name.to_string(),
                     capabilities: Vec::new(),
                 }),
-            }
-        };
+            };
         DeviceManagerModal {
             topology: RuntimeDeviceSpaceTopology {
                 currentDeviceId: "self".to_string(),
@@ -7248,7 +7349,9 @@ mod tests {
         let rows = device_manager_fixture().rows();
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0], DeviceManagerRow::Request(_)));
-        assert!(rows[1..].iter().all(|row| matches!(row, DeviceManagerRow::Device(_))));
+        assert!(rows[1..]
+            .iter()
+            .all(|row| matches!(row, DeviceManagerRow::Device(_))));
     }
 
     /// The connection axis is a single state-derived slot: restricted
@@ -7294,21 +7397,15 @@ mod tests {
     #[test]
     fn device_manager_menu_offers_identity_actions_only_when_applicable() {
         let mut modal = device_manager_fixture();
-        assert!(
-            !modal
-                .menu_actions("phone")
-                .contains(&DeviceManagerAction::AssignIdentity)
-        );
-        assert!(
-            modal
-                .menu_actions("phone")
-                .contains(&DeviceManagerAction::ClearIdentity)
-        );
-        assert!(
-            !modal
-                .menu_actions("tablet")
-                .contains(&DeviceManagerAction::ClearIdentity)
-        );
+        assert!(!modal
+            .menu_actions("phone")
+            .contains(&DeviceManagerAction::AssignIdentity));
+        assert!(modal
+            .menu_actions("phone")
+            .contains(&DeviceManagerAction::ClearIdentity));
+        assert!(!modal
+            .menu_actions("tablet")
+            .contains(&DeviceManagerAction::ClearIdentity));
         modal.roles.insert(
             "role-1".to_string(),
             NetworkControlRole {
@@ -7317,11 +7414,9 @@ mod tests {
                 capabilities: BTreeSet::new(),
             },
         );
-        assert!(
-            modal
-                .menu_actions("tablet")
-                .contains(&DeviceManagerAction::AssignIdentity)
-        );
+        assert!(modal
+            .menu_actions("tablet")
+            .contains(&DeviceManagerAction::AssignIdentity));
         // The local row stays read-only even with roles defined.
         assert!(modal.menu_actions("self").is_empty());
     }
@@ -7330,9 +7425,12 @@ mod tests {
     #[test]
     fn new_chat_args_translate_keywords_into_shell_flags() {
         let args = OperitTui::parse_new_chat_args(&[
-            "source".to_string(), "chat-parent".to_string(),
-            "input".to_string(), r#"{"plugin.example":{"selection":"opaque"}}"#.to_string(),
-        ]).expect("generic keyword options must translate");
+            "source".to_string(),
+            "chat-parent".to_string(),
+            "input".to_string(),
+            r#"{"plugin.example":{"selection":"opaque"}}"#.to_string(),
+        ])
+        .expect("generic keyword options must translate");
         assert_eq!(args.sourceChatId.as_deref(), Some("chat-parent"));
         assert_eq!(args.input.unwrap()["plugin.example"]["selection"], "opaque");
     }
@@ -7447,12 +7545,20 @@ mod tests {
     /// Verifies manual pairing accepts only its address and transport.
     #[test]
     fn parse_pair_arguments_reads_address_and_transport() {
-        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
-        let (address, transport) = parse_pair_arguments(&args(&["192.168.1.8:4835", "ws"])).unwrap();
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        let (address, transport) =
+            parse_pair_arguments(&args(&["192.168.1.8:4835", "ws"])).unwrap();
         assert_eq!(address, "192.168.1.8:4835");
         assert_eq!(transport, PeerTransport::WebSocket);
         assert!(parse_pair_arguments(&args(&["192.168.1.8:4835"])).is_err());
-        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "ws", "--token", "secret"])).is_err());
+        assert!(
+            parse_pair_arguments(&args(&["192.168.1.8:4835", "ws", "--token", "secret"])).is_err()
+        );
     }
 
     #[test]
@@ -7498,8 +7604,8 @@ mod tests {
             deviceInfo: operit_link::protocol::LinkDeviceInfo {
                 platform: String::new(),
                 model: "phone".to_string(),
-            pairingIncarnation: None,
-        },
+                pairingIncarnation: None,
+            },
             inbound: true,
             outbound: false,
         };
@@ -7554,8 +7660,8 @@ mod tests {
                     deviceInfo: operit_link::protocol::LinkDeviceInfo {
                         platform: String::new(),
                         model: model.to_string(),
-                    pairingIncarnation: None,
-                },
+                        pairingIncarnation: None,
+                    },
                     inbound: true,
                     outbound,
                 },
@@ -7574,13 +7680,25 @@ mod tests {
         let paired = hub_paired_fixture();
         let rows = network_hub_rows(&topology, &paired);
 
-        let ids = rows.iter().map(|row| row.id().to_string()).collect::<Vec<_>>();
+        let ids = rows
+            .iter()
+            .map(|row| row.id().to_string())
+            .collect::<Vec<_>>();
         // Members come first in topology order; paired non-members follow in
         // stable id order; an existing member never appears twice.
         assert_eq!(ids, vec!["self", "phone", "server", "watch"]);
         assert!(matches!(&rows[0], NetworkHubRow::Member(_)));
-        assert!(matches!(&rows[2], NetworkHubRow::Peer { outbound: true, .. }));
-        assert!(matches!(&rows[3], NetworkHubRow::Peer { outbound: false, .. }));
+        assert!(matches!(
+            &rows[2],
+            NetworkHubRow::Peer { outbound: true, .. }
+        ));
+        assert!(matches!(
+            &rows[3],
+            NetworkHubRow::Peer {
+                outbound: false,
+                ..
+            }
+        ));
         if let NetworkHubRow::Peer { label, .. } = &rows[2] {
             assert_eq!(label, "server");
         } else {
@@ -7600,8 +7718,7 @@ mod tests {
     #[test]
     fn peer_transport_label_matches_listener_spellings() {
         let round_trip = |label: &str, expected: PeerTransport| {
-            let parsed = parse_peer_transport(label)
-                .expect("listener spelling must parse back");
+            let parsed = parse_peer_transport(label).expect("listener spelling must parse back");
             assert!(
                 std::mem::discriminant(&parsed) == std::mem::discriminant(&expected),
                 "{label} must round-trip"
@@ -7739,15 +7856,30 @@ mod tests {
         };
         let lines = space_health_report_lines(text, &report);
         let joined = lines.join("\n");
-        assert!(joined.contains("Home"), "space identity must render: {joined}");
-        assert!(joined.contains("readable"), "policy state must render: {joined}");
+        assert!(
+            joined.contains("Home"),
+            "space identity must render: {joined}"
+        );
+        assert!(
+            joined.contains("readable"),
+            "policy state must render: {joined}"
+        );
         assert!(
             joined.contains("req-1") && joined.contains("recoverable=yes"),
             "join health must render: {joined}"
         );
-        assert!(joined.contains("reconciles=0"), "counters must render: {joined}");
-        assert!(joined.contains("Findings: none"), "findings must render: {joined}");
-        assert!(joined.contains("--repair"), "the CLI repair hint must render: {joined}");
+        assert!(
+            joined.contains("reconciles=0"),
+            "counters must render: {joined}"
+        );
+        assert!(
+            joined.contains("Findings: none"),
+            "findings must render: {joined}"
+        );
+        assert!(
+            joined.contains("--repair"),
+            "the CLI repair hint must render: {joined}"
+        );
     }
 
     /// The hub status tag must call out a policy restriction instead of
@@ -7834,6 +7966,61 @@ mod tests {
         assert!(!extension_candidate_belongs_to("plugin", ""));
     }
 
+    /// Plugin archives and their parse failures stay out of the package panel.
+    #[test]
+    fn extension_issues_stay_with_their_manager() {
+        assert!(extension_issue_belongs_to(
+            "plugin",
+            "toolpkg",
+            "demo.toolpkg"
+        ));
+        assert!(extension_issue_belongs_to(
+            "plugin",
+            "market_toolpkg",
+            "market.toolpkg"
+        ));
+        assert!(extension_issue_belongs_to(
+            "plugin",
+            "bundled_toolpkg",
+            "bundled.toolpkg"
+        ));
+        assert!(extension_issue_belongs_to(
+            "plugin",
+            "package",
+            r"C:\packages\Broken.TOOLPKG"
+        ));
+        assert!(!extension_issue_belongs_to(
+            "package",
+            "toolpkg",
+            "demo.toolpkg"
+        ));
+        assert!(!extension_issue_belongs_to(
+            "package",
+            "package",
+            "/packages/broken.toolpkg"
+        ));
+        assert!(extension_issue_belongs_to(
+            "package",
+            "javascript",
+            "time.js"
+        ));
+        assert!(extension_issue_belongs_to(
+            "package",
+            "metadata",
+            "tools.hjson"
+        ));
+        assert!(extension_issue_belongs_to(
+            "package",
+            "package_manager",
+            "runtime://package-manager"
+        ));
+        assert!(!extension_issue_belongs_to(
+            "plugin",
+            "javascript",
+            "time.js"
+        ));
+    }
+
     #[test]
     fn space_membership_notice_names_changed_members() {
         let text = TuiLanguage::English.text();
@@ -7846,7 +8033,10 @@ mod tests {
         );
         let notice = space_membership_notice(text, &previous, &current, &names)
             .expect("a changed member set must produce a notice");
-        assert!(notice.contains("old"), "departed id must be named: {notice}");
+        assert!(
+            notice.contains("old"),
+            "departed id must be named: {notice}"
+        );
         assert!(
             notice.contains("phone"),
             "joined device must use its name: {notice}"

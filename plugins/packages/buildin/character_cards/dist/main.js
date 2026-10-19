@@ -6743,6 +6743,7 @@ var RepositorySession = class {
 function completed2(result2) {
   if (!result2.successful) throw new Error(result2.details);
 }
+var HOST_OBJECT_COMMIT_LIMIT = 1e3;
 var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   /** Retains the host database handle and the explicit external directory readers. */
   constructor(storage, directory, directories) {
@@ -7135,7 +7136,9 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
           expectedVersion: row.version
         });
       const memoryMutations = mutations.filter((row) => !configurationNames.some((name) => name === row.collection));
-      if (memoryMutations.length > 1e3) throw new Error("Character memory operation exceeds the host transaction limit of 1000 records");
+      const memoryBatches = [];
+      for (let start = 0; start < memoryMutations.length; start += HOST_OBJECT_COMMIT_LIMIT)
+        memoryBatches.push(memoryMutations.slice(start, start + HOST_OBJECT_COMMIT_LIMIT));
       const stagedDocuments = [];
       for (const document2 of documents2) {
         if (document2.newDocument) {
@@ -7168,7 +7171,7 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
           }
         });
       }
-      if (memoryMutations.length !== 0) yield this.storage.memory.commit(memoryMutations);
+      for (const batch of memoryBatches) yield this.storage.memory.commit(batch);
       const nextMetadata = { ...metadata, version: state.version, active: "Model" in state.active ? null : storedValue(state.active), memoryPreferences: storedValue(state.memoryPreferences) };
       yield this.storage.metadata.edit((preferences) => {
         if (!equal(preferences.get("state"), metadata)) throw new Error("Character metadata edit conflict");

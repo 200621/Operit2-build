@@ -583,7 +583,10 @@ final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelega
       let runtimeRoot = try absoluteDirectory(from: arguments["runtimeRoot"] ?? nil, label: "runtimeRoot")
       let workspaceRoot = try absoluteDirectory(from: arguments["workspaceRoot"] ?? nil, label: "workspaceRoot")
       if handle != nil {
-        if configuredRuntimeRoot == runtimeRoot && configuredWorkspaceRoot == workspaceRoot {
+        // URL equality keeps a trailing slash that appears only after the
+        // directory exists, so the same roots look changed on a second apply.
+        if configuredRuntimeRoot?.path == runtimeRoot.path &&
+            configuredWorkspaceRoot?.path == workspaceRoot.path {
           result(nil)
           return
         }

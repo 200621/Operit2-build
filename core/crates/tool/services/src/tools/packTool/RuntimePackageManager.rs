@@ -38,7 +38,8 @@ use crate::tools::mcp_runtime::MCPLocalServer::MCPLocalServer;
 use crate::tools::skill::SkillManager::SkillManager;
 use crate::tools::PackageLoadingProgress::{
     ensurePluginLoadingItem, markPluginLoadingItemFailed, markPluginLoadingItemLoading,
-    markPluginLoadingItemSuccess, pluginLoadingSessionActive, PLUGIN_LOAD_KIND_PACKAGE,
+    markPluginLoadingItemSuccess, pluginLoadingSessionActive, setPluginLoadingItemKind,
+    PLUGIN_LOAD_KIND_PACKAGE, PLUGIN_LOAD_KIND_PLUGIN,
 };
 use crate::tools::ToolJsRuntime::{JsExecutionEngine, JsExecutionProvider};
 use crate::tools::ToolResultDataClasses::stringResultData;
@@ -467,8 +468,7 @@ impl RuntimePackageManager {
         async move {
             let (runtime, declaration) = prepared?;
             let contextKey = format!("toolpkg_main:{}", runtime.packageName);
-            let (engine, _lease) = manager
-                .leaseToolPkgMainExecutionEngine(&runtime.packageName)?;
+            let (engine, _lease) = manager.leaseToolPkgMainExecutionEngine(&runtime.packageName)?;
             let script = reader.mainScript(&runtime)?;
             if !manager
                 .findToolPkgExecutionEngine(&contextKey, &runtime.packageName)
@@ -547,7 +547,8 @@ impl RuntimePackageManager {
                 ),
                 operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
-            let raw = result.map_err(|error| error.to_string())?
+            let raw = result
+                .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("Public API returned no JSON result: {apiName}"))?;
             serde_json::from_str(&raw).map_err(|error| error.to_string())
         }
@@ -2196,7 +2197,14 @@ impl RuntimePackageManager {
         };
         let scope = match Self::bundledCandidateScope(&result.toolPkgLoadResult) {
             Ok(scope) => scope,
-            Err(error) => return self.recordAndReturnPackageError(&sourcePath, "bundled_import_failed", &error, packageKind),
+            Err(error) => {
+                return self.recordAndReturnPackageError(
+                    &sourcePath,
+                    "bundled_import_failed",
+                    &error,
+                    packageKind,
+                )
+            }
         };
         let sourceSignature = sha256Hex(sourceAsset.bytes);
         let sourceFileName = packageSourceFileName(&sourcePath);
@@ -2457,9 +2465,16 @@ impl RuntimePackageManager {
             .expect("Validated package source must have a filename")
             .to_string_lossy();
         let registration = (|| -> Result<(), String> {
-            self.registerScope(&loadResult.containerPackage.name, &source, false, members,
-                self.installedPackageConfigScope(Path::new(&loadResult.containerRuntime.sourcePath))?,
-                Self::requiredInstallationScope(&loadResult.containerRuntime)?)
+            self.registerScope(
+                &loadResult.containerPackage.name,
+                &source,
+                false,
+                members,
+                self.installedPackageConfigScope(Path::new(
+                    &loadResult.containerRuntime.sourcePath,
+                ))?,
+                Self::requiredInstallationScope(&loadResult.containerRuntime)?,
+            )
         })();
         if let Err(error) = registration {
             self.recordManualToolPkgLoadIssue(
@@ -2780,12 +2795,12 @@ impl RuntimePackageManager {
                     result.sourcePath = cacheKey.clone();
                     result.phase = "external".to_string();
                     result.issues.push(newToolPkgLoadIssue(
-                        cacheKey,
+                        cacheKey.clone(),
                         None,
                         hostPath(&file),
                         "scope_failed",
                         error,
-                        "package",
+                        packageLoadIssueKind(&cacheKey, false, false),
                     ));
                     results.push(result);
                     continue;
@@ -2838,7 +2853,10 @@ impl RuntimePackageManager {
         let retired = self.removedBuiltinPackageAssets();
         let support = self.toolHandler.runtimeSupport();
         for asset in support.bundledExternalPluginAssets().iter().chain(
-            support.builtinPluginAssets().iter().filter(|asset| retired.contains(asset.name))
+            support
+                .builtinPluginAssets()
+                .iter()
+                .filter(|asset| retired.contains(asset.name)),
         ) {
             if !isPackageCandidateAssetName(asset.name) {
                 continue;
@@ -2912,8 +2930,11 @@ impl RuntimePackageManager {
             let runtime = loadResult.containerRuntime;
             let toolCount = loadResult.containerPackage.tools.len();
             let subpackageCount = runtime.subpackages.len();
-            let requiredInstallationScope = runtime.manifestExtensions.get("installation_scope")
-                .and_then(serde_json::Value::as_str).map(str::to_string);
+            let requiredInstallationScope = runtime
+                .manifestExtensions
+                .get("installation_scope")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             return Some(BundledExternalPackageCandidate {
                 packageName: runtime.packageName,
                 displayName: runtime.displayName,
@@ -3301,9 +3322,16 @@ impl RuntimePackageManager {
     }
 
     /// Reads the parser-validated installation restriction retained in manifest metadata.
-    fn requiredInstallationScope(runtime: &ToolPkgContainerRuntime) -> Result<Option<ToolPkgConfigScope>, String> {
-        runtime.manifestExtensions.get("installation_scope").cloned()
-            .map(serde_json::from_value).transpose().map_err(|error| format!("Invalid installation scope: {error}"))
+    fn requiredInstallationScope(
+        runtime: &ToolPkgContainerRuntime,
+    ) -> Result<Option<ToolPkgConfigScope>, String> {
+        runtime
+            .manifestExtensions
+            .get("installation_scope")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("Invalid installation scope: {error}"))
     }
 
     /// Registers a concrete imported source without changing its plugin API version.
@@ -3317,7 +3345,10 @@ impl RuntimePackageManager {
         requiredScope: Option<ToolPkgConfigScope>,
     ) -> Result<(), String> {
         if requiredScope.is_some_and(|required| required != scope) {
-            return Err(format!("Package {id} cannot be installed in {} scope", scope.as_str()));
+            return Err(format!(
+                "Package {id} cannot be installed in {} scope",
+                scope.as_str()
+            ));
         }
         let store = ExtensionStore::default();
         let mut settings = serde_json::json!({
@@ -3325,7 +3356,10 @@ impl RuntimePackageManager {
             "subpackageStates": {}, "order": 0,
             "installationId": encodeMarketToolPkgInstallationId(&self.marketToolPkgInstallationId()?)
         });
-        if let Some(required) = requiredScope { settings["installationScope"] = serde_json::to_value(required).map_err(|error| error.to_string())?; }
+        if let Some(required) = requiredScope {
+            settings["installationScope"] =
+                serde_json::to_value(required).map_err(|error| error.to_string())?;
+        }
         store.registerInScope("package", id, source, settings, scope.as_str())?;
         let record = store.record("package", id)?;
         self.scopeState
@@ -3346,7 +3380,12 @@ impl RuntimePackageManager {
         };
         if let Some(runtime) = self.getToolPkgContainerRuntime(&name) {
             if let Some(required) = Self::requiredInstallationScope(&runtime)? {
-                if required.as_str() != scope { return Err(format!("Package {name} only supports {} installation scope", required.as_str())); }
+                if required.as_str() != scope {
+                    return Err(format!(
+                        "Package {name} only supports {} installation scope",
+                        required.as_str()
+                    ));
+                }
             }
         }
         ExtensionStore::default().moveScope("package", &name, scope)?;
@@ -3416,18 +3455,29 @@ impl RuntimePackageManager {
                     .records("package")?
                     .into_iter()
                     .any(|record| record.id == *name);
-                let requiredScope = snapshot.toolPkgContainers.get(name)
-                    .map(Self::requiredInstallationScope).transpose()?.flatten();
+                let requiredScope = snapshot
+                    .toolPkgContainers
+                    .get(name)
+                    .map(Self::requiredInstallationScope)
+                    .transpose()?
+                    .flatten();
                 if !existing {
                     let scope = match snapshot.toolPkgContainers.get(name) {
-                        Some(container) if !builtin => self.installedPackageConfigScope(Path::new(&container.sourcePath))?,
-                        _ => match requiredScope { Some(scope) => scope, None => ToolPkgConfigScope::Device },
+                        Some(container) if !builtin => {
+                            self.installedPackageConfigScope(Path::new(&container.sourcePath))?
+                        }
+                        _ => match requiredScope {
+                            Some(scope) => scope,
+                            None => ToolPkgConfigScope::Device,
+                        },
                     };
                     self.registerScope(name, &sourceName, builtin, members, scope, requiredScope)?;
                 }
                 let record = store.record("package", name)?;
                 if requiredScope.is_some_and(|required| required.as_str() != record.scope) {
-                    return Err(format!("Package {name} is installed outside its required scope"));
+                    return Err(format!(
+                        "Package {name} is installed outside its required scope"
+                    ));
                 }
                 if record.sourceName != sourceName
                     || record.settings["builtin"].as_bool() != Some(builtin)
@@ -3471,13 +3521,18 @@ impl RuntimePackageManager {
                 Ok(())
             })();
             if let Err(error) = registration {
+                let ownsToolPkg = snapshot.toolPkgContainers.contains_key(name);
+                let market = snapshot
+                    .toolPkgContainers
+                    .get(name)
+                    .is_some_and(|container| container.sourceType == ToolPkgSourceType::MARKET);
                 snapshot.toolPkgLoadIssues.push(newToolPkgLoadIssue(
                     name.clone(),
                     Some(name.clone()),
                     name.clone(),
                     "scope_failed",
                     error,
-                    "package",
+                    packageLoadIssueKind(name, ownsToolPkg, market),
                 ));
                 rejected.push(name.clone());
             }
@@ -3706,9 +3761,10 @@ impl RuntimePackageManager {
             let Some(record) = records.get(&packageName).cloned() else {
                 continue;
             };
-            let destinationFile = self.storePaths.runtime_storage_path(
-                &ExtensionStore::root("package", record.scope.as_str())?,
-            ).join(&record.destinationFileName);
+            let destinationFile = self
+                .storePaths
+                .runtime_storage_path(&ExtensionStore::root("package", record.scope.as_str())?)
+                .join(&record.destinationFileName);
             if !self
                 .fileSystemHost
                 .fileExists(&hostPath(&destinationFile))
@@ -3734,7 +3790,9 @@ impl RuntimePackageManager {
             }
 
             if Self::bundledCandidateScope(&result.toolPkgLoadResult)? != record.scope {
-                return Err(format!("Bundled package {packageName} changed its required installation scope"));
+                return Err(format!(
+                    "Bundled package {packageName} changed its required installation scope"
+                ));
             }
             let Some(sourceAsset) = bundledExternalPluginAssetByName(
                 self.toolHandler.runtimeSupport().as_ref(),
@@ -3792,8 +3850,11 @@ impl RuntimePackageManager {
         self.fileSystemHost
             .moveFile(&hostPath(destinationFile), &hostPath(&archive))
             .map_err(|error| error.to_string())?;
-        ExtensionStore::default()
-            .retirePackageSource(&record.packageName, &record.destinationFileName, record.scope.as_str())?;
+        ExtensionStore::default().retirePackageSource(
+            &record.packageName,
+            &record.destinationFileName,
+            record.scope.as_str(),
+        )?;
         self.externalPackageScanCache
             .remove(&hostPath(destinationFile));
         AppLogger::i(
@@ -3823,9 +3884,10 @@ impl RuntimePackageManager {
             }
             let sourceFileName = packageSourceFileName(&result.sourcePath);
             let scope = Self::bundledCandidateScope(&result.toolPkgLoadResult)?;
-            let destinationFile = self.storePaths.runtime_storage_path(
-                &ExtensionStore::root("package", scope.as_str())?,
-            ).join(&sourceFileName);
+            let destinationFile = self
+                .storePaths
+                .runtime_storage_path(&ExtensionStore::root("package", scope.as_str())?)
+                .join(&sourceFileName);
             if !self
                 .fileSystemHost
                 .fileExists(&hostPath(&destinationFile))
@@ -3864,8 +3926,15 @@ impl RuntimePackageManager {
     }
 
     /// Resolves the manifest restriction for a bundled asset before installation.
-    fn bundledCandidateScope(loadResult: &Option<ToolPkgLoadResult>) -> Result<ToolPkgConfigScope, String> {
-        match loadResult.as_ref().map(|loaded| Self::requiredInstallationScope(&loaded.containerRuntime)).transpose()?.flatten() {
+    fn bundledCandidateScope(
+        loadResult: &Option<ToolPkgLoadResult>,
+    ) -> Result<ToolPkgConfigScope, String> {
+        match loadResult
+            .as_ref()
+            .map(|loaded| Self::requiredInstallationScope(&loaded.containerRuntime))
+            .transpose()?
+            .flatten()
+        {
             Some(scope) => Ok(scope),
             None => Ok(ToolPkgConfigScope::Device),
         }
@@ -3954,9 +4023,15 @@ impl RuntimePackageManager {
         }
 
         if isToolPkg {
-            let bytes = self.fileSystemHost.readFileBytes(&hostPath(&file)).map_err(|error| error.to_string())?;
+            let bytes = self
+                .fileSystemHost
+                .readFileBytes(&hostPath(&file))
+                .map_err(|error| error.to_string())?;
             let requiredScope = ToolPkgArchiveParser::readInstallationScope(&bytes)?;
-            let scope = match requiredScope { Some(scope) => scope, None => ToolPkgConfigScope::Device };
+            let scope = match requiredScope {
+                Some(scope) => scope,
+                None => ToolPkgConfigScope::Device,
+            };
             let (loadResult, loadIssues) = self
                 .loadToolPkgFromExternalFileWithIssues(&file, scope)
                 .map_err(|error| format!("Error importing package: {error}"))?;
@@ -3972,8 +4047,12 @@ impl RuntimePackageManager {
                     packageName
                 ));
             }
-            let packageRoot = self.storePaths.runtime_storage_path(&ExtensionStore::root("package", scope.as_str())?);
-            self.fileSystemHost.makeDirectory(&hostPath(&packageRoot), true).map_err(|error| error.to_string())?;
+            let packageRoot = self
+                .storePaths
+                .runtime_storage_path(&ExtensionStore::root("package", scope.as_str())?);
+            self.fileSystemHost
+                .makeDirectory(&hostPath(&packageRoot), true)
+                .map_err(|error| error.to_string())?;
             let fileName = file
                 .file_name()
                 .ok_or_else(|| "Error importing package: invalid file name".to_string())?;
@@ -4095,18 +4174,24 @@ impl RuntimePackageManager {
     /// Reads an archive from its registered ToolPkg source through the existing host abstractions.
     #[allow(non_snake_case)]
     pub fn readToolPkgArchiveBytes(&self, packageName: &str) -> Result<Vec<u8>, String> {
-        let runtime = self.getToolPkgContainerRuntime(packageName)
+        let runtime = self
+            .getToolPkgContainerRuntime(packageName)
             .ok_or("ToolPkg is not registered")?;
         match runtime.sourceType {
             ToolPkgSourceType::ASSET => RuntimeToolPkgAssetSource {
-                runtimeSupport: self.toolHandler.runtimeDependencies().shared_runtime_support(),
-            }.toolPkgAssetBytes(&runtime.sourcePath)
-                .ok_or_else(|| "Registered ToolPkg asset is missing".to_string()),
-            ToolPkgSourceType::EXTERNAL | ToolPkgSourceType::MARKET => self.fileSystemHost
-                .readFileBytes(&runtime.sourcePath).map_err(|error| error.to_string()),
+                runtimeSupport: self
+                    .toolHandler
+                    .runtimeDependencies()
+                    .shared_runtime_support(),
+            }
+            .toolPkgAssetBytes(&runtime.sourcePath)
+            .ok_or_else(|| "Registered ToolPkg asset is missing".to_string()),
+            ToolPkgSourceType::EXTERNAL | ToolPkgSourceType::MARKET => self
+                .fileSystemHost
+                .readFileBytes(&runtime.sourcePath)
+                .map_err(|error| error.to_string()),
         }
     }
-
 
     /// Imports one marketplace artifact from bytes after validating its declared digest.
     #[allow(non_snake_case)]
@@ -4336,7 +4421,12 @@ impl RuntimePackageManager {
                 ),
             };
         if let Err(error) = ToolPkgProtection::validateMarketToolPkgArchive(&rawArchive) {
-            return self.recordAndReturnPackageError(filePath, "market_import_failed", &error, "market_toolpkg");
+            return self.recordAndReturnPackageError(
+                filePath,
+                "market_import_failed",
+                &error,
+                "market_toolpkg",
+            );
         }
         let installationId = match self.marketToolPkgInstallationId() {
             Ok(value) => value,
@@ -4364,15 +4454,28 @@ impl RuntimePackageManager {
         let scope = match ToolPkgArchiveParser::readInstallationScope(&rawArchive) {
             Ok(Some(scope)) => scope,
             Ok(None) => ToolPkgConfigScope::Device,
-            Err(error) => return self.recordAndReturnPackageError(
-                filePath, "market_import_failed", &error, "market_toolpkg",
-            ),
+            Err(error) => {
+                return self.recordAndReturnPackageError(
+                    filePath,
+                    "market_import_failed",
+                    &error,
+                    "market_toolpkg",
+                )
+            }
         };
         let packagesDir = self.storePaths.runtime_storage_path(
             &ExtensionStore::root("package", scope.as_str()).expect("Validated package scope"),
         );
-        if let Err(error) = self.fileSystemHost.makeDirectory(&hostPath(&packagesDir), true) {
-            return self.recordAndReturnPackageError(filePath, "market_import_failed", &error.to_string(), "market_toolpkg");
+        if let Err(error) = self
+            .fileSystemHost
+            .makeDirectory(&hostPath(&packagesDir), true)
+        {
+            return self.recordAndReturnPackageError(
+                filePath,
+                "market_import_failed",
+                &error.to_string(),
+                "market_toolpkg",
+            );
         }
         let stagingFile =
             packagesDir.join(format!(".market-install-{normalizedAssetSha256}.toolpkg"));
@@ -4414,10 +4517,8 @@ impl RuntimePackageManager {
                 .moveFile(&hostPath(&stagingFile), &hostPath(&destinationFile))
                 .map_err(|error| error.to_string())?;
             destinationStored = true;
-            let (loaded, loadedIssues) = self.loadToolPkgFromMarketFileWithIssues(
-                &destinationFile,
-                scope,
-            )?;
+            let (loaded, loadedIssues) =
+                self.loadToolPkgFromMarketFileWithIssues(&destinationFile, scope)?;
             appendUniqueToolPkgLoadIssues(&mut self.manualToolPkgLoadIssues, &loadedIssues);
             if !self.registerToolPkg(loaded) {
                 return Err(format!(
@@ -5781,6 +5882,72 @@ fn isProgressTrackedPackageSource(sourcePath: &str) -> bool {
     )
 }
 
+/// Classifies a load failure as a plugin when the source is a ToolPkg container.
+fn packageLoadIssueKind(sourcePath: &str, ownsToolPkg: bool, market: bool) -> &'static str {
+    if market {
+        "market_toolpkg"
+    } else if ownsToolPkg || hasToolPkgExtension(sourcePath) {
+        "toolpkg"
+    } else {
+        "package"
+    }
+}
+
+/// Classifies a startup row. ToolPkg archives stay plugins even when parsing fails.
+fn packageLoadingKind(sourcePath: &str, parsedToolPkg: bool) -> &'static str {
+    if parsedToolPkg || hasToolPkgExtension(sourcePath) {
+        PLUGIN_LOAD_KIND_PLUGIN
+    } else {
+        PLUGIN_LOAD_KIND_PACKAGE
+    }
+}
+
+fn hasToolPkgExtension(sourcePath: &str) -> bool {
+    Path::new(sourcePath)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toolpkg"))
+}
+
+#[cfg(test)]
+mod package_load_classification_tests {
+    use super::{
+        packageLoadIssueKind, packageLoadingKind, PLUGIN_LOAD_KIND_PACKAGE, PLUGIN_LOAD_KIND_PLUGIN,
+    };
+
+    /// Keeps ToolPkg archives and their containers out of the package category.
+    #[test]
+    fn toolpkg_failures_stay_plugins() {
+        assert_eq!(
+            packageLoadIssueKind("broken.toolpkg", false, false),
+            "toolpkg"
+        );
+        assert_eq!(
+            packageLoadIssueKind(r"C:\pkg\Broken.TOOLPKG", false, false),
+            "toolpkg"
+        );
+        assert_eq!(packageLoadIssueKind("owner", true, false), "toolpkg");
+        assert_eq!(packageLoadIssueKind("owner", true, true), "market_toolpkg");
+        assert_eq!(packageLoadIssueKind("time.js", false, false), "package");
+        assert_eq!(
+            packageLoadIssueKind("metadata.hjson", false, false),
+            "package"
+        );
+        assert_eq!(
+            packageLoadingKind("broken.toolpkg", false),
+            PLUGIN_LOAD_KIND_PLUGIN
+        );
+        assert_eq!(
+            packageLoadingKind("time.js", false),
+            PLUGIN_LOAD_KIND_PACKAGE
+        );
+        assert_eq!(
+            packageLoadingKind("renamed.bin", true),
+            PLUGIN_LOAD_KIND_PLUGIN
+        );
+    }
+}
+
 fn packageProgressDisplayName(sourcePath: &str) -> String {
     Path::new(sourcePath)
         .file_stem()
@@ -5847,7 +6014,7 @@ fn beginPackageLoadProgress(sourcePath: &str) {
     ensurePluginLoadingItem(
         sourcePath,
         &packageProgressDisplayName(sourcePath),
-        PLUGIN_LOAD_KIND_PACKAGE,
+        packageLoadingKind(sourcePath, false),
     );
     markPluginLoadingItemLoading(sourcePath, None);
 }
@@ -5873,6 +6040,10 @@ fn reportPackageScanProgress(result: &PackageScanCandidateResult) {
     } else {
         packageProgressDisplayName(&result.sourcePath)
     };
+    setPluginLoadingItemKind(
+        &result.sourcePath,
+        packageLoadingKind(&result.sourcePath, result.toolPkgLoadResult.is_some()),
+    );
     if result.issues.is_empty()
         && (result.toolPackage.is_some() || result.toolPkgLoadResult.is_some())
     {

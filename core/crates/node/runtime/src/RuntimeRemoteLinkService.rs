@@ -806,6 +806,34 @@ impl RuntimeRemoteLinkService {
             .map_err(|error| error.to_string())?.contains(&deviceId))
     }
 
+    /// Moves one chat whose route metadata cannot be presented onto this device.
+    ///
+    /// This only rewrites the Binding. It does not resume an in-progress turn.
+    #[allow(non_snake_case)]
+    pub fn claimMissingBindingLocal(&self, chatId: String) -> Result<(), String> {
+        if chatId.trim().is_empty() {
+            return Err("route claim chat id must not be empty".to_string());
+        }
+        if self.nodeRouter.bindingRouteStatus(chatId.clone()).is_ok() {
+            return Err("binding owner is already known".to_string());
+        }
+        let localNodeId = self.nodeRouter.localNodeId();
+        let bindingStore = CoreNodeBindingStore::new(self.localRuntime.runtimeStorageHost())?;
+        match bindingStore.bindingOptional(&chatId)? {
+            Some(binding) if binding.nodeId == localNodeId => {
+                Err("current device profile is still missing for this chat binding".to_string())
+            }
+            Some(binding) => {
+                bindingStore.compareAndSet(&chatId, &binding.nodeId, &localNodeId)?;
+                Ok(())
+            }
+            None => {
+                bindingStore.createLocal(&chatId)?;
+                Ok(())
+            }
+        }
+    }
+
     /// Commits a chat Binding change, installs it on the target Core, and resumes there.
     #[allow(non_snake_case)]
     pub async fn requestChangeRoute(

@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/host/AppToastController.dart';
@@ -80,6 +82,46 @@ void main() {
       expect(find.text('包已删除'), findsNothing);
     },
   );
+
+  testWidgets('close tooltip works when the host sits above the navigator', (
+    tester,
+  ) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => AppToastHost(child: child!),
+        home: TextButton(
+          onPressed: () => taps += 1,
+          child: const Text('under'),
+        ),
+      ),
+    );
+
+    AppToastController.instance.show('Frontend toast');
+    await _pumpNotice(tester);
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Frontend toast'), findsOneWidget);
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await gesture.moveTo(tester.getCenter(find.byIcon(Icons.close)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Close'), findsOneWidget);
+
+    await tester.tap(find.text('under'));
+    await tester.pump();
+    expect(taps, 1);
+
+    await tester.tap(find.byIcon(Icons.close));
+    await _pumpNotice(tester);
+    expect(find.text('Frontend toast'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 /// Advances a notice through its slide animation.

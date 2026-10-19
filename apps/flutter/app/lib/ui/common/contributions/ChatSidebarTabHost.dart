@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 
 import '../../../core/application/PluginHotReload.dart';
@@ -33,17 +34,44 @@ Map<String, Object?> chatSidebarSummary(core_proxy.ChatHistoryListItem chat) =>
     };
 
 /// Returns a chat activation only for the exact generic discriminator and shape.
-String? chatSidebarActivation(Object? raw) {
-  if (raw is! Map || raw['type'] != 'toolpkg.chat.activate') {
+String? chatSidebarActivation(Object? raw) =>
+    _chatSidebarActionChatId(raw, 'toolpkg.chat.activate');
+
+/// Returns a detached-window request only for the exact generic action shape.
+String? chatSidebarWindowRequest(Object? raw) =>
+    _chatSidebarActionChatId(raw, 'toolpkg.chat.openInWindow');
+
+String? _chatSidebarActionChatId(Object? raw, String type) {
+  if (raw is! Map || raw['type'] != type) {
     return null;
   }
   final chatId = raw['chatId'];
   if (raw.length != 2 || chatId is! String || chatId.trim().isEmpty) {
     throw const FormatException(
-      'Chat activation requires exactly type and a nonblank chatId.',
+      'Sidebar chat action requires exactly type and a nonblank chatId.',
     );
   }
   return chatId;
+}
+
+/// Compares opaque decoded values without treating JSON object key order as state.
+bool _sidebarValueEquals(Object? left, Object? right) {
+  if (identical(left, right)) return true;
+  if (left is Map && right is Map) {
+    return left.length == right.length &&
+        left.entries.every(
+          (entry) =>
+              right.containsKey(entry.key) &&
+              _sidebarValueEquals(entry.value, right[entry.key]),
+        );
+  }
+  if (left is List && right is List) {
+    return left.length == right.length &&
+        Iterable<int>.generate(
+          left.length,
+        ).every((index) => _sidebarValueEquals(left[index], right[index]));
+  }
+  return left == right;
 }
 
 /// Retains a real registration together with its exact owning Compose route.
@@ -62,6 +90,12 @@ class _SidebarTab {
   /// Namespaces tab selection independently of the plugin's chosen route ID.
   String get id =>
       chatSidebarTabIdentity(entry.containerPackageName, entry.entryId);
+
+  /// Compares registration values rather than newly decoded proxy DTO identities.
+  bool hasSameRegistration(_SidebarTab other) =>
+      _sidebarValueEquals(entry.toJson(), other.entry.toJson()) &&
+      _sidebarValueEquals(route.toJson(), other.route.toJson()) &&
+      _sidebarValueEquals(plugin.toJson(), other.plugin.toJson());
 }
 
 /// Embeds registered sidebar tabs next to the single native workspace tab.
@@ -75,6 +109,7 @@ class ChatSidebarTabHost extends StatefulWidget {
     required this.activeStreamingChatIds,
     required this.workspaceBuilder,
     required this.onActivateChat,
+    this.onOpenChatInWindow,
     this.headerBuilder,
     this.workspaceWithTabsBuilder,
     this.pluginFooter,
@@ -95,6 +130,10 @@ class ChatSidebarTabHost extends StatefulWidget {
   final Widget? pluginFooter;
   final Future<void> Function(String chatId) onActivateChat;
 
+  /// Advertises detached windows only when the host can actually open them.
+  final Future<void> Function(core_proxy.ChatHistoryListItem chat)?
+  onOpenChatInWindow;
+
   /// Creates the registry and preference observers for this live sidebar surface.
   @override
   State<ChatSidebarTabHost> createState() => _ChatSidebarTabHostState();
@@ -105,7 +144,7 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
   Object? _catalogError;
   bool _catalogLoading = true;
   StreamSubscription<String>? _preferenceSubscription;
-  StreamSubscription<void>? _catalogSubscription;
+  StreamSubscription<ToolPkgCatalogChange>? _catalogSubscription;
   String? _selectedId;
   String? _language;
   Object? _preferenceError;
@@ -118,12 +157,18 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
   UserPreferencesManager get _preferences =>
       UserPreferencesManager(clients: widget.clients);
 
-  /// Observes explicit tab selection and invalidates cached routes on catalog changes.
+  /// Observes selection and reconciles registrations without resetting other tabs.
   @override
   void initState() {
     super.initState();
     _watchSelection();
-    _catalogSubscription = ToolPkgCatalogChangeBus.listen(_reloadCatalog);
+    _catalogSubscription = ToolPkgCatalogChangeBus.listenChanges((change) {
+      if (change.reloadPluginCode) {
+        _reloadCatalog();
+      } else {
+        _refreshCatalog();
+      }
+    });
     PluginHotReload.revision.addListener(_reloadCatalog);
   }
 
@@ -234,7 +279,13 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
     return List<_SidebarTab>.unmodifiable(tabs);
   }
 
-  /// Stops rendering cached plugin routes until fresh catalog validation completes.
+  /// Revalidates catalog notifications while keeping unchanged tab sessions mounted.
+  void _refreshCatalog() {
+    if (!mounted || _language == null) return;
+    unawaited(_loadCatalog(++_catalogGeneration));
+  }
+
+  /// Retires all sessions for runtime/locale changes, hot reload, or invalid routes.
   void _reloadCatalog() {
     if (!mounted || _language == null) return;
     final generation = ++_catalogGeneration;
@@ -250,15 +301,32 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
   /// Handles every request immediately and ignores stale asynchronous results.
   Future<void> _loadCatalog(int generation) async {
     try {
-      final tabs = await _readCatalog();
+      final catalog = await _readCatalog();
       if (!mounted || generation != _catalogGeneration) return;
+      final previousById = {for (final tab in _tabs) tab.id: tab};
+      final tabs = [
+        for (final tab in catalog)
+          if (previousById[tab.id] case final previous?
+              when previous.hasSameRegistration(tab))
+            previous
+          else
+            tab,
+      ];
+      if (!_catalogLoading &&
+          _catalogError == null &&
+          listEquals(tabs, _tabs)) {
+        return;
+      }
       setState(() {
         _tabs = tabs;
+        _catalogError = null;
         _catalogLoading = false;
       });
     } catch (error) {
       if (!mounted || generation != _catalogGeneration) return;
       setState(() {
+        // A failed validation must never leave unverified plugin routes active.
+        _tabs = const [];
         _catalogError = error;
         _catalogLoading = false;
       });
@@ -277,18 +345,16 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
   }
 
   /// Checks fresh route and chat existence before invoking the real host switch chain.
-  Future<void> _handleResult(
-    Object? raw,
-    _SidebarTab tab,
-    int generation,
-  ) async {
+  Future<void> _handleResult(Object? raw, _SidebarTab tab) async {
     var acquiredActivation = false;
     try {
-      final chatId = chatSidebarActivation(raw);
+      final windowChatId = chatSidebarWindowRequest(raw);
+      final chatId = windowChatId ?? chatSidebarActivation(raw);
       if (chatId == null) return;
-      if (!mounted ||
-          generation != _catalogGeneration ||
-          _selectedId != tab.id) {
+      if (windowChatId != null && widget.onOpenChatInWindow == null) {
+        throw UnsupportedError('Detached chat windows are not available.');
+      }
+      if (!mounted || !_tabs.contains(tab) || _selectedId != tab.id) {
         throw StateError('The activating sidebar tab is no longer current.');
       }
       if (_activating) {
@@ -304,9 +370,7 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
         rethrow;
       }
       final current = catalog.where((candidate) => candidate.id == tab.id);
-      if (current.length != 1 ||
-          current.single.route.screen != tab.route.screen ||
-          current.single.route.routeId != tab.route.routeId) {
+      if (current.length != 1 || !current.single.hasSameRegistration(tab)) {
         _reloadCatalog();
         throw StateError(
           'The activating sidebar route is no longer registered.',
@@ -318,14 +382,20 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
       if (!chats.any((chat) => chat.id == chatId)) {
         throw StateError('The requested conversation does not exist: $chatId');
       }
-      if (!mounted ||
-          generation != _catalogGeneration ||
-          _selectedId != tab.id) {
+      if (!mounted || !_tabs.contains(tab) || _selectedId != tab.id) {
         throw StateError(
           'The sidebar selection changed while activation was being validated.',
         );
       }
-      await widget.onActivateChat(chatId);
+      if (windowChatId != null) {
+        final openInWindow = widget.onOpenChatInWindow;
+        if (openInWindow == null) {
+          throw UnsupportedError('Detached chat windows are not available.');
+        }
+        await openInWindow(chats.firstWhere((chat) => chat.id == chatId));
+      } else {
+        await widget.onActivateChat(chatId);
+      }
     } catch (error) {
       if (mounted) setState(() => _actionError = error);
     } finally {
@@ -363,17 +433,17 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
       );
     }
     final tab = matches.single;
-    final generation = _catalogGeneration;
-    return _embedded(tab, generation);
+    return _embedded(tab);
   }
 
   /// Keeps plugin execution intact while the sidebar composes its sliver content.
-  Widget _embedded(_SidebarTab tab, int generation) {
+  Widget _embedded(_SidebarTab tab) {
     final prepared = ChatSidebarPreparationScope.maybeOf(
       context,
     )?.read(tab.id, widget.chats);
     return ToolPkgUiLauncherScreen(
-      key: ValueKey('sidebar-route:${tab.id}:$generation'),
+      // Reconciled registrations retain identity across unrelated catalog changes.
+      key: ObjectKey(tab),
       clients: widget.clients,
       plugin: tab.plugin,
       initialRouteId: tab.route.routeId,
@@ -386,6 +456,9 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
       initialState: <String, Object?>{
         'chatSidebarPrepared': ?prepared,
         'input': tab.entry.params,
+        'chatSidebarCapabilities': <String, Object?>{
+          'openInWindow': widget.onOpenChatInWindow != null,
+        },
         'chatSidebar': <String, Object?>{
           'chats': widget.chats.map(chatSidebarSummary).toList(growable: false),
           'currentChatId': widget.currentChatId,
@@ -394,7 +467,7 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
           ),
         },
       },
-      onActionResult: (raw) => unawaited(_handleResult(raw, tab, generation)),
+      onActionResult: (raw) => unawaited(_handleResult(raw, tab)),
     );
   }
 
@@ -590,7 +663,14 @@ class _ChatSidebarTabHostState extends State<ChatSidebarTabHost> {
 /// Prepares opaque plugin data without opening a Compose session or a UI route.
 class ChatSidebarPreparation extends ChangeNotifier {
   ChatSidebarPreparation({required this.clients}) {
-    _catalogSubscription = ToolPkgCatalogChangeBus.listen(_invalidate);
+    _catalogSubscription = ToolPkgCatalogChangeBus.listenChanges((change) {
+      if (change.reloadPluginCode) {
+        _invalidate();
+      } else {
+        final chats = _chats;
+        if (chats != null) unawaited(_prepare(chats, refresh: true));
+      }
+    });
     PluginHotReload.revision.addListener(_invalidate);
   }
 
@@ -604,16 +684,27 @@ class ChatSidebarPreparation extends ChangeNotifier {
   Map<String, Object?> _data = const {};
 
   /// Only full generic history changes require new plugin projections.
-  Future<void> prepare(List<core_proxy.ChatHistoryListItem> chats) async {
+  Future<void> prepare(List<core_proxy.ChatHistoryListItem> chats) =>
+      _prepare(chats);
+
+  /// Catalog-only refreshes retain same-history data until changed results arrive.
+  Future<void> _prepare(
+    List<core_proxy.ChatHistoryListItem> chats, {
+    bool refresh = false,
+  }) async {
     if (_disposed) return;
     final summaries = chats.map(chatSidebarSummary).toList(growable: false);
     final key = jsonEncode(summaries);
-    if (key == _key) return;
+    if (key == _key && !refresh) return;
+    final preserveData = refresh && key == _key;
     _chats = List.unmodifiable(chats);
     _key = key;
     final generation = ++_generation;
-    _data = const {};
-    notifyListeners();
+    if (!preserveData) {
+      _data = const {};
+      notifyListeners();
+    }
+    final refreshedData = <String, Object?>{};
     final watch = Stopwatch()..start();
     try {
       final manager = clients.application.packageManager();
@@ -662,8 +753,12 @@ class ChatSidebarPreparation extends ChangeNotifier {
               }
               prepared[id] = entry['data'];
             }
-            _data = {..._data, ...prepared};
-            notifyListeners();
+            if (preserveData) {
+              refreshedData.addAll(prepared);
+            } else {
+              _data = {..._data, ...prepared};
+              notifyListeners();
+            }
             ClientLogger.v(
               'event=sidebar_data_prepared package=${owner.containerPackageName} '
               'entries=${prepared.length} elapsedMs=${watch.elapsedMilliseconds}',
@@ -677,6 +772,12 @@ class ChatSidebarPreparation extends ChangeNotifier {
       );
     } catch (error) {
       if (_current(generation)) _logFailure(error);
+    }
+    if (preserveData &&
+        _current(generation) &&
+        !_sidebarValueEquals(_data, refreshedData)) {
+      _data = refreshedData;
+      notifyListeners();
     }
   }
 

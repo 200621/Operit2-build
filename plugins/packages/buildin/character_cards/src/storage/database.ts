@@ -51,6 +51,9 @@ function completed(result: { successful: boolean; details: string }): void {
   if (!result.successful) throw new Error(result.details);
 }
 
+/** Matches the host's per-transaction object-commit ceiling for plugin records. */
+const HOST_OBJECT_COMMIT_LIMIT = 1000;
+
 /** Owns record transactions in the persistent synchronized plugin data namespace. */
 export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
   private busy = false;
@@ -468,7 +471,12 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
         expectedVersion: row.version,
       });
     const memoryMutations = mutations.filter(row => !configurationNames.some(name => name === row.collection));
-    if (memoryMutations.length > 1000) throw new Error("Character memory operation exceeds the host transaction limit of 1000 records");
+    // One host object commit accepts at most 1000 mutations, and a large import exceeds that
+    // on its own. Sequential batches keep it possible; a failure after an earlier batch leaves
+    // those records committed, which a repeated SKIP/UPDATE import resumes.
+    const memoryBatches: ObjectMutation[][] = [];
+    for (let start = 0; start < memoryMutations.length; start += HOST_OBJECT_COMMIT_LIMIT)
+      memoryBatches.push(memoryMutations.slice(start, start + HOST_OBJECT_COMMIT_LIMIT));
     const stagedDocuments: { path: string; stagedPath: string }[] = [];
     for (const document of documents) {
       if (document.newDocument) {
@@ -502,7 +510,7 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
         }
       });
     }
-    if (memoryMutations.length !== 0) await this.storage.memory.commit(memoryMutations);
+    for (const batch of memoryBatches) await this.storage.memory.commit(batch);
     const nextMetadata = { ...metadata, version: state.version, active: "Model" in state.active ? null : storedValue(state.active), memoryPreferences: storedValue(state.memoryPreferences) };
     await this.storage.metadata.edit(preferences => {
       if (!equal(preferences.get("state"), metadata)) throw new Error("Character metadata edit conflict");

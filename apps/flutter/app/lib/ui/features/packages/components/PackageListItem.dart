@@ -86,6 +86,8 @@ class _PackageListItemState extends State<PackageListItem> {
               ]
             : const <BoxShadow>[],
         material: true,
+        // One blur per card rasterizes the whole list on tab switches and scrolls.
+        enableBackdropFilter: false,
         child: InkWell(
           borderRadius: borderRadius,
           onTap: widget.onDetails,

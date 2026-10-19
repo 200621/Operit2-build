@@ -22,8 +22,9 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
   /** Records an actual IO attempt and throws a deliberately injected original failure before disk mutation. */
   function attempted(method, args) {
     calls.push({ method, args: [...args] });
-    if (faults.has(method)) {
-      const failure = faults.get(method); faults.delete(method); throw failure;
+    const fault = faults.get(method);
+    if (fault !== undefined && --fault.remaining <= 0) {
+      faults.delete(method); throw fault.failure;
     }
   }
 
@@ -161,11 +162,12 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
         },
       },
     },
-    /** Injects one negative IO event; no successful domain operation is implemented by the harness. */
-    failNext(method, failure) {
+    /** Injects one negative IO event on the Nth call of a method; no successful domain operation is implemented by the harness. */
+    failNext(method, failure, occurrence = 1) {
       if (!Object.hasOwn(methods, method) && !["storage.commit", "storage.open", "storage.list", "storage.get", "storage.transaction", "storage.query", "storage.execute", "storage.getMany", "storage.preferences.open", "storage.preferences.edit", "storage.preferences.data"].includes(method)) throw new Error("Cannot fail an unsupported disk method: " + method);
       if (faults.has(method)) throw new Error("A disk failure is already scheduled for " + method);
-      faults.set(method, failure);
+      if (!Number.isInteger(occurrence) || occurrence < 1) throw new Error("Disk failure occurrence must be a positive integer");
+      faults.set(method, { failure, remaining: occurrence });
     },
     /** Reconstructs assertion data independently from real preference files and memory SQLite rows. */
     readState() {

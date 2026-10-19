@@ -31,6 +31,7 @@ class AgentChatInputSection extends StatefulWidget {
   const AgentChatInputSection({
     super.key,
     this.hintSuffix = '',
+    this.hostMissing = false,
     required this.controller,
     required this.focusNode,
     required this.isLoading,
@@ -68,6 +69,7 @@ class AgentChatInputSection extends StatefulWidget {
   });
 
   final String hintSuffix;
+  final bool hostMissing;
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool isLoading;
@@ -707,6 +709,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                     canSendMessage: canSendMessage,
                     showCancelAction: showCancelAction,
                     showQueueAction: showQueueAction,
+                    hostMissing: widget.hostMissing,
                     onSendMessage: widget.onSendMessage,
                     onQueueMessage: widget.onQueueMessage,
                     onCancelMessage: widget.onCancelMessage,
@@ -790,6 +793,7 @@ class _InputBody extends StatelessWidget {
     required this.canSendMessage,
     required this.showCancelAction,
     required this.showQueueAction,
+    required this.hostMissing,
     required this.onSendMessage,
     required this.onQueueMessage,
     required this.onCancelMessage,
@@ -828,6 +832,7 @@ class _InputBody extends StatelessWidget {
   final bool canSendMessage;
   final bool showCancelAction;
   final bool showQueueAction;
+  final bool hostMissing;
   final VoidCallback onSendMessage;
   final VoidCallback onQueueMessage;
   final VoidCallback onCancelMessage;
@@ -853,6 +858,12 @@ class _InputBody extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final l10n = AppLocalizations.of(context)!;
+    final showMissingHost =
+        hostMissing &&
+        !showCancelAction &&
+        !showQueueAction &&
+        !isSpeechRecording &&
+        !isSpeechTranscribing;
     final modelLabelStyle =
         theme.textTheme.bodyMedium?.copyWith(
           color: colorScheme.onSurface,
@@ -948,16 +959,20 @@ class _InputBody extends StatelessWidget {
       ),
       action: _ActionButton(
         key: const ValueKey<String>('chat.send'),
-        imageAsset: resolveThemeInputActionAsset(
-          OperitTheme.of(context).themePreferenceSnapshot,
-          isStop: isSpeechRecording || showCancelAction,
-          isSend: showQueueAction || canSendMessage,
-        ),
-        imageSize: resolveThemeInputActionAssetSize(
-          OperitTheme.of(context).themePreferenceSnapshot,
-          isStop: isSpeechRecording || showCancelAction,
-          isSend: showQueueAction || canSendMessage,
-        ),
+        imageAsset: showMissingHost
+            ? null
+            : resolveThemeInputActionAsset(
+                OperitTheme.of(context).themePreferenceSnapshot,
+                isStop: isSpeechRecording || showCancelAction,
+                isSend: showQueueAction || canSendMessage,
+              ),
+        imageSize: showMissingHost
+            ? null
+            : resolveThemeInputActionAssetSize(
+                OperitTheme.of(context).themePreferenceSnapshot,
+                isStop: isSpeechRecording || showCancelAction,
+                isSend: showQueueAction || canSendMessage,
+              ),
         processing: processing || isSpeechTranscribing,
         progress: isSpeechTranscribing ? null : _progressFor(inputState),
         background: isSpeechRecording
@@ -980,6 +995,8 @@ class _InputBody extends StatelessWidget {
             ? Icons.stop
             : isSpeechTranscribing
             ? Icons.graphic_eq
+            : showMissingHost
+            ? Icons.device_unknown
             : _actionIcon(
                 showCancelAction: showCancelAction,
                 showQueueAction: showQueueAction,
@@ -993,6 +1010,8 @@ class _InputBody extends StatelessWidget {
             ? l10n.cancel
             : showQueueAction
             ? l10n.chatQueueAddMessage
+            : showMissingHost
+            ? l10n.chatRouteClaimHostPrompt
             : (canSendMessage ? l10n.send : ''),
         onPressed: isSpeechTranscribing
             ? null
@@ -1001,7 +1020,7 @@ class _InputBody extends StatelessWidget {
                   onCancelMessage();
                 } else if (showQueueAction) {
                   onQueueMessage();
-                } else if (canSendMessage) {
+                } else if (showMissingHost || canSendMessage) {
                   onSendMessage();
                 } else {
                   onSpeechInput();

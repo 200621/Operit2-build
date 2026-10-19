@@ -1097,6 +1097,11 @@ impl CoreSpaceStore {
             if entry.isDirectory {
                 continue;
             }
+            // The atomic writer stages private dot-prefixed siblings; a killed
+            // process leaves them behind and they are never member records.
+            if entry.path.rsplit('/').next().is_some_and(|name| name.starts_with('.')) {
+                continue;
+            }
             let preferences =
                 self.recordStore(entry.path.clone())
                     .data()
@@ -1795,6 +1800,36 @@ mod tests {
                 None,
             )
             .expect("test device profile must initialize");
+    }
+
+    /// A killed process leaves an atomic-write staging sibling in the members
+    /// directory; Space initialization must skip it instead of panicking.
+    #[test]
+    fn initialize_ignores_leftover_partial_staging_files_in_members_directory() {
+        let host = Arc::new(MemoryStorageHost::default());
+        let store = CoreSpaceStore::new(host.clone());
+        initializeTestDeviceProfile(&store);
+        store
+            .initializeNamed("local-space".to_string())
+            .expect("test space must initialize");
+        host.writeBytes(
+            &format!(
+                "{RUNTIME_SPACE_MEMBERS_DIR_PATH}/.core-staging.preferences.json.3d75c4a5-2e81-4d0a-8f85-11ee23df1e79.partial"
+            ),
+            b"uncommitted",
+        )
+        .expect("test staging file must write");
+
+        let space = store
+            .initialize()
+            .expect("leftover staging files must not break Space initialization");
+        assert!(
+            space
+                .members
+                .iter()
+                .all(|member| !member.contains("staging")),
+            "the staging sibling must not surface as a member"
+        );
     }
 
     /// Verifies remote member ejection rewrites the member as a standalone

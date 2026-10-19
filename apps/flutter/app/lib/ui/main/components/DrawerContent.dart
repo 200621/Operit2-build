@@ -223,6 +223,15 @@ class _DrawerContentState extends State<DrawerContent> {
     await _deleteConversation(history);
   }
 
+  /// Shares the host's current theme and desktop launcher with all sidebar tabs.
+  Future<void> _openConversationInWindow(
+    core_proxy.ChatHistoryListItem history,
+  ) => DetachedChatWindowLauncher.openChat(
+    chatId: history.id,
+    title: history.title,
+    themePreferenceSnapshot: OperitTheme.of(context).themePreferenceSnapshot,
+  );
+
   /// Presents native workspace actions for a canonical conversation row.
   Future<void> _showConversationActionDialog(
     core_proxy.ChatHistoryListItem history,
@@ -246,13 +255,7 @@ class _DrawerContentState extends State<DrawerContent> {
     }
     switch (action) {
       case ConversationAction.openInWindow:
-        await DetachedChatWindowLauncher.openChat(
-          chatId: history.id,
-          title: history.title,
-          themePreferenceSnapshot: OperitTheme.of(
-            context,
-          ).themePreferenceSnapshot,
-        );
+        await _openConversationInWindow(history);
       case ConversationAction.rename:
         await _showRenameConversationDialog(history);
       case ConversationAction.moveUp:
@@ -514,16 +517,17 @@ class _DrawerContentState extends State<DrawerContent> {
     }
   }
 
+  bool get _isChatRouteSelected =>
+      widget.selectedRouteId ==
+      ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat);
+
   /// Builds a native row with the original pin, lock, title, delete and detached-window actions.
   Widget _historyRow(core_proxy.ChatHistoryListItem history) =>
       ConversationDrawerItem(
         key: ValueKey('workspace-chat:${history.id}'),
         history: history,
         title: history.title,
-        selected:
-            widget.selectedRouteId ==
-                ScreenRouteRegistry.routeIdOf(ScreenRouteRegistry.aiChat) &&
-            widget.currentChatId == history.id,
+        selected: _isChatRouteSelected && widget.currentChatId == history.id,
         isRunning: widget.activeStreamingChatIds.contains(history.id),
         appearance: widget.appearance,
         nested: true,
@@ -791,7 +795,7 @@ class _DrawerContentState extends State<DrawerContent> {
           child: ChatSidebarTabHost(
             clients: _clients,
             chats: widget.histories,
-            currentChatId: widget.currentChatId,
+            currentChatId: _isChatRouteSelected ? widget.currentChatId : null,
             activeStreamingChatIds: widget.activeStreamingChatIds,
             headerBuilder: (context, tabs) => Column(
               children: <Widget>[
@@ -806,6 +810,9 @@ class _DrawerContentState extends State<DrawerContent> {
                 ? null
                 : _pluginNavigationContent(),
             onActivateChat: _activateChat,
+            onOpenChatInWindow: operitSupportsDesktopMultiWindow
+                ? _openConversationInWindow
+                : null,
           ),
         ),
         Padding(

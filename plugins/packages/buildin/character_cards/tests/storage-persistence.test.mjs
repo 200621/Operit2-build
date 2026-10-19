@@ -222,12 +222,12 @@ async function syntheticSpace(owner, count) {
 
 /** Verifies a single import larger than one host transaction is chunked instead of rejected. */
 test("bulk memory import commits bounded host transactions and retains every record", async t => {
-  const disk = await createDiskHarness(t), owner = await open(disk), space = await syntheticSpace(owner, 1005);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), owner = await open(disk), space = await syntheticSpace(owner, 1005);
   disk.clearCalls();
   await owner.run(session => session.importMemorySpace("character:default", space, "SKIP"));
   const transactions = commits(disk);
   assert.ok(transactions.length > 1, "bulk import must span more than one host transaction");
-  for (const call of transactions) assert.ok(call.args[0].length <= 1000, "each transaction must stay within the host statement limit");
+  for (const call of transactions) assert.ok(call.args[0].length <= 1000, "each transaction must stay within the host mutation limit");
   const reopened = await open(disk), retained = await reopened.run(session => session.listMemories("character:default"));
   assert.equal(retained.length, 1005);
   assert.equal(new Set(retained.map(value => value.uuid)).size, 1005);
@@ -235,7 +235,7 @@ test("bulk memory import commits bounded host transactions and retains every rec
 
 /** Verifies full-record export reads every memory beyond one host page without truncation. */
 test("memory export retains records beyond one host page", async t => {
-  const disk = await createDiskHarness(t), owner = await open(disk), space = await syntheticSpace(owner, 1005);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), owner = await open(disk), space = await syntheticSpace(owner, 1005);
   await owner.run(session => session.importMemorySpace("character:default", space, "SKIP"));
   const { exportMemoryBackup } = loadModule("src/backup.ts", disk.globals);
   const content = await owner.run(session => exportMemoryBackup("character:default", session));
@@ -247,23 +247,10 @@ test("memory export retains records beyond one host page", async t => {
 
 /** Verifies a rejected middle batch leaves resumable records and SKIP completes without duplicates. */
 test("a failed bulk import resumes with SKIP after earlier batches committed", async t => {
-  const disk = await createDiskHarness(t);
-  await open(disk);
-  const failure = new Error("Second bulk transaction rejected"), originalOpen = disk.storage.sqlite.open;
-  let handles = 0;
-  disk.storage.sqlite.open = async options => {
-    const database = await originalOpen(options);
-    if (handles++ !== 0) return database;
-    const transaction = database.transaction.bind(database);
-    let count = 0;
-    database.transaction = async (...args) => {
-      count += 1;
-      if (count === 2) throw failure;
-      return transaction(...args);
-    };
-    return database;
-  };
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" });
   const owner = await open(disk), space = await syntheticSpace(owner, 1005);
+  const failure = new Error("Second bulk transaction rejected");
+  disk.failNext("storage.commit", failure, 2);
   await assert.rejects(owner.run(session => session.importMemorySpace("character:default", space, "SKIP")), error => error === failure);
   const reopened = await open(disk), partial = await reopened.run(session => session.listMemories("character:default"));
   assert.ok(partial.length > 0 && partial.length < 1005, "the first batch must remain committed");

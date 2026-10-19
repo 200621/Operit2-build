@@ -273,16 +273,29 @@ class RuntimeBootstrapManager extends ChangeNotifier {
     String runtimeRoot,
     String workspaceRoot,
   ) async {
+    final normalizedRuntimeRoot = runtimeRoot.trim();
+    final normalizedWorkspaceRoot = workspaceRoot.trim();
+    // Identity switches keep these base roots and only remount
+    // identities/<id> during startup. Confirming them again is not a change.
+    if (_config.confirmed &&
+        _config.runtimeRoot == normalizedRuntimeRoot &&
+        _config.workspaceRoot == normalizedWorkspaceRoot) {
+      ClientLogger.i(
+        'confirm local runtime storage skipped unchanged roots',
+        tag: _logTag,
+      );
+      return;
+    }
     final stopwatch = Stopwatch()..start();
     ClientLogger.v(
-      'confirm local runtime storage start runtimeRoot=$runtimeRoot workspaceRoot=$workspaceRoot',
+      'confirm local runtime storage start runtimeRoot=$normalizedRuntimeRoot workspaceRoot=$normalizedWorkspaceRoot',
       tag: _logTag,
       verboseLevel: VerboseLevel.level1,
     );
     final localStorage = LocalRuntimeStorageConfig(
       confirmed: true,
-      runtimeRoot: runtimeRoot.trim(),
-      workspaceRoot: workspaceRoot.trim(),
+      runtimeRoot: normalizedRuntimeRoot,
+      workspaceRoot: normalizedWorkspaceRoot,
       identities: identities,
       activeIdentityId: activeIdentity.id,
       updatedAt: DateTime.now().millisecondsSinceEpoch,

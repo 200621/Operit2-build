@@ -148,6 +148,21 @@ test('chat rails are plugin-composed Boxes with generic hover styles and transit
   assert.equal(keyedNode(selected, 'sidebar-chat-rail-indicator-c2').props.hoverStyle.height, 16);
 });
 
+test('leaving the chat page clears row highlighting without reloading the catalog', async () => {
+  const chats = [summary('c1'), summary('c2')], screen = mount(context(chats), catalog(chats));
+  await screen.load();
+  const reads = screen.calls.filter(call => call.name === 'character-sidebar.catalog').length;
+  const away = await screen.update(context(chats, { currentChatId: null }));
+  for (const chat of chats) {
+    assert.equal(keyedNode(away.tree, 'sidebar-chat-rail-indicator-' + chat.id).props.height, 0);
+    const ops = keyedNode(away.tree, 'sidebar-chat-hit-' + chat.id).props.modifier.__modifierOps;
+    assert.equal(ops.find(op => op.name === 'background').args[0].alpha, 0);
+  }
+  const back = await screen.update(context(chats));
+  assert.equal(keyedNode(back.tree, 'sidebar-chat-rail-indicator-c1').props.height, 16);
+  assert.equal(screen.calls.filter(call => call.name === 'character-sidebar.catalog').length, reads);
+});
+
 test('chat swipe surfaces share the row radius and use compact centered action icons', async () => {
   const chats = [summary('c1'), summary('c2')], screen = mount(context(chats), catalog(chats));
   const { tree } = await screen.load();
@@ -275,6 +290,44 @@ test('generic long press and swipe callbacks render plugin-owned actions and con
   const deletion = await screen.dispatch(keyedNode(tree, 'sidebar-chat-swipe-c1').props.onEndAction);
   assert.ok(composeNodes(deletion.tree, node => node.type === 'Text' && node.props.text.includes('确认删除对话')).length > 0);
 });
+
+for (const view of ['characters', 'groups']) {
+  test(view + ' long press opens a host window without switching the current chat', async () => {
+    const chats = [summary('c1'), summary('c2')], roles = catalog(chats);
+    const data = view === 'characters' ? roles : { view, scopes: roles.sections.map(section => ({
+      id: section.id, title: section.title, ownerSelection: section.selection,
+      kind: section.kind, avatarUri: section.avatarUri, groups: section.conversationGroups,
+      ungrouped: section.ungroupedChats,
+    })) };
+    const current = { ...context(chats), input: { view }, chatSidebarCapabilities: { openInWindow: true } };
+    const screen = mount(current, data);
+    const { tree } = await screen.load();
+    const combined = keyedNode(tree, 'sidebar-chat-hit-c2').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+    const pressed = await screen.dispatch(combined.onLongClick);
+    const label = composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === '在新窗口打开');
+    assert.equal(label.length, 1);
+    const tile = composeNodes(pressed.tree, node => node.type === 'Surface' && node.props.onClick
+      && composeNodes(node, child => child === label[0]).length > 0)[0];
+    const reads = screen.calls.length;
+    const opened = await screen.dispatch(tile.props.onClick);
+    assert.deepEqual(JSON.parse(JSON.stringify(opened.actionResult)), { type: 'toolpkg.chat.openInWindow', chatId: 'c2' });
+    assert.equal(composeNodes(opened.tree, node => node.type === 'Dialog').length, 0);
+    assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c1').props.height, 16);
+    assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c2').props.height, 0);
+    assert.equal(screen.calls.length, reads);
+  });
+}
+
+for (const capabilities of [undefined, { openInWindow: false }]) {
+  test('long press hides detached windows when host capability is ' + JSON.stringify(capabilities), async () => {
+    const chats = [summary('c1')];
+    const screen = mount({ ...context(chats), ...(capabilities ? { chatSidebarCapabilities: capabilities } : {}) }, catalog(chats));
+    const { tree } = await screen.load();
+    const combined = keyedNode(tree, 'sidebar-chat-hit-c1').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+    const pressed = await screen.dispatch(combined.onLongClick);
+    assert.equal(composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === '在新窗口打开').length, 0);
+  });
+}
 
 test('swipe delete waits for confirmation and cancellation leaves the conversation intact', async () => {
   const chats = [summary('c1')], deleted = [];

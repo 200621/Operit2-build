@@ -559,16 +559,12 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         }
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
+            // The atomic writer stages a private sibling until commit; a killed
+            // process leaves it behind and no listing may ever publish it.
+            if isPartialStagingFile(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             let metadata = if managedWorkspace {
-                // The host's atomic writer stages a private sibling until commit.
-                // Never publish that transient file as user workspace content.
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with('.') && name.strip_suffix(".partial")
-                    .and_then(|stem| stem.rsplit_once('.'))
-                    .is_some_and(|(_, id)| uuid::Uuid::parse_str(id).is_ok()) {
-                    continue;
-                }
                 let metadata = fs::symlink_metadata(entry.path())?;
                 // Do not copy link targets or try reading sockets, devices and FIFOs as files.
                 if isStorageLink(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
@@ -586,6 +582,15 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         }
         Ok(entries)
     }
+}
+
+/// Detects the atomic writer's private `.{name}.{uuid}.partial` staging siblings.
+fn isPartialStagingFile(name: &str) -> bool {
+    name.starts_with('.')
+        && name
+            .strip_suffix(".partial")
+            .and_then(|stem| stem.rsplit_once('.'))
+            .is_some_and(|(_, id)| uuid::Uuid::parse_str(id).is_ok())
 }
 
 /// Detects symbolic links and Windows junctions without resolving their targets.
@@ -1043,6 +1048,26 @@ mod tests {
         let files = host.list("workspaces/project").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "workspaces/project/data.txt");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A killed process leaves an atomic-write staging sibling behind; runtime
+    /// listings must hide it exactly like workspace listings so directory
+    /// scanners such as the Space member reader never observe it.
+    #[test]
+    fn runtime_listing_hides_leftover_atomic_write_staging() {
+        let root = std::env::temp_dir().join(format!("operit-runtime-stage-{}", uuid::Uuid::new_v4()));
+        let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
+        host.writeBytes("runtime/space/members/core-device.preferences.json", b"{}")
+            .unwrap();
+        let staging = root
+            .join("runtime/space/members/.core-device.preferences.json.3d75c4a5-2e81-4d0a-8f85-11ee23df1e79.partial");
+        fs::write(&staging, b"uncommitted").unwrap();
+
+        let files = host.list("runtime/space/members").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "runtime/space/members/core-device.preferences.json");
+        assert!(staging.exists(), "the listing must not delete the staging file");
         fs::remove_dir_all(root).unwrap();
     }
 

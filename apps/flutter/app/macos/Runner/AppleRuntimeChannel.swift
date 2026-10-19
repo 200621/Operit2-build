@@ -478,7 +478,10 @@ final class AppleRuntimeChannel: NSObject {
       try FolderAccessStore.shared.ensureAccess(to: runtimeRoot)
       try FolderAccessStore.shared.ensureAccess(to: workspaceRoot)
       if handle != nil {
-        if configuredRuntimeRoot == runtimeRoot && configuredWorkspaceRoot == workspaceRoot {
+        // URL equality keeps a trailing slash that appears only after the
+        // directory exists, so the same roots look changed on a second apply.
+        if configuredRuntimeRoot?.path == runtimeRoot.path &&
+            configuredWorkspaceRoot?.path == workspaceRoot.path {
           result(nil)
           return
         }

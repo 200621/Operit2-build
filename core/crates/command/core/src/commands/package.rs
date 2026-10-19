@@ -163,11 +163,15 @@ fn list_packages(
     output: &mut CoreCommandOutput,
 ) -> Result<(), String> {
     let package_manager = package_manager(&tool_handler);
-    let mut guard = package_manager
+    let guard = package_manager
         .lock()
         .expect("package manager mutex poisoned");
     let enabled = guard.getEnabledPackageNames();
-    let packages = guard.getAvailablePackages();
+    let packages = guard
+        .getAvailablePackages()
+        .into_iter()
+        .filter(|(name, _)| !guard.isToolPkgContainer(name) && !guard.isToolPkgSubpackage(name))
+        .collect::<Vec<_>>();
     let mut items = Vec::new();
     output.push_stdout_line(format!("Packages: {}", packages.len()));
     for (name, package) in packages {
@@ -469,7 +473,7 @@ fn print_package_usage(output: &mut CoreCommandOutput) {
     let lines = vec![
         "operit2 package help",
         "operit2 package dir                                  Show user package directory.",
-        "operit2 package list                                 List loaded script packages and ToolPkg subpackages.",
+        "operit2 package list                                 List loaded standalone script packages.",
         "operit2 package more                                 List app-bundled official extras not loaded yet; type=script/toolpkg.",
         "operit2 package load <name>                          Load one item from 'package more' into the user package directory.",
         "operit2 package show <name>                          Show a loaded package.",

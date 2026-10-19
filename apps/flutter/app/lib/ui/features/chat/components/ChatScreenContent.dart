@@ -348,15 +348,20 @@ class ChatScreenContent extends StatelessWidget {
     return ChatRouteStatusHint(
       chatId: currentChatId,
       viewModel: viewModel,
-      builder: (suffix) => _buildChatInputWithRouteHint(inputStyle, suffix),
+      builder: (hint) => _buildChatInputWithRouteHint(inputStyle, hint),
     );
   }
 
   /// Passes the same Core-provided route label to both composer styles.
-  Widget _buildChatInputWithRouteHint(String inputStyle, String suffix) {
+  Widget _buildChatInputWithRouteHint(
+    String inputStyle,
+    ChatRouteComposerHint hint,
+  ) {
+    final sendMessage = hint.hostMissing ? hint.onClaimHost : onSendMessage;
     return switch (inputStyle) {
       UserPreferencesManager.INPUT_STYLE_AGENT => AgentChatInputSection(
-        hintSuffix: suffix,
+        hintSuffix: hint.suffix,
+        hostMissing: hint.hostMissing,
         controller: messageController,
         focusNode: inputFocusNode,
         isLoading: loading,
@@ -364,7 +369,7 @@ class ChatScreenContent extends StatelessWidget {
         mentionSuggestionPanel: mentionSuggestionPanel,
         viewModel: viewModel,
         currentChatId: currentChatId,
-        onSendMessage: onSendMessage,
+        onSendMessage: sendMessage,
         onQueueMessage: onQueueMessage,
         onCancelMessage: onCancelMessage,
         pendingQueueMessages: pendingQueueMessages,
@@ -391,7 +396,8 @@ class ChatScreenContent extends StatelessWidget {
         onSpeechInput: onSpeechInput,
       ),
       UserPreferencesManager.INPUT_STYLE_CLASSIC => ClassicChatInputSection(
-        hintSuffix: suffix,
+        hintSuffix: hint.suffix,
+        hostMissing: hint.hostMissing,
         controller: messageController,
         focusNode: inputFocusNode,
         isLoading: loading,
@@ -399,7 +405,7 @@ class ChatScreenContent extends StatelessWidget {
         mentionSuggestionPanel: mentionSuggestionPanel,
         viewModel: viewModel,
         currentChatId: currentChatId,
-        onSendMessage: onSendMessage,
+        onSendMessage: sendMessage,
         onQueueMessage: onQueueMessage,
         onCancelMessage: onCancelMessage,
         pendingQueueMessages: pendingQueueMessages,

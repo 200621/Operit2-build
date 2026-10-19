@@ -117,6 +117,13 @@ class ChatViewModel {
     return clients.serverCoreNodeRouter.bindingRouteStatusFlow(key: chatId);
   }
 
+  /// Moves a chat with missing route metadata onto the device running this UI.
+  Future<void> claimMissingBindingLocal(String chatId) {
+    return clients.serverRuntimeRemoteLinkService.claimMissingBindingLocal(
+      chatId: chatId,
+    );
+  }
+
   /// Watches messages for one explicit main-runtime chat id.
   Stream<List<ChatUiMessage>> watchMessages(String chatId) {
     return _chat.chatMessagesFlow(chatId: chatId);

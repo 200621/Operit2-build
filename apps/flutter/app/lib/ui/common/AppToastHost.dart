@@ -109,12 +109,23 @@ class _AppToastHostState extends State<AppToastHost> {
     if (_entries.isEmpty) {
       return widget.child;
     }
-    final media = MediaQuery.of(context);
-    final width = _noticeWidth(media);
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
         widget.child,
+        // This host is mounted above the navigator. The column carries its
+        // own overlay so close-button tooltips have an ancestor to attach to.
+        Positioned.fill(child: Overlay.wrap(child: _noticeColumn(context))),
+      ],
+    );
+  }
+
+  /// Places the live notice column at the top-right of the window.
+  Widget _noticeColumn(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final width = _noticeWidth(media);
+    return Stack(
+      children: <Widget>[
         Positioned(
           top: media.padding.top + 12,
           right: media.padding.right + 12,

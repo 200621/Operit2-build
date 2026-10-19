@@ -1820,6 +1820,7 @@
   "pluginLoadingFailed": "Failed",
   "pluginLoadingWaiting": "Waiting",
   "pluginLoadingKindPackage": "Package",
+  "pluginLoadingKindPlugin": "Plugin",
   "pluginLoadingKindMcp": "MCP",
   "pluginLoadingCompleteSuccess": "All packages and plugins loaded",
   "pluginLoadingCompleteWithFailures": "Some packages or plugins failed to load",
@@ -1829,6 +1830,9 @@
   "chatRouteRemoteOffline": "Remote {platform} offline",
   "chatRouteLoading": "Loading execution device",
   "chatRouteUnknown": "Execution device status unknown",
+  "chatRouteClaimHostPrompt": "The device host for this chat was not found. Switch it to this device?",
+  "chatRouteClaimHostYes": "Yes",
+  "chatRouteClaimHostNo": "No",
   "@chatRouteRemote": {
     "placeholders": {
       "platform": {

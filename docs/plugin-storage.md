@@ -28,6 +28,8 @@ const appearance = (await settings.data()).get<{ theme: string }>("appearance");
 
 A plugin may supply bounded data-only merge declarations identifying a catalog's identity/name fields and reference paths. These declarations are retained with the preference journal and adapted to the existing native `PreferenceMerge` executor. No TypeScript merge callbacks run during Space replay. Declared arrays, union variants, and identity prefixes describe reference locations; native UUID/content/name rules make the merge decisions.
 
+When a merge aliases one identity onto a surviving canonical identity, the decision is durable in the database's merge map and stays invisible to the plugin: local commits under an aliased root or child key are redirected onto the canonical rows (with their declared reference fields rewritten), and opening a merged database moves rows that an older writer left under a retired key back onto the canonical identities. A plugin therefore never needs to observe or replay an alias itself.
+
 Use `ToolPkg.getSpaceDataDir()` for the plugin's synchronized folder, or its local data directory for device-owned preferences. A Space cannot inject device-owned preference operations. SQLite/object openers reject preference files; JSON preference files are excluded from whole-file synchronization.
 
 The character plugin keeps its preferences inside its own persistent folder:

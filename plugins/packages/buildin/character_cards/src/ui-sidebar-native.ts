@@ -16,6 +16,7 @@ interface SidebarState {
 export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
   const [input] = ctx.useState<CurrentSidebar["input"] | null>("input", null);
   const [chatSidebar] = ctx.useState<CurrentSidebar["chatSidebar"] | null>("chatSidebar", null);
+  const [capabilities] = ctx.useState<{ openInWindow?: boolean } | null>("chatSidebarCapabilities", null);
   // Host snapshots only change on input updates. A viewport action should not
   // revalidate and clone the entire history or change every lazy dependency.
   const parsed = ctx.useMemo('native-sidebar-inputs', () => parseCurrentSidebar({ input, chatSidebar }), [input, chatSidebar]);
@@ -180,6 +181,13 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     });
   }
   function longPress(id: string): void { dialog("chatActions", id, chatFor(id).title); }
+  /** Requests host window creation without activating or mutating the current conversation. */
+  function openInWindow(id: string): { type: string; chatId: string } {
+    assertCurrent(); chatFor(id);
+    if (capabilities?.openInWindow !== true) throw new Error("Detached chat windows are not available");
+    update({ dialog: null });
+    return { type: "toolpkg.chat.openInWindow", chatId: id };
+  }
   async function changeFlag(id: string, pinned: boolean): Promise<void> {
     await run(async () => {
       const chat = chatFor(id);
@@ -353,12 +361,13 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     if (staged.kind === "chatActions") {
       const chat = chatFor(staged.id), ids = orderNeighbours(staged.id), index = ids.indexOf(staged.id);
       body.push(ctx.UI.Text({ text: chat.title, fillMaxWidth: true, maxLines: 2, style: "titleMedium", color: colors.onSurfaceVariant }));
-      const tile = (label: string, icon: string, callback: () => void | Promise<void>, enabled = true, danger = false): ComposeNode =>
+      const tile = (label: string, icon: string, callback: () => void, enabled = true, danger = false): ComposeNode =>
         ctx.UI.Surface({ fillMaxWidth: true, onClick: enabled ? callback : undefined, shape: { cornerRadius: 12 }, color: colors.surface },
           ctx.UI.Row({ fillMaxWidth: true, paddingHorizontal: 16, paddingVertical: 10, verticalAlignment: "center", spacing: 12 }, [
             ctx.UI.Icon({ name: icon, size: 20, tint: danger ? colors.error : colors.onSurfaceVariant }),
             ctx.UI.Text({ text: label, weight: 1, fontSize: 14, color: danger ? colors.error : colors.onSurface }),
           ]));
+      if (capabilities?.openInWindow === true) body.push(tile("在新窗口打开", "OpenInNew", () => openInWindow(chat.id)));
       body.push(tile("编辑名称", "Edit", () => renameChat(chat.id)),
         tile("上移", "KeyboardArrowUp", () => moveRelative(chat.id, -1), index > 0),
         tile("下移", "KeyboardArrowDown", () => moveRelative(chat.id, 1), index >= 0 && index < ids.length - 1),

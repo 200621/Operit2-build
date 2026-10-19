@@ -1183,3 +1183,111 @@ fn byte_budgets_bound_exported_pages_without_reordering() {
     f.call(json!({"op":"close","handle":handle})).unwrap();
     f.dispose();
 }
+
+/// Opens the owners/memory fixture whose identities follow a preference catalog.
+fn open_owner_merge_fixture(fixture: &Fixture, withMerge: bool) -> String {
+    let mut request = json!({"op":"open","path":fixture.path,"kind":"objects"});
+    if withMerge {
+        request["merge"] = json!({"version":3,"maxEntities":1,"maxReferences":2,"entities":[{
+            "collection":"owners","identityColumn":"ownerKey","nameColumn":null,"ignoredColumns":[],
+            "keyEncoding":"slash_root","matchMode":"identity",
+            "keyReferences":[{"prefix":"character:","target":{"kind":"preference","path":"runtime/config/preferences/cards.preferences.json"}}],
+            "childCollections":["memories"],
+            "references":[
+                {"collection":"owners","column":"document","target":{"kind":"collection","collection":"owners"},
+                 "keyPrefix":"owners/","keySuffix":"/USER.md","valueEncoding":"uri_component"},
+                {"collection":"memories","column":"owner","target":{"kind":"preference","path":"runtime/config/preferences/cards.preferences.json"},
+                 "keyPrefix":"character:","keySuffix":"","valueEncoding":"direct"}
+            ]}]});
+    }
+    fixture.call(request).unwrap()["handle"].as_str().unwrap().to_string()
+}
+
+/// Builds one object mutation for an explicitly selected collection.
+fn put_in(collection: &str, key: &str, value: Value) -> Value {
+    json!({"collection":collection,"key":key,"value":value,"deleted":false,"checkVersion":false,"expectedVersion":null})
+}
+
+/// Canonicalizes one owners space plus its memory children for the alias tests.
+fn seed_aliased_owner(fixture: &Fixture, handle: &str, oldId: &str, newId: &str) {
+    let oldKey = format!("character:{oldId}");
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m1"), json!({"owner": oldKey, "title": "kept"}))
+    ]})).unwrap();
+    PluginStorage::reconcilePreferenceReferences(fixture.host.clone(), &std::collections::BTreeMap::from([
+        (format!("runtime/config/preferences/cards.preferences.json\u{001f}{oldId}"), newId.to_string()),
+    ])).unwrap();
+}
+
+/// Redirects a live writer's pre-merge identities onto the canonical rows so a
+/// background rename can never be undone by the next local commit.
+#[test]
+fn local_commits_redirect_aliased_keys_onto_canonical_rows() {
+    let fixture = Fixture::new("redirect");
+    let oldId = "c3c356e7-17fb-4cce-b38b-4e230352564f";
+    let newId = "13f64b4b-a19c-4daf-a27c-9f62ba873fe6";
+    let oldKey = format!("character:{oldId}");
+    let canonicalKey = format!("character:{newId}");
+    let handle = open_owner_merge_fixture(&fixture, true);
+    seed_aliased_owner(&fixture, &handle, oldId, newId);
+
+    // A stale writer still holding the pre-merge identity commits again.
+    fixture.call(json!({"op":"commit","handle":handle,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m2"), json!({"owner": oldKey, "title": "resurrected"}))
+    ]})).unwrap();
+
+    let oldOwners = fixture.call(json!({"op":"get","handle":handle,"collection":"owners","key":oldKey})).unwrap();
+    assert_eq!(oldOwners, json!(null), "the retired owners key must stay empty");
+    let canonicalOwners = fixture.call(json!({"op":"get","handle":handle,"collection":"owners","key":canonicalKey})).unwrap();
+    assert_eq!(canonicalOwners["value"]["ownerKey"], json!(canonicalKey));
+    assert_eq!(canonicalOwners["value"]["document"], json!(format!("owners/character%3A{newId}/USER.md")));
+    let resurrected = fixture.call(json!({"op":"get","handle":handle,"collection":"memories","key":format!("{canonicalKey}/m2")})).unwrap();
+    assert_eq!(resurrected["value"]["owner"], json!(canonicalKey));
+    assert_eq!(resurrected["value"]["title"], json!("resurrected"));
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":handle,"collection":"memories","key":format!("{oldKey}/m2")})).unwrap(),
+        json!(null)
+    );
+    fixture.dispose();
+}
+
+/// Reopening a merged database moves rows that a pre-fix writer left under an
+/// aliased identity back onto the canonical rows before the first read.
+#[test]
+fn opening_a_database_heals_rows_written_under_aliased_identities() {
+    let fixture = Fixture::new("heal");
+    let oldId = "c3c356e7-17fb-4cce-b38b-4e230352564f";
+    let newId = "13f64b4b-a19c-4daf-a27c-9f62ba873fe6";
+    let oldKey = format!("character:{oldId}");
+    let canonicalKey = format!("character:{newId}");
+    let handle = open_owner_merge_fixture(&fixture, true);
+    seed_aliased_owner(&fixture, &handle, oldId, newId);
+
+    // A writer without the merge contract recreates rows under the retired key.
+    let bare = open_owner_merge_fixture(&fixture, false);
+    fixture.call(json!({"op":"commit","handle":bare,"mutations":[
+        put_in("owners", &oldKey, json!({"ownerKey": oldKey, "document": format!("owners/character%3A{oldId}/USER.md")})),
+        put_in("memories", &format!("{oldKey}/m2"), json!({"owner": oldKey, "title": "orphan"}))
+    ]})).unwrap();
+    fixture.call(json!({"op":"close","handle":bare})).unwrap();
+    fixture.call(json!({"op":"close","handle":handle})).unwrap();
+
+    let reopened = open_owner_merge_fixture(&fixture, true);
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":reopened,"collection":"owners","key":oldKey})).unwrap(),
+        json!(null)
+    );
+    let canonicalOwners = fixture.call(json!({"op":"get","handle":reopened,"collection":"owners","key":canonicalKey})).unwrap();
+    assert_eq!(canonicalOwners["value"]["ownerKey"], json!(canonicalKey));
+    assert_eq!(canonicalOwners["value"]["document"], json!(format!("owners/character%3A{newId}/USER.md")));
+    let orphan = fixture.call(json!({"op":"get","handle":reopened,"collection":"memories","key":format!("{canonicalKey}/m2")})).unwrap();
+    assert_eq!(orphan["value"]["owner"], json!(canonicalKey));
+    assert_eq!(orphan["value"]["title"], json!("orphan"));
+    assert_eq!(
+        fixture.call(json!({"op":"get","handle":reopened,"collection":"memories","key":format!("{oldKey}/m2")})).unwrap(),
+        json!(null)
+    );
+    fixture.dispose();
+}

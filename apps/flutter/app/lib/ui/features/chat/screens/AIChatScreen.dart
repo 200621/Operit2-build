@@ -212,6 +212,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
   StreamSubscription<List<ChatUiMessage>>? _messagesSubscription;
   StreamSubscription<core_proxy.ChatState>? _chatStateSubscription;
   String? _requestedChatFlowChatId;
+  bool _hasBoundChatFlow = false;
   int _chatFlowBindingGeneration = 0;
 
   /// Expires composer presentations on pending as well as committed selections.
@@ -1398,9 +1399,10 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
 
   /// Rebinds the two per-chat Core watches after the selected chat changes.
   void _bindChatFlows(String? chatId) {
-    if (chatId == _requestedChatFlowChatId) {
+    if (_hasBoundChatFlow && chatId == _requestedChatFlowChatId) {
       return;
     }
+    _hasBoundChatFlow = true;
     _requestedChatFlowChatId = chatId;
     _chatSelectionGeneration += 1;
     _clearChatFlowError();
@@ -1448,6 +1450,15 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
       return;
     }
     if (chatId == null || chatId.isEmpty) {
+      if (mounted && generation == _chatFlowBindingGeneration) {
+        _mutateChatContentData(() {
+          _clearChatFlowError();
+          _loading = false;
+          _messages.clear();
+          _currentChatId = null;
+          _inputProcessingState = core_proxy.InputProcessingState.idle();
+        });
+      }
       return;
     }
     _messagesSubscription = _viewModel

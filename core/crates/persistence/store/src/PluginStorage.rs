@@ -832,6 +832,16 @@ impl PluginStorageSession {
             )?);
             registerDatabase(host, &manifest)?;
             registerFile(storage.clone(), &manifest)?;
+            if manifest.merge.is_some() {
+                let descriptor = manifest.merge.clone().expect("merge descriptor checked");
+                database.store.transaction(|tx| {
+                    if hasDurableAlias(tx)? {
+                        reconcileDurableMappings(tx, manifest.kind, &descriptor)?;
+                        tx.execute("DELETE FROM _operit_dirty", Vec::new())?;
+                    }
+                    Ok(())
+                })?;
+            }
             let handle = Uuid::new_v4().to_string();
             self.handles
                 .lock()
@@ -1054,6 +1064,51 @@ fn executeStatements(
     Ok(results)
 }
 
+/// Redirects writes that still use a pre-merge identity onto the surviving canonical rows.
+///
+/// A live plugin session keeps its loaded identities across a background merge
+/// that aliased them away; without this redirect its next commit would recreate
+/// orphaned rows under the retired key.
+fn redirectAliasedMutations(
+    database: &Database,
+    tx: &mut SqliteTransaction<'_>,
+    mut mutations: Vec<StorageMutation>,
+) -> Result<Vec<StorageMutation>, SqliteStoreError> {
+    let Some(descriptor) = database.merge.as_ref() else { return Ok(mutations); };
+    let mut aliases: Option<BTreeMap<String, String>> = None;
+    for mutation in mutations.iter_mut() {
+        let Some(entity) = descriptor.entities.iter().find(|entity| {
+            entity.collection == mutation.collection
+                || entity.child_collections.iter().any(|name| name == &mutation.collection)
+        }) else { continue; };
+        let isRoot = entity.collection == mutation.collection;
+        let root = if isRoot {
+            mutation.key.clone()
+        } else {
+            let Some(root) = rootFromChildKey(&mutation.key, entity.key_encoding)? else { continue; };
+            root
+        };
+        let Some(canonical) = mergeMapping(tx, &entity.collection, &root)? else { continue };
+        if canonical == root { continue; }
+        if aliases.is_none() { aliases = Some(durablePreferenceAliases(tx)?); }
+        if isRoot {
+            mutation.key = canonical.clone();
+        } else {
+            mutation.key = rewriteChildKey(&mutation.key, &root, &canonical, entity.key_encoding)?;
+        }
+        if mutation.deleted { continue; }
+        let collection = MergeCollection::open(tx, database.kind, &mutation.collection)?;
+        let mut value = mutation.value.clone();
+        if isRoot {
+            collection.mapText(&mut value, &entity.identity_column, &mut |_| Ok(canonical.clone()))?;
+        }
+        let pending = BTreeMap::from([((entity.collection.clone(), root.clone()), canonical.clone())]);
+        rewriteMergeReferences(tx, &collection, descriptor, &mut value, &pending, aliases.as_ref().expect("aliases loaded"))?;
+        mutation.value = value;
+    }
+    Ok(mutations)
+}
+
 /// Checks all versions and stages all key mutations inside one transaction.
 fn commitValues(
     database: &Database,
@@ -1063,6 +1118,7 @@ fn commitValues(
     if mutations.is_empty() || mutations.len() > 1000 {
         return Err(failure("Object commit requires 1..1000 mutations"));
     }
+    let mutations = redirectAliasedMutations(database, tx, mutations)?;
     let mut seen = BTreeSet::new();
     let mut changes = Vec::new();
     for mutation in mutations {
@@ -2023,6 +2079,43 @@ fn saveMergeMapping(
     Ok(())
 }
 
+/// Reserved merge-map collection mirroring preference identity aliases into every plugin database.
+const PREFERENCE_ALIAS_COLLECTION: &str = "_preference_aliases";
+
+/// Reads the durable mirror of preference identity aliases recorded by earlier reconciliations.
+fn durablePreferenceAliases(
+    tx: &mut SqliteTransaction<'_>,
+) -> Result<BTreeMap<String, String>, SqliteStoreError> {
+    tx.queryRows(
+        "SELECT remote_key,canonical_key FROM _operit_merge_map WHERE collection=?1 ORDER BY remote_key",
+        vec![SqliteValue::Text(PREFERENCE_ALIAS_COLLECTION.to_string())],
+    )?
+    .into_iter()
+    .map(|row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+    .collect()
+}
+
+/// Mirrors one batch of preference identity aliases so local writers can follow them later.
+fn recordPreferenceAliases(
+    tx: &mut SqliteTransaction<'_>,
+    preferenceReferences: &BTreeMap<String, String>,
+) -> Result<(), SqliteStoreError> {
+    for (key, canonical) in preferenceReferences {
+        saveMergeMapping(tx, PREFERENCE_ALIAS_COLLECTION, "preferences", key, canonical)?;
+    }
+    Ok(())
+}
+
+/// Reports whether any durable alias actually redirects one identity onto another.
+fn hasDurableAlias(tx: &mut SqliteTransaction<'_>) -> Result<bool, SqliteStoreError> {
+    let row = tx.queryOne(
+        "SELECT EXISTS(SELECT 1 FROM _operit_merge_map WHERE canonical_key<>remote_key)",
+        Vec::new(),
+    )?
+    .ok_or_else(|| failure("Merge alias probe returned no row"))?;
+    Ok(row.get::<_, i64>(0)? != 0)
+}
+
 /// Rekeys an equivalent materialized entity and every explicitly declared dependent identity.
 fn rekeyEntity(
     tx: &mut SqliteTransaction<'_>, kind: StorageKind, descriptor: &StorageMergeDescriptor,
@@ -2040,12 +2133,23 @@ fn rekeyEntity(
             collection.identity(&mut value, entity, &rewritten, old, new)?;
             collection.write(tx, &key, None)?;
             collection.write(tx, &rewritten, Some(&value))?;
-            tx.execute("UPDATE _operit_versions SET key=?3 WHERE collection=?1 AND key=?2",
-                vec![SqliteValue::Text(name.clone()), SqliteValue::Text(key), SqliteValue::Text(rewritten)])?;
+            // The canonical row may already carry its own version when a local
+            // writer resurrected the retired key; the moved row replaces it so
+            // the published content and its version stay one atomic truth.
+            tx.execute(
+                "INSERT INTO _operit_versions(collection,key,created_at,origin,sequence) SELECT collection,?3,created_at,origin,sequence FROM _operit_versions WHERE collection=?1 AND key=?2 ON CONFLICT(collection,key) DO UPDATE SET created_at=excluded.created_at,origin=excluded.origin,sequence=excluded.sequence",
+                vec![SqliteValue::Text(name.clone()), SqliteValue::Text(key.clone()), SqliteValue::Text(rewritten.clone())],
+            )?;
+            tx.execute("DELETE FROM _operit_versions WHERE collection=?1 AND key=?2",
+                vec![SqliteValue::Text(name.clone()), SqliteValue::Text(key)])?;
         }
     }
-    tx.execute("UPDATE _operit_merge_names SET key=?3 WHERE collection=?1 AND key=?2",
-        vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(old.to_string()), SqliteValue::Text(new.to_string())])?;
+    tx.execute(
+        "INSERT INTO _operit_merge_names(collection,key,name) SELECT collection,?3,name FROM _operit_merge_names WHERE collection=?1 AND key=?2 ON CONFLICT(collection,key) DO UPDATE SET name=excluded.name",
+        vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(old.to_string()), SqliteValue::Text(new.to_string())],
+    )?;
+    tx.execute("DELETE FROM _operit_merge_names WHERE collection=?1 AND key=?2",
+        vec![SqliteValue::Text(entity.collection.clone()), SqliteValue::Text(old.to_string())])?;
     for dependent in &descriptor.entities {
         for reference in &dependent.key_references {
             if matches!(&reference.target, StorageMergeTarget::Collection { collection } if collection == &entity.collection) {
@@ -2339,9 +2443,61 @@ pub fn reconcilePreferenceReferences(
             let store = SqliteStore::openWithHost(host.clone(), &manifest.path)?;
             store.transaction(|tx| {
                 reconcileLocalReferences(tx, manifest.kind, &descriptor, preferenceReferences)?;
+                recordPreferenceAliases(tx, preferenceReferences)?;
                 tx.execute("DELETE FROM _operit_dirty", Vec::new())?;
                 Ok(())
             })?;
+        }
+    }
+    Ok(())
+}
+
+/// Heals rows written under identities that a completed merge aliased away.
+///
+/// Local writers can hold a pre-merge identity long after the preference and
+/// object merges renamed it (a live plugin session keeps writing its loaded
+/// owner keys). Their rows are moved onto the surviving canonical identities
+/// using only the durable merge map, so a plugin opens consistent state even
+/// when no synchronization batch runs.
+fn reconcileDurableMappings(
+    tx: &mut SqliteTransaction<'_>, kind: StorageKind,
+    descriptor: &StorageMergeDescriptor,
+) -> Result<(), SqliteStoreError> {
+    for entity in &descriptor.entities {
+        let collection = MergeCollection::open(tx, kind, &entity.collection)?;
+        for (key, _) in collection.read(tx)? {
+            if let Some(canonical) = mergeMapping(tx, &entity.collection, &key)? {
+                if canonical != key {
+                    rekeyEntity(tx, kind, descriptor, entity, &key, &canonical, "merge-map")?;
+                }
+            }
+        }
+        for name in &entity.child_collections {
+            let child = MergeCollection::open(tx, kind, name)?;
+            for (key, _) in child.read(tx)? {
+                let Some(root) = rootFromChildKey(&key, entity.key_encoding)? else { continue; };
+                if let Some(canonical) = mergeMapping(tx, &entity.collection, &root)? {
+                    if canonical != root {
+                        rekeyEntity(tx, kind, descriptor, entity, &root, &canonical, "merge-map")?;
+                    }
+                }
+            }
+        }
+    }
+    let preferenceAliases = durablePreferenceAliases(tx)?;
+    let mut references = BTreeMap::<String, Vec<&StorageMergeReference>>::new();
+    for reference in descriptor.entities.iter().flat_map(|entity| entity.references.iter()) {
+        references.entry(reference.collection.clone()).or_default().push(reference);
+    }
+    for (name, references) in references {
+        let collection = MergeCollection::open(tx, kind, &name)?;
+        for (key, mut value) in collection.read(tx)? {
+            let original = value.clone();
+            for reference in &references {
+                collection.mapText(&mut value, &reference.column, &mut |value|
+                    resolveMergeReference(tx, reference, value, &BTreeMap::new(), &preferenceAliases))?;
+            }
+            if value != original { collection.write(tx, &key, Some(&value))?; }
         }
     }
     Ok(())

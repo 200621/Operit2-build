@@ -38,6 +38,20 @@ Stable node keys and an unchanged wrapper hierarchy preserve in-flight transitio
 and ink ripples when chat selection refreshes. Flutter's own Workspace drawer is
 independent and may keep using its internal rail widget.
 
+## Host sidebar state and detached windows
+
+The host supplies `chatSidebar.currentChatId` only while its chat route is active;
+other destinations supply `null`, clearing the role sidebar's selected row without
+changing the actual current conversation or reloading the role catalog.
+
+`chatSidebarCapabilities.openInWindow` is separate host-supplied Compose input.
+Only an explicit `true` exposes “在新窗口打开” in the long-press dialog. The action
+returns exactly `{ type: "toolpkg.chat.openInWindow", chatId }`; Flutter validates
+the live registration and conversation, then uses its existing desktop launcher
+and current theme snapshot without activating the chat in the original window.
+Missing capability input (including older hosts) keeps this desktop-only action
+hidden. The canonical sidebar metadata/catalog contract is unchanged.
+
 ## Chat input menu
 
 The package registers one `chat_input_menu` navigation entry pointing to

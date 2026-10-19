@@ -544,6 +544,7 @@ function deleteConversationGroupMembers(chatIds, deleteChat) {
 function renderSidebarScreen(ctx) {
   const [input] = ctx.useState("input", null);
   const [chatSidebar] = ctx.useState("chatSidebar", null);
+  const [capabilities] = ctx.useState("chatSidebarCapabilities", null);
   const parsed = ctx.useMemo("native-sidebar-inputs", () => parseCurrentSidebar({ input, chatSidebar }), [input, chatSidebar]);
   const current = ctx.useRef("native-sidebar-current", parsed);
   current.current = parsed;
@@ -765,6 +766,13 @@ function renderSidebarScreen(ctx) {
   function longPress(id2) {
     dialog("chatActions", id2, chatFor(id2).title);
   }
+  function openInWindow(id2) {
+    assertCurrent();
+    chatFor(id2);
+    if (capabilities?.openInWindow !== true) throw new Error("Detached chat windows are not available");
+    update({ dialog: null });
+    return { type: "toolpkg.chat.openInWindow", chatId: id2 };
+  }
   function changeFlag(id2, pinned) {
     return __async(this, null, function* () {
       yield run(() => __async(null, null, function* () {
@@ -810,17 +818,17 @@ function renderSidebarScreen(ctx) {
   function menu(kind, id2) {
     if (kind === "chat") {
       const chat = chatFor(id2);
-      return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46309",["sidebar-chat-menu-" + id2,!state.busy,chat.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876",chat.locked ? "\u89E3\u9501" : "\u9501\u5B9A",chat.locked ? "LockOpen" : "Lock",(index) => __async(null, null, function* () {
+      return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46653",["sidebar-chat-menu-" + id2,!state.busy,chat.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876",chat.locked ? "\u89E3\u9501" : "\u9501\u5B9A",chat.locked ? "LockOpen" : "Lock",(index) => __async(null, null, function* () {
           if (index === 0) renameChat(id2);
           else if (index === 1) yield changeFlag(id2, true);
           else if (index === 2) yield changeFlag(id2, false);
           else if (index === 3) yield deleteChat(id2);
-        }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47161",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_47161)],__operitUiTemplate_46309);
+        }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47505",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_47505)],__operitUiTemplate_46653);
     }
     if (kind === "ungrouped") {
       const scope = scopeFor(id2);
       const pinned = scope.ungrouped.length > 0 && scope.ungrouped.every((chat) => chat.pinned);
-      return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47444",["sidebar-ungrouped-menu-" + id2,!state.busy && state.data !== null,pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876",pinned ? "PushPinOutlined" : "PushPinRounded",(index) => __async(null, null, function* () {
+      return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47788",["sidebar-ungrouped-menu-" + id2,!state.busy && state.data !== null,pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876",pinned ? "PushPinOutlined" : "PushPinRounded",(index) => __async(null, null, function* () {
           if (index === 0) return createChat(scope.ownerSelection ?? "", null);
           if (index === 1) dialog("renameUngrouped", id2, "\u672A\u5206\u7EC4");
           if (index === 2) yield run(() => __async(null, null, function* () {
@@ -829,7 +837,7 @@ function renderSidebarScreen(ctx) {
           }));
           if (index === 3) dialog("deleteUngrouped", id2, "\u672A\u5206\u7EC4");
           return null;
-        }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48648",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_48648)],__operitUiTemplate_47444);
+        }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48992",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_48992)],__operitUiTemplate_47788);
     }
     const group = scopeFor(id2).groups.find((value) => value.id === id2);
     const items = [
@@ -838,7 +846,7 @@ function renderSidebarScreen(ctx) {
       { label: group.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876", icon: group.pinned ? "PushPinOutlined" : "PushPinRounded" },
       { label: "\u5220\u9664", icon: "DeleteOutlineRounded", danger: true, dividerBefore: true }
     ];
-    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49246",["sidebar-group-menu-" + id2,items,!state.busy,(index) => __async(null, null, function* () {
+    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49590",["sidebar-group-menu-" + id2,items,!state.busy,(index) => __async(null, null, function* () {
         if (index === 0) {
           const owner2 = scopeFor(id2).ownerSelection;
           return createChat(owner2 ?? "", id2);
@@ -849,7 +857,7 @@ function renderSidebarScreen(ctx) {
         }));
         else if (index === 3) dialog("delete", id2, group.name);
         return null;
-      }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50030",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_50030)],__operitUiTemplate_49246);
+      }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50374",[colors.onSurfaceVariant.copy({ alpha: 0.78 })],__operitUiTemplate_50374)],__operitUiTemplate_49590);
   }
   function drop(chatId, scopeId, groupId, targetId) {
     return __async(this, null, function* () {
@@ -882,10 +890,10 @@ function renderSidebarScreen(ctx) {
   const data = visibleCatalog();
   const toggleSection = (id2) => update({ collapsed: state.collapsed.includes(id2) ? state.collapsed.filter((key) => key !== id2) : [...state.collapsed, id2] });
   const toggleGroup = (id2) => update({ expandedGroups: state.expandedGroups.includes(id2) ? state.expandedGroups.filter((key) => key !== id2) : [...state.expandedGroups, id2] });
-  const rows = [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52045",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52233",[colors.primaryContainer,colors.onPrimaryContainer,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52476",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52549",[() => __async(null, null, function* () {
+  const rows = [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52389",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52577",[colors.primaryContainer,colors.onPrimaryContainer,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52820",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52893",[() => __async(null, null, function* () {
             const active = yield callMainDomain("activePrompt.get", {});
             return createChat(encodeSelection(active), null);
-          }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:52975",[colors.onPrimaryContainer],__operitUiTemplate_52975),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53065",[{ text: "\u65B0\u5EFA\u5BF9\u8BDD", fontSize: 13, fontWeight: "600", color: colors.onPrimaryContainer, ...{ letterSpacing: -0.1 } }],__operitUiTemplate_53065)],__operitUiTemplate_52549),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53230",[colors.onPrimaryContainer.copy({ alpha: 0.16 })],__operitUiTemplate_53230),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53337",[() => __async(null, null, function* () {
+          }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53319",[colors.onPrimaryContainer],__operitUiTemplate_53319),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53409",[{ text: "\u65B0\u5EFA\u5BF9\u8BDD", fontSize: 13, fontWeight: "600", color: colors.onPrimaryContainer, ...{ letterSpacing: -0.1 } }],__operitUiTemplate_53409)],__operitUiTemplate_52893),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53574",[colors.onPrimaryContainer.copy({ alpha: 0.16 })],__operitUiTemplate_53574),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53681",[() => __async(null, null, function* () {
             const active = yield callMainDomain("activePrompt.get", {});
             const selection = encodeSelection(active);
             const catalog = visibleCatalog();
@@ -893,8 +901,8 @@ function renderSidebarScreen(ctx) {
             const scope = catalog.view === "characters" ? catalog.sections.find((section) => section.selection === selection) : catalog.scopes.find((scope2) => scope2.ownerSelection === selection);
             if (scope === void 0) throw new Error("The active owner is absent from the actual sidebar catalog");
             dialog("create", scope.id);
-          }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:54197",[colors.onPrimaryContainer],__operitUiTemplate_54197)],__operitUiTemplate_53337)],__operitUiTemplate_52476)],__operitUiTemplate_52233),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:54358",[() => update({ search: !state.search }),ctx.Modifier.clip({ cornerRadius: 6 }),state.search ? colors.secondaryContainer.copy({ alpha: 0.35 }) : colors.surface.copy({ alpha: 0 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:54783",[state.search ? "SearchOff" : "Search",colors.onSurfaceVariant.copy({ alpha: 0.78 }),state.search ? "\u6536\u8D77\u641C\u7D22" : "\u641C\u7D22\u5BF9\u8BDD"],__operitUiTemplate_54783)],__operitUiTemplate_54358)],__operitUiTemplate_52045)];
-  if (state.search) rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:55042",[{
+          }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:54541",[colors.onPrimaryContainer],__operitUiTemplate_54541)],__operitUiTemplate_53681)],__operitUiTemplate_52820)],__operitUiTemplate_52577),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:54702",[() => update({ search: !state.search }),ctx.Modifier.clip({ cornerRadius: 6 }),state.search ? colors.secondaryContainer.copy({ alpha: 0.35 }) : colors.surface.copy({ alpha: 0 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:55127",[state.search ? "SearchOff" : "Search",colors.onSurfaceVariant.copy({ alpha: 0.78 }),state.search ? "\u6536\u8D77\u641C\u7D22" : "\u641C\u7D22\u5BF9\u8BDD"],__operitUiTemplate_55127)],__operitUiTemplate_54702)],__operitUiTemplate_52389)];
+  if (state.search) rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:55386",[{
     key: "sidebar-search",
     value: state.query,
     onValueChange: (query) => update({ query }),
@@ -904,8 +912,8 @@ function renderSidebarScreen(ctx) {
     paddingHorizontal: 12,
     paddingBottom: 12,
     ...{ shape: { cornerRadius: 14 } }
-  }],__operitUiTemplate_55042));
-  if (state.error !== "") rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:55384",[state.error,colors.error],__operitUiTemplate_55384));
+  }],__operitUiTemplate_55386));
+  if (state.error !== "") rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:55728",[state.error,colors.error],__operitUiTemplate_55728));
   let lazyItems = null;
   if (data !== null) {
     const actions = {
@@ -933,17 +941,18 @@ function renderSidebarScreen(ctx) {
       layoutActions.current,
       state.defaultAvatar
     );
-  } else if (state.loading) rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56227",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56311",null,__operitUiTemplate_56311)],__operitUiTemplate_56227));
+  } else if (state.loading) rows.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56571",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56655",null,__operitUiTemplate_56655)],__operitUiTemplate_56571));
   const staticItemCount = rows.length;
   const content = lazyItems === null ? [...rows] : [...rows, ...lazyItems.content];
   if (state.dialog !== null) {
-    const staged = state.dialog, body = [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56550",[{ create: "\u65B0\u5EFA\u5206\u7EC4", rename: "\u91CD\u547D\u540D\u5206\u7EC4", delete: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameUngrouped: "\u91CD\u547D\u540D\u5206\u7EC4", deleteUngrouped: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameChat: "\u7F16\u8F91\u5BF9\u8BDD\u540D\u79F0", deleteChat: "\u5220\u9664\u5BF9\u8BDD", chatActions: "\u804A\u5929\u8BB0\u5F55" }[staged.kind]],__operitUiTemplate_56550)];
-    if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:57156",[staged.name,staged.kind === "renameChat" ? "\u5BF9\u8BDD\u540D\u79F0" : "\u5206\u7EC4\u540D\u79F0",(name) => update({ dialog: { ...staged, name } }),!state.busy],__operitUiTemplate_57156));
-    if (staged.kind === "delete" || staged.kind === "deleteUngrouped" || staged.kind === "deleteChat") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:57522",[staged.kind === "deleteChat" ? `\u786E\u8BA4\u5220\u9664\u5BF9\u8BDD\u201C${staged.name}\u201D\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002` : `\u786E\u8BA4\u5220\u9664\u201C${staged.name}\u201D\u53CA\u5176\u4E2D\u7684\u5168\u90E8\u5BF9\u8BDD\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002`],__operitUiTemplate_57522));
+    const staged = state.dialog, body = [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:56894",[{ create: "\u65B0\u5EFA\u5206\u7EC4", rename: "\u91CD\u547D\u540D\u5206\u7EC4", delete: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameUngrouped: "\u91CD\u547D\u540D\u5206\u7EC4", deleteUngrouped: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameChat: "\u7F16\u8F91\u5BF9\u8BDD\u540D\u79F0", deleteChat: "\u5220\u9664\u5BF9\u8BDD", chatActions: "\u804A\u5929\u8BB0\u5F55" }[staged.kind]],__operitUiTemplate_56894)];
+    if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:57500",[staged.name,staged.kind === "renameChat" ? "\u5BF9\u8BDD\u540D\u79F0" : "\u5206\u7EC4\u540D\u79F0",(name) => update({ dialog: { ...staged, name } }),!state.busy],__operitUiTemplate_57500));
+    if (staged.kind === "delete" || staged.kind === "deleteUngrouped" || staged.kind === "deleteChat") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:57866",[staged.kind === "deleteChat" ? `\u786E\u8BA4\u5220\u9664\u5BF9\u8BDD\u201C${staged.name}\u201D\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002` : `\u786E\u8BA4\u5220\u9664\u201C${staged.name}\u201D\u53CA\u5176\u4E2D\u7684\u5168\u90E8\u5BF9\u8BDD\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002`],__operitUiTemplate_57866));
     if (staged.kind === "chatActions") {
       const chat = chatFor(staged.id), ids = orderNeighbours(staged.id), index = ids.indexOf(staged.id);
-      body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58030",[chat.title,colors.onSurfaceVariant],__operitUiTemplate_58030));
-      const tile = (label, icon, callback, enabled = true, danger = false) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58231",[enabled ? callback : void 0,colors.surface,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58377",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58510",[icon,danger ? colors.error : colors.onSurfaceVariant],__operitUiTemplate_58510),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58614",[label,danger ? colors.error : colors.onSurface],__operitUiTemplate_58614)],__operitUiTemplate_58377)],__operitUiTemplate_58231);
+      body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58374",[chat.title,colors.onSurfaceVariant],__operitUiTemplate_58374));
+      const tile = (label, icon, callback, enabled = true, danger = false) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58575",[enabled ? callback : void 0,colors.surface,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58721",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58854",[icon,danger ? colors.error : colors.onSurfaceVariant],__operitUiTemplate_58854),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:58958",[label,danger ? colors.error : colors.onSurface],__operitUiTemplate_58958)],__operitUiTemplate_58721)],__operitUiTemplate_58575);
+      if (capabilities?.openInWindow === true) body.push(tile("\u5728\u65B0\u7A97\u53E3\u6253\u5F00", "OpenInNew", () => openInWindow(chat.id)));
       body.push(
         tile("\u7F16\u8F91\u540D\u79F0", "Edit", () => renameChat(chat.id)),
         tile("\u4E0A\u79FB", "KeyboardArrowUp", () => moveRelative(chat.id, -1), index > 0),
@@ -953,16 +962,16 @@ function renderSidebarScreen(ctx) {
         tile("\u5220\u9664", "DeleteOutline", () => deleteChat(chat.id), true, true)
       );
     }
-    if (staged.progress !== null) body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:59436",[`\u5DF2\u5220\u9664 ${staged.progress.deletedChatIds.length} \u6761\u5BF9\u8BDD
-` + staged.progress.failedChatIds.map((value) => value.chatId + ": " + value.error).join("\n"),staged.progress.failedChatIds.length === 0 ? colors.onSurface : colors.error],__operitUiTemplate_59436));
-    if (state.error !== "") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:59803",[state.error,colors.error],__operitUiTemplate_59803));
-    body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:59889",[[
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:59924",[!state.busy,() => update({ dialog: null })],__operitUiTemplate_59924),
-      ...staged.progress === null && staged.kind !== "chatActions" ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60102",[!state.busy,() => run(submit)],__operitUiTemplate_60102)] : []
-    ]],__operitUiTemplate_59889));
-    content.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60224",[!state.busy,() => {
+    if (staged.progress !== null) body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:59926",[`\u5DF2\u5220\u9664 ${staged.progress.deletedChatIds.length} \u6761\u5BF9\u8BDD
+` + staged.progress.failedChatIds.map((value) => value.chatId + ": " + value.error).join("\n"),staged.progress.failedChatIds.length === 0 ? colors.onSurface : colors.error],__operitUiTemplate_59926));
+    if (state.error !== "") body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60293",[state.error,colors.error],__operitUiTemplate_60293));
+    body.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60379",[[
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60414",[!state.busy,() => update({ dialog: null })],__operitUiTemplate_60414),
+      ...staged.progress === null && staged.kind !== "chatActions" ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60592",[!state.busy,() => run(submit)],__operitUiTemplate_60592)] : []
+    ]],__operitUiTemplate_60379));
+    content.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60714",[!state.busy,() => {
       if (!state.busy) update({ dialog: null });
-    },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60388",[body],__operitUiTemplate_60388)],__operitUiTemplate_60224));
+    },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60878",[body],__operitUiTemplate_60878)],__operitUiTemplate_60714));
   }
   const onLoad = prepared === null ? refresh : () => {
     void Promise.resolve().then(refresh).catch(() => {
@@ -970,9 +979,9 @@ function renderSidebarScreen(ctx) {
   };
   if (lazyItems !== null) {
     const viewport = { ...lazyItems.viewport, staticItemCount };
-    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60684",[viewport,onLoad,refreshInputs,content],__operitUiTemplate_60684);
+    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:61174",[viewport,onLoad,refreshInputs,content],__operitUiTemplate_61174);
   }
-  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:60909",[onLoad,refreshInputs,content],__operitUiTemplate_60909);
+  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:61399",[onLoad,refreshInputs,content],__operitUiTemplate_61399);
 }
 
 // src/ui-sidebar.ts
@@ -1147,41 +1156,41 @@ function __operitUiTemplate_31321(__ctx,__values){return __ctx.UI.HoverRegion({s
 function __operitUiTemplate_30968(__ctx,__values){return __ctx.UI.DragTarget({key:__values[0],acceptedTypes:[__values[1]],hoverBorderColor:__values[2],shape:{cornerRadius:__values[3]},onDrop:__values[4]},__values[5]); }
 function __operitUiTemplate_30744(__ctx,__values){return __ctx.UI.Column({key:__values[0],fillMaxWidth:true,paddingStart:__values[1],paddingEnd:__values[2],paddingTop:3,paddingBottom:3},__values[3]); }
 function __operitUiTemplate_33468(__ctx,__values){return __ctx.UI.Text({text:__values[0],height:__values[1],color:__values[2],fontSize:12,paddingHorizontal:20}); }
-function __operitUiTemplate_47161(__ctx,__values){return __ctx.UI.Icon({name:"MoreHoriz",size:16,tint:__values[0]}); }
-function __operitUiTemplate_46309(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,tooltip:"\u5BF9\u8BDD\u64CD\u4F5C",enabled:__values[1],items:[{label:"\u7F16\u8F91\u540D\u79F0",icon:"Edit"},{label:__values[2],icon:"PushPin"},{label:__values[3],icon:__values[4]},{label:"\u5220\u9664",icon:"DeleteOutline",danger:true}],onSelected:__values[5]},__values[6]); }
-function __operitUiTemplate_48648(__ctx,__values){return __ctx.UI.Icon({name:"MoreHorizRounded",size:16,tint:__values[0]}); }
-function __operitUiTemplate_47444(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,menuMaxWidth:138,tooltip:"\u5206\u7EC4\u64CD\u4F5C",enabled:__values[1],items:[{label:"\u65B0\u5EFA\u5BF9\u8BDD",icon:"AddCommentOutlined"},{label:"\u7F16\u8F91\u540D\u79F0",icon:"EditOutlined"},{label:__values[2],icon:__values[3]},{label:"\u5220\u9664",icon:"DeleteOutlineRounded",danger:true,dividerBefore:true}],onSelected:__values[4]},__values[5]); }
-function __operitUiTemplate_50030(__ctx,__values){return __ctx.UI.Icon({name:"MoreHorizRounded",size:16,tint:__values[0]}); }
-function __operitUiTemplate_49246(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,menuMaxWidth:138,tooltip:"\u5206\u7EC4\u64CD\u4F5C",items:__values[1],enabled:__values[2],onSelected:__values[3]},__values[4]); }
-function __operitUiTemplate_52975(__ctx,__values){return __ctx.UI.Icon({name:"AddRounded",size:17,tint:__values[0]}); }
-function __operitUiTemplate_53065(__ctx,__values){return __ctx.UI.Text(__values[0]); }
-function __operitUiTemplate_52549(__ctx,__values){return __ctx.UI.Row({key:"sidebar-new-chat",weight:1,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0],spacing:6},[__values[1],__values[2]]); }
-function __operitUiTemplate_53230(__ctx,__values){return __ctx.UI.Box({width:1,height:16,background:__values[0]}); }
-function __operitUiTemplate_54197(__ctx,__values){return __ctx.UI.Icon({name:"CreateNewFolderOutlined",size:16,tint:__values[0],contentDescription:"\u65B0\u5EFA\u5206\u7EC4"}); }
-function __operitUiTemplate_53337(__ctx,__values){return __ctx.UI.Row({key:"sidebar-new-group",width:38,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0]},__values[1]); }
-function __operitUiTemplate_52476(__ctx,__values){return __ctx.UI.Row({fillMaxSize:true,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
-function __operitUiTemplate_52233(__ctx,__values){return __ctx.UI.Surface({key:"sidebar-create-bar",weight:1,height:34,containerColor:__values[0],contentColor:__values[1],shape:{type:"pill"}},__values[2]); }
-function __operitUiTemplate_54783(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:17,tint:__values[1],contentDescription:__values[2]}); }
-function __operitUiTemplate_54358(__ctx,__values){return __ctx.UI.Row({key:"sidebar-search-toggle",width:34,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0],modifier:__values[1],background:__values[2]},__values[3]); }
-function __operitUiTemplate_52045(__ctx,__values){return __ctx.UI.Row({key:"sidebar-toolbar",fillMaxWidth:true,verticalAlignment:"center",spacing:8,paddingStart:14,paddingEnd:12,paddingBottom:8},[__values[0],__values[1]]); }
-function __operitUiTemplate_55042(__ctx,__values){return __ctx.UI.TextField(__values[0]); }
-function __operitUiTemplate_55384(__ctx,__values){return __ctx.UI.Text({key:"sidebar-error",text:__values[0],fontSize:11,color:__values[1],paddingHorizontal:20,paddingVertical:6}); }
-function __operitUiTemplate_56311(__ctx,__values){return __ctx.UI.LoadingIndicator({size:24}); }
-function __operitUiTemplate_56227(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,height:80,contentAlignment:"center"},__values[0]); }
-function __operitUiTemplate_56550(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:16,fontWeight:"600"}); }
-function __operitUiTemplate_57156(__ctx,__values){return __ctx.UI.TextField({key:"sidebar-group-name",value:__values[0],label:__values[1],onValueChange:__values[2],enabled:__values[3]}); }
-function __operitUiTemplate_57522(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:12}); }
-function __operitUiTemplate_58030(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,maxLines:2,style:"titleMedium",color:__values[1]}); }
-function __operitUiTemplate_58510(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
-function __operitUiTemplate_58614(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1,fontSize:14,color:__values[1]}); }
-function __operitUiTemplate_58377(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,paddingHorizontal:16,paddingVertical:10,verticalAlignment:"center",spacing:12},[__values[0],__values[1]]); }
-function __operitUiTemplate_58231(__ctx,__values){return __ctx.UI.Surface({fillMaxWidth:true,onClick:__values[0],shape:{cornerRadius:12},color:__values[1]},__values[2]); }
-function __operitUiTemplate_59436(__ctx,__values){return __ctx.UI.Text({key:"sidebar-delete-result",text:__values[0],fontSize:11,color:__values[1]}); }
-function __operitUiTemplate_59803(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1],fontSize:11}); }
-function __operitUiTemplate_59924(__ctx,__values){return __ctx.UI.TextButton({text:"\u53D6\u6D88",enabled:__values[0],onClick:__values[1]}); }
-function __operitUiTemplate_60102(__ctx,__values){return __ctx.UI.Button({text:"\u786E\u8BA4",enabled:__values[0],onClick:__values[1]}); }
-function __operitUiTemplate_59889(__ctx,__values){return __ctx.UI.Row({spacing:8},__values[0]); }
-function __operitUiTemplate_60388(__ctx,__values){return __ctx.UI.Column({padding:20,spacing:12,width:320},__values[0]); }
-function __operitUiTemplate_60224(__ctx,__values){return __ctx.UI.Dialog({key:"sidebar-edit-dialog",closeOnDismissRequest:__values[0],onDismissRequest:__values[1]},__values[2]); }
-function __operitUiTemplate_60684(__ctx,__values){return __ctx.UI.LazyColumn({key:"native-character-sidebar",fillMaxWidth:true,paddingBottom:16,spacing:0,viewport:__values[0],onLoad:__values[1],onInputsChanged:__values[2]},__values[3]); }
-function __operitUiTemplate_60909(__ctx,__values){return __ctx.UI.LazyColumn({key:"native-character-sidebar",fillMaxWidth:true,paddingBottom:16,spacing:0,onLoad:__values[0],onInputsChanged:__values[1]},__values[2]); }
+function __operitUiTemplate_47505(__ctx,__values){return __ctx.UI.Icon({name:"MoreHoriz",size:16,tint:__values[0]}); }
+function __operitUiTemplate_46653(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,tooltip:"\u5BF9\u8BDD\u64CD\u4F5C",enabled:__values[1],items:[{label:"\u7F16\u8F91\u540D\u79F0",icon:"Edit"},{label:__values[2],icon:"PushPin"},{label:__values[3],icon:__values[4]},{label:"\u5220\u9664",icon:"DeleteOutline",danger:true}],onSelected:__values[5]},__values[6]); }
+function __operitUiTemplate_48992(__ctx,__values){return __ctx.UI.Icon({name:"MoreHorizRounded",size:16,tint:__values[0]}); }
+function __operitUiTemplate_47788(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,menuMaxWidth:138,tooltip:"\u5206\u7EC4\u64CD\u4F5C",enabled:__values[1],items:[{label:"\u65B0\u5EFA\u5BF9\u8BDD",icon:"AddCommentOutlined"},{label:"\u7F16\u8F91\u540D\u79F0",icon:"EditOutlined"},{label:__values[2],icon:__values[3]},{label:"\u5220\u9664",icon:"DeleteOutlineRounded",danger:true,dividerBefore:true}],onSelected:__values[4]},__values[5]); }
+function __operitUiTemplate_50374(__ctx,__values){return __ctx.UI.Icon({name:"MoreHorizRounded",size:16,tint:__values[0]}); }
+function __operitUiTemplate_49590(__ctx,__values){return __ctx.UI.PopupMenu({key:__values[0],width:22,height:22,menuMaxWidth:138,tooltip:"\u5206\u7EC4\u64CD\u4F5C",items:__values[1],enabled:__values[2],onSelected:__values[3]},__values[4]); }
+function __operitUiTemplate_53319(__ctx,__values){return __ctx.UI.Icon({name:"AddRounded",size:17,tint:__values[0]}); }
+function __operitUiTemplate_53409(__ctx,__values){return __ctx.UI.Text(__values[0]); }
+function __operitUiTemplate_52893(__ctx,__values){return __ctx.UI.Row({key:"sidebar-new-chat",weight:1,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0],spacing:6},[__values[1],__values[2]]); }
+function __operitUiTemplate_53574(__ctx,__values){return __ctx.UI.Box({width:1,height:16,background:__values[0]}); }
+function __operitUiTemplate_54541(__ctx,__values){return __ctx.UI.Icon({name:"CreateNewFolderOutlined",size:16,tint:__values[0],contentDescription:"\u65B0\u5EFA\u5206\u7EC4"}); }
+function __operitUiTemplate_53681(__ctx,__values){return __ctx.UI.Row({key:"sidebar-new-group",width:38,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0]},__values[1]); }
+function __operitUiTemplate_52820(__ctx,__values){return __ctx.UI.Row({fillMaxSize:true,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_52577(__ctx,__values){return __ctx.UI.Surface({key:"sidebar-create-bar",weight:1,height:34,containerColor:__values[0],contentColor:__values[1],shape:{type:"pill"}},__values[2]); }
+function __operitUiTemplate_55127(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:17,tint:__values[1],contentDescription:__values[2]}); }
+function __operitUiTemplate_54702(__ctx,__values){return __ctx.UI.Row({key:"sidebar-search-toggle",width:34,height:34,verticalAlignment:"center",horizontalArrangement:"center",onClick:__values[0],modifier:__values[1],background:__values[2]},__values[3]); }
+function __operitUiTemplate_52389(__ctx,__values){return __ctx.UI.Row({key:"sidebar-toolbar",fillMaxWidth:true,verticalAlignment:"center",spacing:8,paddingStart:14,paddingEnd:12,paddingBottom:8},[__values[0],__values[1]]); }
+function __operitUiTemplate_55386(__ctx,__values){return __ctx.UI.TextField(__values[0]); }
+function __operitUiTemplate_55728(__ctx,__values){return __ctx.UI.Text({key:"sidebar-error",text:__values[0],fontSize:11,color:__values[1],paddingHorizontal:20,paddingVertical:6}); }
+function __operitUiTemplate_56655(__ctx,__values){return __ctx.UI.LoadingIndicator({size:24}); }
+function __operitUiTemplate_56571(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,height:80,contentAlignment:"center"},__values[0]); }
+function __operitUiTemplate_56894(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:16,fontWeight:"600"}); }
+function __operitUiTemplate_57500(__ctx,__values){return __ctx.UI.TextField({key:"sidebar-group-name",value:__values[0],label:__values[1],onValueChange:__values[2],enabled:__values[3]}); }
+function __operitUiTemplate_57866(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:12}); }
+function __operitUiTemplate_58374(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,maxLines:2,style:"titleMedium",color:__values[1]}); }
+function __operitUiTemplate_58854(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
+function __operitUiTemplate_58958(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1,fontSize:14,color:__values[1]}); }
+function __operitUiTemplate_58721(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,paddingHorizontal:16,paddingVertical:10,verticalAlignment:"center",spacing:12},[__values[0],__values[1]]); }
+function __operitUiTemplate_58575(__ctx,__values){return __ctx.UI.Surface({fillMaxWidth:true,onClick:__values[0],shape:{cornerRadius:12},color:__values[1]},__values[2]); }
+function __operitUiTemplate_59926(__ctx,__values){return __ctx.UI.Text({key:"sidebar-delete-result",text:__values[0],fontSize:11,color:__values[1]}); }
+function __operitUiTemplate_60293(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1],fontSize:11}); }
+function __operitUiTemplate_60414(__ctx,__values){return __ctx.UI.TextButton({text:"\u53D6\u6D88",enabled:__values[0],onClick:__values[1]}); }
+function __operitUiTemplate_60592(__ctx,__values){return __ctx.UI.Button({text:"\u786E\u8BA4",enabled:__values[0],onClick:__values[1]}); }
+function __operitUiTemplate_60379(__ctx,__values){return __ctx.UI.Row({spacing:8},__values[0]); }
+function __operitUiTemplate_60878(__ctx,__values){return __ctx.UI.Column({padding:20,spacing:12,width:320},__values[0]); }
+function __operitUiTemplate_60714(__ctx,__values){return __ctx.UI.Dialog({key:"sidebar-edit-dialog",closeOnDismissRequest:__values[0],onDismissRequest:__values[1]},__values[2]); }
+function __operitUiTemplate_61174(__ctx,__values){return __ctx.UI.LazyColumn({key:"native-character-sidebar",fillMaxWidth:true,paddingBottom:16,spacing:0,viewport:__values[0],onLoad:__values[1],onInputsChanged:__values[2]},__values[3]); }
+function __operitUiTemplate_61399(__ctx,__values){return __ctx.UI.LazyColumn({key:"native-character-sidebar",fillMaxWidth:true,paddingBottom:16,spacing:0,onLoad:__values[0],onInputsChanged:__values[1]},__values[2]); }
