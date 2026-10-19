@@ -16,9 +16,6 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use uuid::Uuid;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-/// Raised from 1MB: large command outputs (build logs, ssh sessions) were silently
-/// truncated by the ring buffer, losing information the AI needs. 16MB is still a
-/// bounded, memory-safe rolling window while covering realistic long-output commands.
 const PTY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 
