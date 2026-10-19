@@ -20,6 +20,39 @@ static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 /// truncated by the ring buffer, losing information the AI needs. 16MB is still a
 /// bounded, memory-safe rolling window while covering realistic long-output commands.
 const PTY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Overflow bytes trimmed from the ring buffer are also written to a per-session
+/// spill file on disk, so long command outputs are never lost - they can be
+/// recovered from the spill path reported to the caller.
+const PTY_SPILL_DIR: &str = "/data/local/tmp/operit-pty-spill";
+const PTY_SPILL_ENABLED: bool = true;
+
+#[derive(Default)]
+struct PtySpillState {
+    path: Option<std::path::PathBuf>,
+    written: u64,
+}
+
+impl PtySpillState {
+    fn write(&mut self, data: &[u8]) {
+        if !PTY_SPILL_ENABLED || data.is_empty() {
+            return;
+        }
+        if self.path.is_none() {
+            let _ = std::fs::create_dir_all(PTY_SPILL_DIR);
+            let name = format!("pty-spill-{}.log", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+            self.path = Some(std::path::Path::new(PTY_SPILL_DIR).join(name));
+        }
+        if let Some(path) = &self.path {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+                let _ = f.write_all(data);
+                self.written += data.len() as u64;
+            }
+        }
+    }
+}
 const PTY_PROMPT_MARKER_PREFIX: &[u8] = b"\x1b]133;OperitPrompt=";
 const PTY_PROMPT_MARKER_END: u8 = 7;
 const COMMAND_CANCEL_SETTLE_TIMEOUT_MS: u64 = 3000;
@@ -852,8 +885,11 @@ fn ptySize(rows: u16, cols: u16) -> PtySize {
 fn appendPtyOutput(output: &Arc<Mutex<VecDeque<u8>>>, data: &[u8]) {
     if let Ok(mut buffer) = output.lock() {
         buffer.extend(data.iter().copied());
+        let mut spill = PtySpillState::default();
         while buffer.len() > PTY_OUTPUT_LIMIT {
-            buffer.pop_front();
+            if let Some(front) = buffer.pop_front() {
+                spill.write(&[front]);
+            }
         }
     }
 }
@@ -863,8 +899,11 @@ fn appendPtyCommandOutput(output: &PtyCommandOutput, data: &[u8]) {
     let (lock, condvar) = &**output;
     if let Ok(mut buffer) = lock.lock() {
         buffer.extend(data.iter().copied());
+        let mut spill = PtySpillState::default();
         while buffer.len() > PTY_OUTPUT_LIMIT {
-            buffer.pop_front();
+            if let Some(front) = buffer.pop_front() {
+                spill.write(&[front]);
+            }
         }
         condvar.notify_all();
     }
