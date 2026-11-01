@@ -146,16 +146,16 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
 
       - name: Install TypeScript and pnpm
-        shell: bash
+        shell: pwsh
         run: |
           corepack enable
           npm install -g pnpm@10.7.0 typescript
-          mkdir -p .ci-tools/typescript
-          cd .ci-tools/typescript
+          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
+          Set-Location .ci-tools/typescript
           npm init -y
           npm install typescript
-          cd ../..
-          pnpm install || true
+          Set-Location ../..
+          pnpm install
       - name: Check build environment
         shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products app --github-runner
