@@ -1,0 +1,171 @@
+name: Build Operit2 Android APK (No-Secrets)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Android runtime build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison build-essential bzip2 ca-certificates curl diffutils flex gawk gzip patch pkg-config tar unzip xz-utils
+      - name: Fetch Android runtime sources
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
+      - name: Fetch Android NDK
+        run: bash tools/android-runtime/fetch_ndk_wsl.sh
+      - name: Build Android terminal runtime
+        run: |
+          export ANDROID_NDK_HOME="$HOME/.cache/operit-android-runtime/android-ndk-r29-beta4"
+          bash tools/android-runtime/build_android_tools_wsl.sh
+          bash tools/android-runtime/build_alpine_rootfs_wsl.sh
+      - name: Upload Android terminal runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: |
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-android:
+    needs: build-android-runtime
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FVM_VERSION: 4.3.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download Android terminal runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: apps/flutter/app/android/app/src/main
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.5
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install FVM
+        shell: pwsh
+        run: |
+          dart pub global activate fvm $env:FVM_VERSION
+          "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Install project Flutter SDK
+        working-directory: apps/flutter/app
+        shell: pwsh
+        run: fvm install --skip-pub-get
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+      - name: Prepare Android bindgen libclang
+        shell: pwsh
+        run: |
+          $version = "21.1.8"
+          $packageName = "libclang.runtime.win-x64.$version"
+          $toolsDir = "target/operit-build-tools"
+          $packageDir = Join-Path $toolsDir $packageName
+          $archive = Join-Path $toolsDir "$packageName.nupkg"
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/libclang.runtime.win-x64/$version" -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $packageDir -Force
+          $libclang = Join-Path $packageDir "runtimes/win-x64/native/libclang.dll"
+          if (-not (Test-Path -LiteralPath $libclang)) {
+            throw "Android bindgen libclang was not prepared at $libclang"
+          }
+      - name: Configure git for gitee.com access
+        shell: pwsh
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 0
+          git config --global http.lowSpeedTime 999999
+          git config --global core.compression 0
+      - name: Install TypeScript and Terser
+        shell: pwsh
+        run: |
+          npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.3.3
+          npm install --prefix .ci-tools/terser --no-audit --no-fund terser
+          ".ci-tools\typescript\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          ".ci-tools\terser\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          .ci-tools\typescript\node_modules\.bin\tsc.cmd --version
+      - name: Install pnpm and plugin dependencies
+        shell: pwsh
+        run: |
+          corepack enable pnpm
+          Get-ChildItem -Path plugins\packages -Recurse -Filter package.json -Depth 2 | ForEach-Object {
+            $dir = $_.DirectoryName
+            Write-Host "Installing deps in $dir"
+            Push-Location $dir
+            corepack pnpm install --no-frozen-lockfile --ignore-scripts 2>&1 | Out-Null
+            Pop-Location
+          }
+      - name: Generate Dart proxy artifacts
+        shell: pwsh
+        run: cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
+      - name: Generate debug signing material (no secrets needed)
+        shell: pwsh
+        run: |
+          $secretsDir = "tools/release/secrets"
+          New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
+          $keystore = Join-Path $secretsDir "operit2-release.keystore"
+          keytool -genkeypair -v -keystore $keystore -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 -alias operit-debug -storepass operit-debug-pass -keypass operit-debug-pass -dname "CN=Operit Debug Build, OU=Dev, O=Dev, L=Dev, ST=Dev, C=US"
+          @"
+          RELEASE_STORE_FILE=operit2-release.keystore
+          RELEASE_STORE_PASSWORD=operit-debug-pass
+          RELEASE_KEY_ALIAS=operit-debug
+          RELEASE_KEY_PASSWORD=operit-debug-pass
+          "@ | Set-Content -Path (Join-Path $secretsDir "android-signing.properties") -Encoding utf8
+      - name: Prepare Python for Gradle plugin sync
+        shell: pwsh
+        run: |
+          $venvScripts = ".venv\Scripts"
+          New-Item -ItemType Directory -Force -Path $venvScripts | Out-Null
+          $python = (Get-Command python).Source
+          Copy-Item $python (Join-Path $venvScripts "python.exe") -Force
+      - name: Check build environment
+        shell: pwsh
+        run: python tools/build_scripts/check_build_environment.py --products app --github-runner
+      - name: Build and package Android app
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$').Matches
+          if ($version.Count -ne 1) {
+            throw "apps/flutter/app/pubspec.yaml must contain exactly one release version line"
+          }
+          python tools/build_scripts/build_flutter_android.py --build-name $version[0].Groups[1].Value --build-number $version[0].Groups[2].Value --enforce-lockfile
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-${{ github.sha }}
+          path: tools/release/dist/operit2-app-android-arm64-v8a.apk
+          if-no-files-found: error
+          retention-days: 14
