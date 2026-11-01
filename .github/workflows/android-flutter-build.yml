@@ -150,11 +150,12 @@ jobs:
         run: |
           corepack enable
           npm install -g pnpm@10.7.0 typescript
-          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
-          Set-Location .ci-tools/typescript
-          npm init -y
-          npm install typescript
-          Set-Location ../..
+          $globalRoot = npm root -g
+          echo "NODE_PATH=$globalRoot" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path .ci-tools/typescript/node_modules/.bin | Out-Null
+          Copy-Item "$(npm prefix -g)/node_modules/typescript" -Destination .ci-tools/typescript/node_modules/typescript -Recurse -Force
+          $tscPath = "$(npm prefix -g)/node_modules/typescript/bin/tsc"
+          Set-Content -Path .ci-tools/typescript/node_modules/.bin/tsc.cmd -Value "@node `"$tscPath`" %*"
           pnpm install
       - name: Check build environment
         shell: pwsh
