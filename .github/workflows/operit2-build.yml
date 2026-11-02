@@ -161,7 +161,7 @@ jobs:
           $gnDir = "C:\gn"
           $ninjaDir = "C:\ninja"
           New-Item -ItemType Directory -Force -Path $gnDir, $ninjaDir | Out-Null
-          Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64" -OutFile "$env:TEMP\gn.zip"
+          Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+latest" -OutFile "$env:TEMP\gn.zip"
           Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force
           Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip" -OutFile "$env:TEMP\ninja.zip"
           Expand-Archive "$env:TEMP\ninja.zip" -DestinationPath $ninjaDir -Force
