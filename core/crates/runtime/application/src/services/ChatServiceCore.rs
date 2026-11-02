@@ -663,7 +663,7 @@ impl ChatServiceCore {
                 };
             }
         }
-        if turnOptions.continuation.is_none() && !turnOptions.chatInputSubmitRequestedHandled {
+        if turnOptions.continuation.is_none() && !turnOptions.chatInputSubmittedHandled {
             let mut context = self.buildChatInputHookContextAtEnd(&hookChatId, &messageText, &attachments,
                 replyToMessage.as_ref().map(|message| message.timestamp), CHAT_INPUT_EVENT_SUBMITTED);
             context.notifyReply = turnOptions.notifyReply != Some(false);
@@ -1593,6 +1593,11 @@ impl ChatServiceCore {
 
     pub fn updateChatPinned(&mut self, chatId: String, pinned: bool) {
         self.chatHistoryDelegate.updateChatPinned(chatId, pinned);
+    }
+
+    /// Promotes a child conversation to a root without changing its contents or bindings.
+    pub fn promoteChatToRoot(&mut self, chatId: String) -> Result<(), String> {
+        self.chatHistoryDelegate.promoteChatToRoot(chatId)
     }
 
     /// Reorders only real chat identifiers; all plugin grouping stays outside Core.
