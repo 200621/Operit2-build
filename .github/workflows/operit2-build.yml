@@ -8,11 +8,11 @@ permissions:
 
 jobs:
   build-android-runtime:
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     timeout-minutes: 60
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bison build-essential bzip2 ca-certificates curl diffutils flex gawk gzip patch pkg-config tar unzip xz-utils
       - name: Fetch Android runtime sources
-        shell: bash
+        shell: pwsh
         run: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
       - name: Fetch Android NDK
         run: bash tools/android-runtime/fetch_ndk_wsl.sh
@@ -46,7 +46,7 @@ jobs:
 
   build-android:
     needs: build-android-runtime
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       RUSTFLAGS: -Awarnings
@@ -75,13 +75,13 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Install FVM
-        shell: bash
+        shell: pwsh
         run: |
           dart pub global activate fvm $env:FVM_VERSION
           "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Install project Flutter SDK
         working-directory: apps/flutter/app
-        shell: bash
+        shell: pwsh
         run: fvm install --skip-pub-get
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -89,7 +89,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: aarch64-linux-android
       - name: Prepare Android bindgen libclang
-        shell: bash
+        shell: pwsh
         run: |
           $version = "21.1.8"
           $packageName = "libclang.runtime.win-x64.$version"
@@ -104,14 +104,14 @@ jobs:
             throw "Android bindgen libclang was not prepared at $libclang"
           }
       - name: Configure git for gitee.com access
-        shell: bash
+        shell: pwsh
         run: |
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
           git config --global core.compression 0
       - name: Install TypeScript and Terser
-        shell: bash
+        shell: pwsh
         run: |
           npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.3.3
           npm install --prefix .ci-tools/terser --no-audit --no-fund terser
@@ -119,7 +119,7 @@ jobs:
           ".ci-tools\terser\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           .ci-tools\typescript\node_modules\.bin\tsc.cmd --version
       - name: Install pnpm and plugin dependencies
-        shell: bash
+        shell: pwsh
         run: |
           corepack enable pnpm
           Get-ChildItem -Path plugins\packages -Recurse -Filter package.json -Depth 2 | ForEach-Object {
@@ -130,10 +130,10 @@ jobs:
             Pop-Location
           }
       - name: Generate Dart proxy artifacts
-        shell: bash
+        shell: pwsh
         run: cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
       - name: Generate debug signing material (no secrets needed)
-        shell: bash
+        shell: pwsh
         run: |
           $secretsDir = "tools/release/secrets"
           New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
@@ -146,17 +146,17 @@ jobs:
           RELEASE_KEY_PASSWORD=operit-debug-pass
           "@ | Set-Content -Path (Join-Path $secretsDir "android-signing.properties") -Encoding utf8
       - name: Prepare Python for Gradle plugin sync
-        shell: bash
+        shell: pwsh
         run: |
           $venvScripts = ".venv\Scripts"
           New-Item -ItemType Directory -Force -Path $venvScripts | Out-Null
           $python = (Get-Command python).Source
           Copy-Item $python (Join-Path $venvScripts "python.exe") -Force
       - name: Check build environment
-        shell: bash
+        shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products app --github-runner
       - name: Install GN and Ninja
-        shell: bash
+        shell: pwsh
         run: |
           # GN via pip
           pip install gnext
@@ -165,20 +165,20 @@ jobs:
             # fallback: download from Google Storage
             $gnDir = "C:\gn"
             New-Item -ItemType Directory -Force -Path $gnDir | Out-Null
-            curl.exe -sL -o "$env:TEMP\gn.zip" "https://storage.googleapis.com/chromium-gn/gn-linux-amd64.zip"
+            curl.exe -sL -o "$env:TEMP\gn.zip" "https://storage.googleapis.com/chromium-gn/gn-windows-amd64.zip"
             try { Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force } catch {}
             echo "$gnDir" >> $env:GITHUB_PATH
           }
           # Ninja
           $ninjaDir = "C:\ninja"
           New-Item -ItemType Directory -Force -Path $ninjaDir | Out-Null
-          curl.exe -sL -o "$env:TEMP\ninja.zip" "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.tar.gz"
-          tar xzf "$env:TEMP/ninja-linux.tar.gz" -C $ninjaDir
+          curl.exe -sL -o "$env:TEMP\ninja.zip" "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
+          tar xzf "$env:TEMP/ninja-win.zip" -C $ninjaDir
           echo "$ninjaDir" >> $env:GITHUB_PATH
           gn --version
           ninja --version
       - name: Build and package Android app
-        shell: bash
+        shell: pwsh
         run: |
           $version = (Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$').Matches
           if ($version.Count -ne 1) {
