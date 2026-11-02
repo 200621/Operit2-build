@@ -155,7 +155,21 @@ jobs:
       - name: Check build environment
         shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products app --github-runner
-      - name: Build and package Android app
+      - name: Install GN and Ninja
+      shell: pwsh
+      run: |
+        $gnDir = "C:\gn"
+        $ninjaDir = "C:\ninja"
+        New-Item -ItemType Directory -Force -Path $gnDir, $ninjaDir | Out-Null
+        Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64" -OutFile "$env:TEMP\gn.zip"
+        Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force
+        Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip" -OutFile "$env:TEMP\ninja.zip"
+        Expand-Archive "$env:TEMP\ninja.zip" -DestinationPath $ninjaDir -Force
+        echo "$gnDir" >> $env:GITHUB_PATH
+        echo "$ninjaDir" >> $env:GITHUB_PATH
+        gn --version
+        ninja --version
+    - name: Build and package Android app
         shell: pwsh
         run: |
           $version = (Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$').Matches
