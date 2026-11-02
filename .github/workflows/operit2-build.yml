@@ -8,11 +8,11 @@ permissions:
 
 jobs:
   build-android-runtime:
-    runs-on: windows-2025
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
       run:
-        shell: pwsh
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -158,23 +158,19 @@ jobs:
       - name: Install GN and Ninja
         shell: pwsh
         run: |
-          # GN via pip
           pip install gnext
           $gnPath = (Get-Command gn -ErrorAction SilentlyContinue).Source
           if (-not $gnPath) {
-            # fallback: download from Google Storage
             $gnDir = "C:\gn"
-            New-Item -ItemType Directory -Force -Path $gnDir | Out-Null
-            curl.exe -sL -o "$env:TEMP\gn.zip" "https://storage.googleapis.com/chromium-gn/gn-windows-amd64.zip"
+            $ninjaDir = "C:\ninja"
+            New-Item -ItemType Directory -Force -Path $gnDir, $ninjaDir | Out-Null
+            curl.exe -sL -o "$env:TEMP\gn.zip" "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+latest"
             try { Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force } catch {}
+            curl.exe -sL -o "$env:TEMP\ninja.zip" "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
+            Expand-Archive "$env:TEMP\ninja.zip" -DestinationPath $ninjaDir -Force
             echo "$gnDir" >> $env:GITHUB_PATH
+            echo "$ninjaDir" >> $env:GITHUB_PATH
           }
-          # Ninja
-          $ninjaDir = "C:\ninja"
-          New-Item -ItemType Directory -Force -Path $ninjaDir | Out-Null
-          curl.exe -sL -o "$env:TEMP\ninja.zip" "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
-          tar xzf "$env:TEMP/ninja-win.zip" -C $ninjaDir
-          echo "$ninjaDir" >> $env:GITHUB_PATH
           gn --version
           ninja --version
       - name: Build and package Android app
