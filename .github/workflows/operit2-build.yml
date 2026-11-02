@@ -49,6 +49,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 90
     env:
+      PYTHONUTF8: "1"
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
       FVM_VERSION: 4.3.0
@@ -77,7 +78,9 @@ jobs:
         shell: pwsh
         run: |
           dart pub global activate fvm $env:FVM_VERSION
+      PYTHONUTF8: "1"
           "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      PYTHONUTF8: "1"
       - name: Install project Flutter SDK
         working-directory: apps/flutter/app
         shell: pwsh
@@ -115,7 +118,9 @@ jobs:
           npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.3.3
           npm install --prefix .ci-tools/terser --no-audit --no-fund terser
           ".ci-tools\typescript\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      PYTHONUTF8: "1"
           ".ci-tools\terser\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      PYTHONUTF8: "1"
           .ci-tools\typescript\node_modules\.bin\tsc.cmd --version
       - name: Install pnpm and plugin dependencies
         shell: pwsh
