@@ -49,8 +49,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 90
     env:
-      PYTHONUTF8: "1"
       RUSTFLAGS: -Awarnings
+      PYTHONUTF8: "1"
       RUST_TOOLCHAIN_VERSION: 1.95.0
       FVM_VERSION: 4.3.0
     steps:
@@ -158,17 +158,17 @@ jobs:
       - name: Install GN and Ninja
         shell: pwsh
         run: |
-        $gnDir = "C:\gn"
-        $ninjaDir = "C:\ninja"
-        New-Item -ItemType Directory -Force -Path $gnDir, $ninjaDir | Out-Null
-        Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64" -OutFile "$env:TEMP\gn.zip"
-        Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force
-        Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip" -OutFile "$env:TEMP\ninja.zip"
-        Expand-Archive "$env:TEMP\ninja.zip" -DestinationPath $ninjaDir -Force
-        echo "$gnDir" >> $env:GITHUB_PATH
-        echo "$ninjaDir" >> $env:GITHUB_PATH
-        gn --version
-        ninja --version
+          $gnDir = "C:\gn"
+          $ninjaDir = "C:\ninja"
+          New-Item -ItemType Directory -Force -Path $gnDir, $ninjaDir | Out-Null
+          Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64" -OutFile "$env:TEMP\gn.zip"
+          Expand-Archive "$env:TEMP\gn.zip" -DestinationPath $gnDir -Force
+          Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip" -OutFile "$env:TEMP\ninja.zip"
+          Expand-Archive "$env:TEMP\ninja.zip" -DestinationPath $ninjaDir -Force
+          echo "$gnDir" >> $env:GITHUB_PATH
+          echo "$ninjaDir" >> $env:GITHUB_PATH
+          gn --version
+          ninja --version
       - name: Build and package Android app
         shell: pwsh
         run: |
