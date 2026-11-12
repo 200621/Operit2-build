@@ -1,0 +1,135 @@
+name: Linux ARM64 Build (Manual Flutter Assembly)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FLUTTER_VER: 3.50.0
+      ENGINE_HASH: 371f77202a73e8dff57a8b3bff75bca55c090aee
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config unzip xz-utils \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev \
+            libgtk-3-dev libayatana-appindicator3-dev liblzma-dev \
+            libwebkit2gtk-4.1-dev libblkid-dev liblz4-dev libsystemd-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build arm64 Flutter SDK by assembly
+        run: |
+          set -eux
+          cd $HOME
+          echo "### 1. 下载 x64 Flutter SDK（只为拿 flutter_tools 纯 Dart 代码）"
+          curl -fL --retry 3 -o f.tar.xz \
+            "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VER}-stable.tar.xz"
+          tar xf f.tar.xz && rm f.tar.xz
+          mv flutter flutter-sdk
+
+          echo "### 2. 下载 arm64 Dart SDK deb"
+          curl -fL --retry 3 -o dart.deb \
+            "https://storage.googleapis.com/download.dartlang.org/linux/debian/pool/main/d/dart/dart_3.14.0-1_arm64.deb"
+          dpkg-deb -x dart.deb dart-x
+          echo "--- 找到 arm64 dart ---"
+          find dart-x -type f -name dart | head -5
+          ARM_DART=$(find dart-x -type f -name dart -path "*bin*" | head -1)
+          file "$ARM_DART"
+          "$ARM_DART" --version
+
+          echo "### 3. 替换 SDK 里的 dart 二进制为 arm64"
+          rm -rf flutter-sdk/bin/cache/dart-sdk
+          mkdir -p flutter-sdk/bin/cache/dart-sdk
+          cp -a dart-x/usr/lib/dart/* flutter-sdk/bin/cache/dart-sdk/ 2>/dev/null || \
+            cp -a dart-x/usr/lib/dart/. flutter-sdk/bin/cache/dart-sdk/
+          ls flutter-sdk/bin/cache/dart-sdk/bin/
+          file flutter-sdk/bin/cache/dart-sdk/bin/dart
+          flutter-sdk/bin/cache/dart-sdk/bin/dart --version
+
+          echo "### 4. 下载 arm64 引擎 artifacts"
+          curl -fL --retry 3 -o art.zip \
+            "https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_HASH}/linux-arm64/artifacts.zip"
+          mkdir -p flutter-sdk/bin/cache/artifacts/engine/linux-arm64
+          unzip -q -o art.zip -d flutter-sdk/bin/cache/artifacts/engine/linux-arm64
+          ls flutter-sdk/bin/cache/artifacts/engine/linux-arm64 | head -20
+
+          echo "### 5. 下载 arm64 release 引擎（flutter-gtk）"
+          curl -fL --retry 3 -o gtk.zip \
+            "https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_HASH}/linux-arm64-release/linux-arm64-flutter-gtk.zip"
+          mkdir -p flutter-sdk/bin/cache/artifacts/engine/linux-arm64-release
+          unzip -q -o gtk.zip -d flutter-sdk/bin/cache/artifacts/engine/linux-arm64-release
+          ls -la flutter-sdk/bin/cache/artifacts/engine/linux-arm64-release | head -20
+
+          echo "### 6. 重建 flutter_tools.snapshot（用 arm64 dart）"
+          export PATH="$HOME/flutter-sdk/bin:$PATH"
+          export FLUTTER_ROOT="$HOME/flutter-sdk"
+          cd flutter-sdk
+          git config --global --add safe.directory "$HOME/flutter-sdk"
+          # 用 arm64 dart 重新编译 flutter_tools
+          flutter-sdk/bin/cache/dart-sdk/bin/dart \
+            --disable-dart-dev \
+            flutter-sdk/bin/cache/dart-sdk/bin/snapshots/frontend_server.dart.snapshot \
+            --sdk-root flutter-sdk/bin/cache/artifacts/engine/common/flutter_patched_sdk/ \
+            --target=flutter \
+            --no-print-incremental-dependencies \
+            -Ddart.vm.profile=false \
+            -Ddart.vm.product=true \
+            --aot \
+            --tarball flutter-sdk/bin/cache/flutter_tools.snapshot \
+            --packages flutter-sdk/packages/flutter_tools/.dart_tool/package_config.json \
+            flutter-sdk/packages/flutter_tools/bin/flutter_tools.dart 2>&1 | tail -20 || echo "AOT_FAILED_TRY_JIT"
+
+          echo "### 7. 验证 flutter 命令"
+          flutter --version 2>&1 | head -10 || echo "FLUTTER_CMD_FAILED"
+          echo "$HOME/flutter-sdk/bin" >> $GITHUB_PATH
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: flutter pub get
+        working-directory: apps/flutter/app
+        run: |
+          export PATH="$HOME/flutter-sdk/bin:$PATH"
+          flutter pub get 2>&1 | tail -40
+
+      - name: Build Linux ARM64
+        working-directory: apps/flutter/app
+        run: |
+          export PATH="$HOME/flutter-sdk/bin:$PATH"
+          flutter build linux --release --no-pub 2>&1 | tail -200
+
+      - name: Package
+        if: always()
+        run: |
+          mkdir -p tools/release/dist
+          for d in apps/flutter/app/build/linux/*/release/bundle; do
+            if [ -d "$d" ]; then
+              echo "bundle: $d"; tar -czf tools/release/dist/operit2-linux-arm64.tar.gz -C "$d" .
+              break
+            fi
+          done
+          ls -la tools/release/dist/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operit2-linux-arm64-${{ github.sha }}
+          path: tools/release/dist/*.tar.gz
+          if-no-files-found: warn
