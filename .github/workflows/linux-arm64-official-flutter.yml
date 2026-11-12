@@ -1,0 +1,96 @@
+name: Linux ARM64 App Build (Official Flutter)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            liblzma-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install official Flutter (arm64)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+
+      - name: Verify Flutter and engine artifacts
+        run: |
+          flutter --version
+          dart --version
+          echo "--- 检查 arm64 引擎产物 ---"
+          ls -la $(dirname $(which flutter))/cache/artifacts/engine/ | head -20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Resolve Dart dependencies (official Flutter)
+        working-directory: apps/flutter/app
+        run: |
+          flutter pub get
+        continue-on-error: true
+
+      - name: Show pub get result
+        if: always()
+        working-directory: apps/flutter/app
+        run: |
+          echo "=== pubspec.lock 是否生成 ==="
+          ls -la pubspec.lock 2>/dev/null || echo "无 lockfile"
+          echo "=== 检查是否有未解析的 ohos 依赖 ==="
+          grep -i "ohos" pubspec.lock 2>/dev/null | head -10 || echo "无 ohos 条目"
+
+      - name: Build Linux ARM64 app
+        working-directory: apps/flutter/app
+        run: |
+          flutter build linux --release --no-pub -v 2>&1 | tail -100
+
+      - name: Package artifact
+        run: |
+          mkdir -p tools/release/dist
+          BUNDLE=apps/flutter/app/build/linux/arm64/release/bundle
+          if [ ! -d "$BUNDLE" ]; then
+            BUNDLE=apps/flutter/app/build/linux/x64/release/bundle
+          fi
+          echo "Bundle 路径: $BUNDLE"
+          ls -la "$BUNDLE" | head -20
+          tar -czf tools/release/dist/operit2-app-linux-arm64.tar.gz -C "$BUNDLE" .
+          ls -la tools/release/dist/
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-linux-arm64-${{ github.sha }}
+          path: tools/release/dist/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
