@@ -1,0 +1,106 @@
+name: Linux ARM64 App Build (Manual Flutter)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FLUTTER_VERSION: 3.50.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            liblzma-dev \
+            libwebkit2gtk-4.1-dev \
+            libblkid-dev liblz4-dev libsystemd-dev
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download Flutter SDK (arm64) manually
+        run: |
+          set -e
+          cd $HOME
+          # 从官方 GCS 下载 arm64 版本
+          URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+          echo "下载: $URL"
+          curl -fL --retry 3 -o flutter.tar.xz "$URL"
+          ls -lh flutter.tar.xz
+          tar xf flutter.tar.xz
+          rm flutter.tar.xz
+          echo "$HOME/flutter/bin" >> $GITHUB_PATH
+          export PATH="$HOME/flutter/bin:$PATH"
+          git config --global --add safe.directory "$HOME/flutter"
+          flutter --version
+          dart --version
+
+      - name: Verify arm64 engine artifacts
+        run: |
+          export PATH="$HOME/flutter/bin:$PATH"
+          echo "=== Flutter 架构 ==="
+          file $HOME/flutter/bin/cache/dart-sdk/bin/dart
+          echo "=== 已下载的引擎产物 ==="
+          ls $HOME/flutter/bin/cache/artifacts/engine/ 2>/dev/null | head -20
+          echo "=== precache linux ==="
+          flutter precache --linux
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Resolve Dart dependencies
+        working-directory: apps/flutter/app
+        run: |
+          export PATH="$HOME/flutter/bin:$PATH"
+          flutter pub get 2>&1 | tail -30
+
+      - name: Build Linux ARM64 app
+        working-directory: apps/flutter/app
+        run: |
+          export PATH="$HOME/flutter/bin:$PATH"
+          flutter build linux --release --no-pub 2>&1 | tail -150
+
+      - name: Package artifact
+        if: always()
+        run: |
+          set +e
+          mkdir -p tools/release/dist
+          for d in apps/flutter/app/build/linux/*/release/bundle; do
+            if [ -d "$d" ]; then
+              echo "找到 bundle: $d"
+              ls -la "$d" | head -10
+              tar -czf tools/release/dist/operit2-app-linux-arm64.tar.gz -C "$d" .
+              break
+            fi
+          done
+          ls -la tools/release/dist/ 2>/dev/null
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-linux-arm64-${{ github.sha }}
+          path: tools/release/dist/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
